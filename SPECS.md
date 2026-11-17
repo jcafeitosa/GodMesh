@@ -162,12 +162,12 @@ Captura **regenerada em 17/11/2026** a partir dos 24 arquivos presentes. O hash 
 | SPEC-004-eventos-sincronizacao.md | `ce350188aaf38da269804782b617eefc9b6398912fdcd8f1c14a1eb62d128b6f` |
 | SPEC-005-dados-persistencia.md | `29a456dd7f48e381f7a7fa894466aac7894064def45e6d993841a9cbcc64cfc1` |
 | SPEC-006-sos-assistencia.md | `f34cc07fd5a894eccb250cea5a1d17182ad02b60cda88c2ecd3a760e6b9808aa` |
-| SPEC-007-voz-ptt-midia.md | `b0ac35ecb27236a2ef47dd76b97910c785a0c6da8240101045b3a0ad4e104a36` |
+| SPEC-007-voz-ptt-midia.md | `5b95529ef16a971e6ea9bf6819bfc1b7ebeef40f699ee0ad2382838ccb727ca6` |
 | SPEC-008-transcricao-asr.md | `da8523469b06b625116d227465a860eb2b32e4baf71e6c06d01cf26b0fa59e9a` |
 | SPEC-009-wifi.md | `309854e745931b91fef50966333dd79dc39c64805a929f923b0c875e77846161` |
 | SPEC-010-integracoes-bridges.md | `eb5cab37ac771ec133d9c25925041de661949fec322fd53b916e39cf4d659cf0` |
 | SPEC-011-localizacao-geoespacial.md | `4c0fd8cbc21a34198ce94cfc267e249b2e57474c1bcac48a076020f84d1ead4d` |
-| SPEC-012-produto-guardian.md | `b8323ff9576e3b69c6153f9b70669f156ed4b2e3e5bcb9302ced6efbe7f24667` |
+| SPEC-012-produto-guardian.md | `95cd9f744141e4b8c512d49faec008a16e4023ab0fa402e5e52e10490a9d1023` |
 | SPEC-013-experiencia-plataformas.md | `3e3735d23d3799fce928eaed6c284dd380ace7077caadc6e086b5983ad366db7` |
 | SPEC-014-cliente-offline-ffi.md | `af4751bad0b71069217ef75f3651df264a66a7c7969342c56fa6787961459f3d` |
 | SPEC-015-android-kotlin.md | `bbb04ec21cb4e7db95769ef8d689bca4364cccfb67c77382df3a780b3ef84b8e` |
@@ -179,4 +179,4 @@ Captura **regenerada em 17/11/2026** a partir dos 24 arquivos presentes. O hash 
 | SPEC-021-postgresql-recuperacao.md | `f717b77aecc7e33177b9af9ec77a0eac608f58b26bbc5bdd03871545cc11b19f` |
 | SPEC-022-produto-organizacoes.md | `cb39512fdc8e6cf5f043c026ea96c1d53f460291c1a3664c85deed88882b4c87` |
 | SPEC-023-capacidades-conectividade.md | `3a36c63860f4e75eb5ca707aaec20024beb907926ec8c4b5baebcc2ed67ba207` |
-| SPEC-024-crowdfind-beacon.md | `da17b0cd57480ea762d68ad8703307baa6392481b32a3afcbf5564e5eac4ae3e` |
+| SPEC-024-crowdfind-beacon.md | `32b8c5285886e4daf6a3a8f4e6c48ba36fa24fc64837d149cdec2ab3378100e8` |

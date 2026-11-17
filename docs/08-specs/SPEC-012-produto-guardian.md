@@ -1,6 +1,25 @@
 # SPEC-012 — Produto, contexto e Guardian
 
-**Versão:** DRAFT-0.8 · **Data:** 2026-11-17 · **Estado:** DRAFT/OPEN · **Autora documental:** Margaret Hamilton · **Revisão independente:** Ada Lovelace, revisão do delta desta versão solicitada; pendente. Não aprovada, implementada nem validada. Casos abaixo são planejados e `NOT_EXECUTED`; identificadores de teste formais `NOT_ASSIGNED`.
+**Versão:** DRAFT-0.9 · **Data:** 2026-11-17 · **Estado:** DRAFT/OPEN · **Autora documental:** Margaret Hamilton · **Revisão independente:** Ada Lovelace, revisão do delta desta versão solicitada; pendente. Não aprovada, implementada nem validada. Casos abaixo são planejados e `NOT_EXECUTED`; identificadores de teste formais `NOT_ASSIGNED`.
+
+
+## Superfície nativa exigida (ADR-068)
+
+Guardian depende de localização em segundo plano, que a web não entrega. Contratos:
+
+| Necessidade | Plugin/superfície | Regra |
+|---|---|---|
+| Localização contínua durante sessão ativa | plugin nativo de geolocalização em background | permissão "sempre" declarada e mostrada ao usuário; sem ela a sessão é criada com `location_mode=foreground_only` e a UI diz o que não será entregue |
+| Retomada após reinício do app/SO | restauração de sessão pelo plugin | sessão só retoma se o grant (ADR-059) ainda for válido no momento da retomada; sem prova, permanece `paused` |
+| Notificação de sessão ativa | plugin de notificação persistente | obrigatória no Android durante coleta; removê-la encerra a coleta |
+| Check-in e aviso de atraso | notificação local do plugin | atraso nunca vira SOS (ADR-042) |
+
+Teste negativo: iniciar sessão sem permissão de background → sessão criada em modo limitado, trajetória vazia declarada, sem inventar posição.
+
+## Mudanças desta versão (ADR-068)
+
+- Guardian passa a depender de **plugin nativo de localização em background**; `foreground_only` é estado declarado, não falha silenciosa.
+- O que não muda: convite/prazo/revogação (ADR-042), 50 km em chat (ADR-041), retenção da sessão (ADR-065: 7 dias após o fim).
 
 ## 1. Fontes e cobertura
 

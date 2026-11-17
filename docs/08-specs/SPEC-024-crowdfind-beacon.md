@@ -1,6 +1,25 @@
 # SPEC-024 — CrowdFind e Beacon
 
-**DRAFT-0.4 · 2026-11-17 · Autor documental: Jack Ganssle · Revisão independente designada: Bruce Schneier, pendente.** Aprovação pendente. Casos planejados `NOT_EXECUTED`. Este documento não autoriza implementação. **Mudanças desta versão:** casos por decisão (resposta ao veto C3-1); casos por requisito e casos P desbloqueados (C3-1); DRAFT-0.4 reformula `S024-059-P` para não depender de frescor/TTL/fila OPEN (esperado `param_not_configured`/negado) e preserva o positivo em `S024-059-P2`, restrito ao caso com parâmetro declarado.
+**DRAFT-0.5 · 2026-11-17 · Autor documental: Jack Ganssle · Revisão independente designada: Bruce Schneier, pendente.** Aprovação pendente. Casos planejados `NOT_EXECUTED`. Este documento não autoriza implementação. **Mudanças desta versão:** casos por decisão (resposta ao veto C3-1); casos por requisito e casos P desbloqueados (C3-1); DRAFT-0.4 reformula `S024-059-P` para não depender de frescor/TTL/fila OPEN (esperado `param_not_configured`/negado) e preserva o positivo em `S024-059-P2`, restrito ao caso com parâmetro declarado.
+
+
+## Superfície nativa exigida (ADR-068)
+
+Beacon e observação são BLE: a web não expõe BLE de forma utilizável em segundo plano.
+
+| Necessidade | Plugin/superfície | Regra |
+|---|---|---|
+| Anunciar beacon rotativo | plugin BLE nativo (advertiser) | token rotativo assinado; anúncio limitado ao tempo da sessão; sem identificador persistente |
+| Observar avistamentos | plugin BLE nativo (scanner) | opt-in separado; varredura em segundo plano declarada por SO; nunca varredura indiscriminada de terceiros |
+| Continuação após suspensão do app | serviço/restauração do SO | estado observado é exibido; ausência de avistamento permanece `unknown`, não "não está lá" |
+| Web sem shell | nenhuma | CrowdFind fica **indisponível** no cliente web puro; a UI declara a limitação |
+
+Teste negativo: cliente web sem shell tentando anunciar → recurso declarado indisponível, sem simulação de anúncio. Teste negativo: SO restringe background → nenhuma promessa de continuidade.
+
+## Mudanças desta versão (ADR-068)
+
+- CrowdFind passa a exigir **plugin BLE nativo**; cliente web puro não oferece o recurso e diz isso.
+- O que não muda: RF-030, ADR-043/044 (token rotativo, sem GMC/GMI/coordenada), antiabuso e retenção (token 15 min; avistamento 24 h — ADR-065).
 
 ## 1. Origem, objetivo e rastreabilidade
 

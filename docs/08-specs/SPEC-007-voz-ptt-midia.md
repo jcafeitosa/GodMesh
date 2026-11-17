@@ -1,11 +1,31 @@
 # SPEC-007 — Voz PTT e mídia nativa
 
-**Versão:** DRAFT-0.5 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
+**Versão:** DRAFT-0.6 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
 **Autora documental:** Radia Perlman · **Revisor designado:** Vint Cerf  
 O parecer existente refere-se ao DRAFT-0.1. Revisão independente do DRAFT-0.3 pendente. Execução: `NOT_EXECUTED`. Metas quantitativas: **OPEN — a medir**.
 
 **Requisitos cobertos nesta versão:** RF-005 (voz nativa, PTT, grupos, prioridade e canais); RNF-007 (mídia não transportada pelo event bus; medições planejadas de jitter, perda, reconexão e floor control).  
 **Cobertura:** parcial. A SPEC não pretende especificar toda a voz, transporte, bridges, ASR, SOS, QoS ou experiência de plataforma. Casos de teste ainda `NOT_ASSIGNED`; execução `NOT_EXECUTED`.
+
+
+## Superfície nativa exigida (ADR-068)
+
+O cliente é web empacotado em Tauri 2; a voz não depende de API web em segundo plano. Contratos obrigatórios dos plugins nativos:
+
+| Necessidade | Plugin/superfície | Regra |
+|---|---|---|
+| Captura e reprodução de áudio com app em segundo plano | plugin nativo de áudio por plataforma (iOS: sessão de áudio + modo de background declarado; Android: serviço em primeiro plano com tipo `microphone`/`mediaPlayback`) | TX sem sessão de áudio ativa e comprovada é negada; a UI mostra `audio_session=unavailable` |
+| Roteamento de dispositivo (fone, Bluetooth, alto-falante) | API do SO via plugin | troca de rota durante TX gera evento e reavaliação de floor; não reinicia áudio silenciosamente |
+| Interrupção do SO (chamada, alarme, outro app) | evento de interrupção do plugin | TX é encerrado e o evento é registrado; retomada exige novo pedido de floor |
+| Tecla física / push-to-talk externo | plugin de atalho/tecla | opcional por plataforma; ausência é declarada, não simulada |
+| Foco de áudio e Duck/Ducking | API do SO via plugin | política declarada por canal; nunca presumir |
+
+Nenhuma tela chama API de áudio do navegador para PTT: `getUserMedia` só é aceito no cliente web sem shell, e nesse caso o PTT é declarado **limitado a primeiro plano**. Teste negativo: tentar TX em segundo plano sem plugin → negado com estado observável, sem buffer fantasma.
+
+## Mudanças desta versão (ADR-068)
+
+- Voz deixa de depender de "cliente nativo SwiftUI/Android" e passa a exigir **plugin nativo de áudio** no cliente web+Tauri; PTT em segundo plano é capacidade declarada, não presumida.
+- O que não muda: floor/lease (ADR-058/007-A…C), `confidentiality` (ADR-060), mídia fora do event bus (RNF-007), retenção de áudio (ADR-065, não retido por padrão).
 
 ## Mudanças desta versão
 
