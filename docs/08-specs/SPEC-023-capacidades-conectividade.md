@@ -1,11 +1,15 @@
 # SPEC-023 — Capacidades, conectividade e contingência
 
-**Versão:** DRAFT-0.7
+**Versão:** DRAFT-0.8
 **Data:** 2026-11-17
 **Autor documental:** Gregor Hohpe
 **Revisão independente designada:** Vint Cerf — pendente
 **Estado:** proposta em rascunho, sem aprovação ou autorização de implementação.
 **Mudanças desta versão:** casos por decisão (resposta ao veto C3-1); casos por requisito e casos P desbloqueados (C3-1).
+
+## Gate de operação offline (ADR-064)
+
+Toda operação offline condicional — inclusive abrir incidente SOS — exige F1/F2/F3 demonstrado; sem raiz de confiança a operação é negada, nada é enfileirado e a UI informa indisponibilidade antes do acionamento.
 
 ## 1. Objetivo, escopo e rastreabilidade
 

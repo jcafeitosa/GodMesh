@@ -1,6 +1,6 @@
 # SPEC-001 — Arquitetura do núcleo, federação e compatibilidade
 
-**Versão:** DRAFT-0.7, 2026-11-17. **Estado:** DRAFT / OPEN; não aprovada nem pronta para implementação. **Autor documental:** Martin Fowler; **revisor independente designado:** Erich Gamma, revisão de DRAFT-0.4 pendente. Alan Turing consolida; Ada Lovelace mantém índice. IDs de casos futuros abaixo são locais a esta SPEC e descrevem cenários planejados, não testes executados. Observado: NOT_EXECUTED.
+**Versão:** DRAFT-0.8, 2026-11-17. **Estado:** DRAFT / OPEN; não aprovada nem pronta para implementação. **Autor documental:** Martin Fowler; **revisor independente designado:** Erich Gamma, revisão de DRAFT-0.4 pendente. Alan Turing consolida; Ada Lovelace mantém índice. IDs de casos futuros abaixo são locais a esta SPEC e descrevem cenários planejados, não testes executados. Observado: NOT_EXECUTED.
 
 ## Clientes e residência (ADR-066/068)
 
@@ -120,6 +120,8 @@ Próximas versões devem confrontar as SPECs especializadas após publicação e
 
 **Histórico de revisão:** Erich revisou DRAFT-0.1, SHA-256 `da844458cb6f913be73ff57a6e418dfe511b0f44323af4f98418e84609878024`, em `contribuicao-erich-gamma.md` §Revisão SPEC-001 DRAFT-0.1. Sem divergência material nos recortes examinados; M-1 apontou ambiguidade do hash histórico. DRAFT-0.2 esclareceu exclusivamente esse metadado; a revisão de 0.1 não equivale à revisão ou aprovação de 0.2. DRAFT-0.3 integra o limite de plataforma/cliente e a dependência documental dos pareceres desktop e estado/FFI; revisão independente desta versão pendente. Nenhuma revisão anterior equivale à aprovação desta versão.
 
+> **ADR-064:** sem F1/F2/F3 demonstrado, nenhuma operação offline é executada nem enfileirada — inclusive SOS. Ver `decisoes.md` ADR-064 e SPEC-002 §6.3.
+
 ## Casos por decisão (ADR-056…063)
 
 Casos locais desta SPEC, propostos nesta versão. `Estado` é sempre `NOT_EXECUTED` e o ID formal é `NOT_ASSIGNED`; nenhum caso foi executado, automatizado ou vinculado a teste existente. `Tipo`: P positivo, N negativo, B borda, F falha/recuperação. Onde o parâmetro é OPEN, o esperado é negar ou informar desconhecido; nenhum valor numérico é inventado.
@@ -140,7 +142,7 @@ Casos locais desta SPEC, propostos nesta versão. `Estado` é sempre `NOT_EXECUT
 | S001-058-N2 | ADR-058 | Confirmação enviada sem `ack_class` | Cliente e API processam a resposta | Resposta tratada como inválida: nenhuma classe presumida e registro local `unknown` | N | NOT_EXECUTED / NOT_ASSIGNED |
 | S001-058-F1 | ADR-058 | Envio sem erro observável e sem recibo do destino | Tentar marcar `delivered_to_device` por ausência de erro ou por timeout | Recusado; resultado `outcome_unknown` com consulta/reconciliação obrigatória; classe não sobe | F | NOT_EXECUTED / NOT_ASSIGNED |
 | S001-058-B1 | ADR-058 | Cópia com Inbox em ledger separado da projeção confirmou o prefixo | Pedido de ACK `materialized` | ACK máximo `persisted_local`; projeção permanece `pending` e não é inferida | B | NOT_EXECUTED / NOT_ASSIGNED |
-| S001-059-P1 | ADR-059 | Grant offline válido para operação enumerada; limite de frescor do perfil pode estar declarado ou não | Abrir incidente SOS local e enfileirar | Com limite de frescor declarado, operação aceita localmente, item enfileirado com `ack_class=persisted_local` e nenhum efeito federado; sem limite configurado, `param_not_configured` e negativa sem efeito | P | NOT_EXECUTED / NOT_ASSIGNED |
+| S001-059-P1 | ADR-059/064 | Grant offline válido para operação enumerada; limite de frescor declarado **e F1/F2/F3 demonstrado (ADR-064)** | Abrir incidente SOS local e enfileirar | Com frescor declarado e raiz de confiança demonstrada, operação aceita localmente, item enfileirado com `ack_class=persisted_local` e nenhum efeito federado; sem limite configurado, `param_not_configured` e negativa sem efeito | P | NOT_EXECUTED / NOT_ASSIGNED |
 | S001-059-N1 | ADR-059 | Grant offline válido | Pedir operação fora da lista enumerada (mutação federada, localização precisa, RF, transcrição remota) | Negado sem efeito; nenhuma rota federal criada e nenhum grant ampliado | N | NOT_EXECUTED / NOT_ASSIGNED |
 | S001-059-N2 | ADR-059 | Grant com `epoch` incomparável ou revogação desconhecida no destino | Executar uma das cinco operações locais permitidas | Negado com `stale_epoch` ou `revocation_state_unknown`; nenhum side effect e nenhuma marca de sucesso | N | NOT_EXECUTED / NOT_ASSIGNED |
 | S001-059-B1 | ADR-059 | Limite de frescor por perfil ainda não medido (OPEN) | Operação condicional offline | Negado e informado como frescor não definido; nenhum TTL presumido ou configurado | B | NOT_EXECUTED / NOT_ASSIGNED |

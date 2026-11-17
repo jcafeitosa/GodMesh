@@ -1,6 +1,6 @@
 # SPEC-011 — Localização geoespacial
 
-**Versão:** DRAFT-0.8  
+**Versão:** DRAFT-0.10  
 **Data:** 2026-11-17  
 **Estado:** DRAFT / OPEN. Não aprovada.  
 **Autor documental:** Paul Ramsey  
@@ -184,6 +184,8 @@ Os IDs GEO-OPEN identificam lacunas locais desta SPEC, não requisitos RF/RNF, t
 
 Não verifiquei execução, código, banco, APIs existentes, hardware, comportamento de sistema operacional, testes de produto, custos, conformidade legal ou remoção de dados. A SPEC permanece parcial até resolver OPENs e receber revisão. DRAFT não significa aprovado; aprovação normativa, implementação e validação permanecem estados distintos.
 
+> **ADR-064:** operação offline condicional (inclusive SOS) exige F1/F2/F3 demonstrado; sem raiz de confiança, negado e nada enfileirado.
+
 ## Casos por decisão (ADR-056…063)
 
 Casos documentais planejados; nenhum parâmetro ausente foi preenchido. ID formal: `NOT_ASSIGNED`. `Estado` observado em todos: `NOT_EXECUTED`. Quando um parâmetro estiver OPEN, o esperado é negar ou informar desconhecido, nunca um número inventado. Nenhum caso constitui aprovação, implementação ou evidência.
@@ -202,7 +204,7 @@ Casos documentais planejados; nenhum parâmetro ausente foi preenchido. ID forma
 | S011-058-N1 | ADR-058 | Resposta com `ack_class=persisted_local` | Tentativa de renderizar/derivar entrega a destinatário ou ACK humano | Escalada rejeitada; superfície mostra apenas a classe recebida; nenhum campo `delivered`/`acknowledged_human` é preenchido por ausência de erro | N | NOT_EXECUTED |
 | S011-058-F1 | ADR-058 | Commit local ocorreu, confirmação se perdeu por timeout | Consulta de resultado após timeout | Resultado `unknown`/`outcome_unknown`; observação permanece pendente; nenhum estado de sucesso por omissão | F | NOT_EXECUTED |
 | S011-058-B1 | ADR-058 | Resposta de ingestão sem campo `ack_class` | Consumo por cliente/UI | Tratada como `unknown`; bloqueada para exibição de entrega; nenhuma classe inferida por tempo | B | NOT_EXECUTED |
-| S011-059-P1 | ADR-059 | Offline; grant assinado válido para "registrar observação de localização local"; epoch comparável, sem revogação conhecida; **limite de frescor não decidido** (OPEN) | Registro de observação local | Esperado reformulado com parâmetro ausente: frescor reportado como `param_not_configured`; observação mantida como pendente local com `authorization=unknown`, sem `authorization=valid` presumido; nenhuma divulgação a outro principal e nenhum prazo inventado. `S011-059-B1` cobre a negativa quando a política exigir frescor decidido | P | NOT_EXECUTED |
+| S011-059-P1 | ADR-059/064 | Offline com **F1/F2/F3 demonstrado** (sem raiz de confiança, negado e nada enfileirado); grant assinado válido para "registrar observação de localização local"; epoch comparável, sem revogação conhecida; **limite de frescor não decidido** (OPEN) | Registro de observação local | Esperado reformulado com parâmetro ausente: frescor reportado como `param_not_configured`; observação mantida como pendente local com `authorization=unknown`, sem `authorization=valid` presumido; nenhuma divulgação a outro principal e nenhum prazo inventado. `S011-059-B1` cobre a negativa quando a política exigir frescor decidido | P | NOT_EXECUTED |
 | S011-059-N1 | ADR-059 | Offline; pedido de divulgar localização precisa ou de mutação federada | Solicitação da operação não enumerada | Negado com estado `denied`; zero entradas na outbox; nenhuma exceção para SOS presumida | N | NOT_EXECUTED |
 | S011-059-F1 | ADR-059 | Grant `stale`, `unknown`, relógio incerto ou revogação conhecida recebida após snapshot | Nova tentativa de operação condicional | Negação com `authorization=unknown`/`stale`; operação não enfileirada; nenhum número de frescor suposto | F | NOT_EXECUTED |
 | S011-059-F2 | ADR-059 | Restore de snapshot antigo contendo grant ainda na validade, ou grant com `epoch` anterior | Uso do grant restaurado | Anti-rollback detectado: grant negado, contador monotônico não regride, operação recusada | F | NOT_EXECUTED |

@@ -1,6 +1,6 @@
 # SPEC-014 — Cliente offline e fronteira de comandos Tauri
 
-**Versão:** DRAFT-0.8  
+**Versão:** DRAFT-0.9  
 **Estado:** DRAFT / OPEN — não aprovada; nenhuma implementação ou validação é afirmada.  
 **Autor documental:** Alex Crichton  
 **Revisor independente designado:** Donny Wals; revisão desta versão pendente.  
@@ -336,7 +336,7 @@ Revisões de Donny e Chet citadas no cabeçalho e em §14 são de versões anter
 
 ## Mudanças desta versão — ADR-058 e ADR-059
 
-**ADR-059 — grant offline:** são permitidas apenas estas cinco operações: (1) abrir incidente SOS local e enfileirar; (2) check-in de sessão Guardian existente; (3) mensagem a canal já autorizado; (4) observação de localização local; (5) PTT em rede local com grant de floor válido. Negações explícitas: divulgar localização precisa, mutação federada, criar/alterar grant, mudar identidade, transmitir RF ou executar transcrição remota.
+**ADR-059 — grant offline:** são permitidas apenas estas cinco operações: (1) abrir incidente SOS local e enfileirar somente com F1/F2/F3 demonstrados — sem raiz de confiança, negado e nada enfileirado (ADR-064); (2) check-in de sessão Guardian existente; (3) mensagem a canal já autorizado; (4) observação de localização local; (5) PTT em rede local com grant de floor válido. Negações explícitas: divulgar localização precisa, mutação federada, criar/alterar grant, mudar identidade, transmitir RF ou executar transcrição remota.
 
 A permissão exige epoch comparável, frescor do perfil dentro do limite aplicável, ausência de revogação conhecida e estado anti-rollback verificável. `stale`, `unknown`, relógio incerto ou política indefinida negam. O valor numérico de frescor é desconhecido até medição; não há limiar definido nesta SPEC. A recuperação/replay reavalia esses predicados antes de qualquer efeito.
 
@@ -362,7 +362,7 @@ Casos documentais planejados. ID formal: `NOT_ASSIGNED`. `Estado` em todos: `NOT
 | S014-057-N1 | ADR-057 | Item de fila com cursor sem `partition` ou com epoch incomparável | Tentativa de replay | Item rejeitado e marcado com erro de cursor; não é traduzido, não é reenviado como atual; fila não avança nesse item | N | NOT_EXECUTED |
 | S014-057-F1 | ADR-057 | `authority_epoch` mudou entre persistência e replay | Replay do item | Falha fechada; item marcado `desconhecido`; nenhum item seguinte ultrapassa a lacuna | F | NOT_EXECUTED |
 | S014-057-B1 | ADR-057 | Dois itens locais com mesma `seq` em partições distintas | Consulta da fila | Chaves distintas; nenhum item deduplicado por chave sem partição; ordem canônica mantida | B | NOT_EXECUTED |
-| S014-058-P1 | ADR-058 | Operação offline-capaz; gravação local confirmada | Enfileirar operação | Estado `pendente local` com classe `persisted_local`; nenhum campo de envio, entrega ou ACK humano preenchido | P | NOT_EXECUTED |
+| S014-058-P1 | ADR-058/064 | Operação offline-capaz; gravação local confirmada **e F1/F2/F3 demonstrado** | Enfileirar operação | Estado `pendente local` com classe `persisted_local`; nenhum campo de envio, entrega ou ACK humano preenchido | P | NOT_EXECUTED |
 | S014-058-N1 | ADR-058 | Item apenas gravado localmente | Tentativa de exibir/retornar "enviado" ou "entregue" | Estado mantido em `não submetido`/`pendente local`; promoção de classe rejeitada pela fronteira local | N | NOT_EXECUTED |
 | S014-058-F1 | ADR-058 | Envio realizado; timeout sem resposta | Consulta de resultado | Resultado `desconhecido`; timeout não é rejeição nem sucesso; item permanece com estado incerto | F | NOT_EXECUTED |
 | S014-058-B1 | ADR-058 | Inbox local separado da projeção | Leitura do estado de sincronização | ACK máximo `persisted_local`; nenhum `materialized` reportado; separação visível nas dimensões | B | NOT_EXECUTED |

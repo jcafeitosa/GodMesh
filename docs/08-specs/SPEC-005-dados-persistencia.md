@@ -1,6 +1,6 @@
 # SPEC-005 — Dados, isolamento e persistência
 
-- **Versão:** DRAFT-0.8, 2026-11-17. **Estado:** DRAFT / OPEN; não aprovada nem pronta para implementação.
+- **Versão:** DRAFT-0.9, 2026-11-17. **Estado:** DRAFT / OPEN; não aprovada nem pronta para implementação.
 - **Autor documental:** Michael Stonebraker. **Revisor independente designado:** Bruce Momjian; revisão independente de DRAFT-0.1 registrada; revisão focal de DRAFT-0.2 realizada; revisão do delta DRAFT-0.3 pendente. **Consolidação:** Alan Turing.
 - **Rastreabilidade:** RF-002, comportamento de ativos/dispositivos/endpoints. Interfaces com RF-013/RF-016 e RNF-017 para cópias e sincronização; não se atribui cobertura integral desses requisitos a esta SPEC. Demais requisitos por classe de dado e cópia: OPEN com Ada/produto; não inferir vínculos. IDs de casos: NOT_ASSIGNED. Execução/observado: NOT_EXECUTED.
 

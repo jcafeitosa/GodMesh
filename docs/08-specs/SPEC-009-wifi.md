@@ -1,10 +1,12 @@
 # SPEC-009 — Wi-Fi AutoDiscover, AutoShare e AutoConnect
 
-**Versão:** DRAFT-0.7
+**Versão:** DRAFT-0.9
 **Estado:** DRAFT / OPEN
 **Autor:** Jouni Malinen  
 **Revisor independente designado:** Richard Bejtlich  
 **Data:** 2026-11-17
+
+> **ADR-064:** operação offline condicional (inclusive SOS) exige F1/F2/F3 demonstrado; sem raiz de confiança, negado e nada enfileirado.
 
 ## Superfície nativa exigida (ADR-068)
 
@@ -192,7 +194,7 @@ Todos os IDs abaixo são rótulos internos deste rascunho, não casos cadastrado
 | B07: mapeamento e idempotência | chave por operação/recurso/grant; dedupe de evento separado da idempotência da API; operação atômica local vs estágio/cópia distribuído | Jouni + Graydon; Kleppmann/Michael/Leslie para distribuição | Definir escopo/retensão da chave, concorrência, versões, conflitos, retry pós-revogação e recibo mínimo |
 | Estados/eventos | manter eventos tipados por fase vs consolidar enum; nomes atuais divergem | Jouni + Graydon; matriz/Ada | Crosswalk aprovado entre arquitetura, domínio, API/GMP e consumidores; sem semântica inferida |
 | Autoridade/consentimento | controlador, titular ou autoridade regional podem ter poderes distintos | Kim + Bruce + administrador/usuário | Prova, escopo, delegação, validade, contestação e negativas definidos |
-| Retenção/jurisdição | política parametrizada por classe e oferta hospedada/autogerida; jurisdição não foi escolhida | Bruce + Michael + autoridade competente | Finalidade, gatilho, duração, descarte, cópias/backup, auditoria e região aprovados |
+| Retenção/jurisdição | política parametrizada por classe e oferta hospedada/autogerida; jurisdição é Brasil (primária) e Colômbia (secundária), ADR-066 | Bruce + Michael + autoridade competente | Finalidade, gatilho, duração, descarte, cópias/backup, auditoria e região aprovados |
 | Controladores/RADIUS/EAP | integrações diferem; capacidade pode faltar | Jouni + Graydon + Kim; fornecedor ainda não selecionado | Fonte primária por modelo/versão, prova, sessão, rotação, revogação e falha documentadas |
 | Telemetria e resposta | evento por domínio; cobertura sem limiar; contenção limitada por tenant/AP/região | Jouni + Brendan; Bruce/Richard revisam; Alan encaminha autoridade | Schema, redaction, anti-sampling, audiência, denominador, janela, owner/plantão, autorização, confirmação e recuperação definidos |
 | Correlator | aleatório por evento ou pseudônimo derivado; resolução central ou por serviço | Jouni + Brendan; Bruce/Michael/Alan decidem política | Namespace, finalidade, autoridade emissora, validade/rotação, audiência, trilha de leitura e falhas aprovados |
