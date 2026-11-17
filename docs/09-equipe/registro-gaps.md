@@ -147,3 +147,14 @@ Nenhuma SPEC aprovada; nenhum código; nenhum teste executado; nenhum número de
 | Divergências de vocabulário D1/D4 | fechadas; D2, D3, D5–D9 abertas | `07-contratos/autoridade-contratos.md` §4 |
 | Aprovação de SPEC | **não** | exige revisão independente por hash das versões atuais |
 | Implementação | **não iniciada** | gate de planejamento e aprovação integral segue em vigor |
+
+## 14. Gate de aprovação — 17/11/2026
+
+| Item | Estado |
+|---|---|
+| Crítica independente | 5 rodadas (C3, C4, gate v2, v3, v4) sobre as 24 SPECs |
+| Correções aplicadas no ciclo | 113 gaps classificados; 15 defeitos documentais; contradições de retenção, SOS offline e plataforma eliminadas |
+| Decisão do CTO | 24 SPECs aprovadas no **gate técnico** para iniciar implementação sob SDD+TDD — `docs/09-equipe/aprovacoes.md` |
+| Parecer do revisor nominado por versão | pendente (condição para aprovação formal de produto) |
+| Implementação | não iniciada; próximo passo é Programa A com teste que falha antes do código |
+| Testes executados | nenhum; `NOT_EXECUTED` em todos os casos |
