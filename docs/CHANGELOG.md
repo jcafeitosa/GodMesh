@@ -1,5 +1,14 @@
 # Histórico da documentação
 
+## Decisões do usuário e fechamento de gaps — 17/11/2026
+- ADR-064: SOS offline negado quando não há fonte de frescor confiável (F1/F2) e não há verificação online; UI declara o estado antes do incidente.
+- ADR-065: política inicial de retenção por classe (mensagem 24 m, posição 30 d, áudio não retido, SOS 12 m, auditoria 12/24 m, backup 35 d), com revisão jurídica por jurisdição e redução permitida por tenant.
+- ADR-066: operação mundial com região primária Brasil (São Paulo) e secundária Colômbia (Bogotá); residência declarada por tenant e contrato por país.
+- Emendas: ADR-060 (enum `confidentiality` e herança transitiva), ADR-063 (`generation` + piso de versão contra downgrade).
+- SPECs 001–024: casos por decisão e casos por requisito com P/N/B/F; casos positivos dependentes de parâmetro OPEN passam a esperar `param_not_configured`.
+- Criados: SPEC-022 (produto/organizações), SPEC-023 (capacidades/conectividade), SPEC-024 (CrowdFind); contratos `autoridade-contratos.md` e `eventos-sincronizacao.md` v0.2.
+- Primeiro commit do repositório registra esta base. Nenhuma SPEC aprovada, nenhum código, nenhum teste executado.
+
 ## Rodada de gaps e decisões — 17/11/2026
 - Varredura completa por 8 frentes (produto/expansão, integrações, defeitos documentais, escala/resiliência, segurança/conformidade) e 3 debates técnicos com fonte primária.
 - Registradas ADR-056 a ADR-063: N/N-1 por perfil com rejeição antes do efeito; posição canônica de evento e cursor; taxonomia de ACK por fronteira; escopo do grant offline; E2EE nativo e proibição de alegar confidencialidade indevida; fronteira transacional e recuperação; retenção fail-closed; baseline de cadeia de suprimento.
