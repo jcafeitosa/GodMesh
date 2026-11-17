@@ -1,5 +1,11 @@
 # Histórico da documentação
 
+## Stack de interface web — 17/11/2026
+- ADR-067: Astryx (`@astryxdesign/core` 0.7.16, MIT, React 19+) como base de componentes; Tailwind 4.3.5 para utilitários e layout via `className`; tema por CSS custom properties.
+- coss.com e alignui.com rebaixados a referência de padrão visual/composição; coss.com registrado também como candidato de integração de API (e-mail/SMS/forms/webhooks), não como UI.
+- shadcn/ui não adotado como base nesta decisão; convivência depende de ratificação do usuário.
+- Versões resolvidas em 17/11/2026 por `npm view`: core/CLI Astryx 0.7.16, StyleX 0.19.2, React 19.3.1, Next 16.4.6, TypeScript 7.0.2. Nada instalado, nada compilado.
+
 ## Decisões do usuário e fechamento de gaps — 17/11/2026
 - ADR-064: SOS offline negado quando não há fonte de frescor confiável (F1/F2) e não há verificação online; UI declara o estado antes do incidente.
 - ADR-065: política inicial de retenção por classe (mensagem 24 m, posição 30 d, áudio não retido, SOS 12 m, auditoria 12/24 m, backup 35 d), com revisão jurídica por jurisdição e redução permitida por tenant.
