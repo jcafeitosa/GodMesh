@@ -1,0 +1,134 @@
+# SPEC-024 — CrowdFind e Beacon
+
+**DRAFT-0.3 · 2026-11-17 · Autor documental: Jack Ganssle · Revisão independente designada: Bruce Schneier, pendente.** Aprovação pendente. Casos planejados `NOT_EXECUTED`. Este documento não autoriza implementação. **Mudanças desta versão:** casos por decisão (resposta ao veto C3-1); casos por requisito e casos P desbloqueados (C3-1).
+
+## 1. Origem, objetivo e rastreabilidade
+
+RF-030 exige CrowdFind próprio, Beacon opcional e identificador rotativo, sem dependência de Find My/Find Hub e sem rastreamento não autorizado. Esta é a SPEC canônica proposta para RF-030 e ADR-043/044, cobrindo o fluxo integral e todas as plataformas aplicáveis. SPEC-015 cobre o recorte Android e SPEC-020 cobre controles transversais de segurança. A associação canônica no catálogo e a revisão independente permanecem pendentes. ADR-043/044 constam aprovadas como arquitetura em decisões, embora os documentos temáticos usem linguagem de proposta. A presente SPEC é rascunho e não altera o estado dessas decisões.
+
+Fontes: [requisitos](../00-produto/requisitos.md), RF-030; [arquitetura](../01-arquitetura/arquitetura-referencia.md), Guardian e CrowdFind; [decisões](../06-planejamento/decisoes.md), ADR-043, 044, 060 e 062; [SPECS](../../SPECS.md), conteúdo obrigatório e RF-030; [equipe](../09-equipe/EQUIPE.md), P2 e P6; [gaps](../09-equipe/registro-gaps.md), três SPECs novas; [pendências](../06-planejamento/pendencias.md), privacidade, rádio e gates.
+
+Fontes de contrato: [CrowdFind](../03-integracoes/crowdfind-beacon.md); [privacidade](../04-seguranca/privacidade-crowdfind.md); [retenção](../04-seguranca/retencao-revogacao.md); [credenciais](../07-contratos/credenciais-crowdfind.md); [Guardian/CrowdFind](../07-contratos/guardian-crowdfind.md); [Guardian](../02-dominio/guardian-acompanhamento.md); [SPEC-012](SPEC-012-produto-guardian.md), §§4, 5 e 9; [SPEC-020](SPEC-020-seguranca-retencao.md), §§5–10.
+
+Contexto e limites do trabalho: consolidar contratos documentais para emissão, observação e resolução na rede própria, preservando as decisões existentes. Dependências incluem Guardian, identidade, autorização, sincronização, retenção e capacidades de plataforma. Aceite documental exige rastreabilidade, casos observáveis e pendências atribuídas. Verificação prevista: confronto com fontes e revisão independente. Etapas: fontes e precedência; modelo e contratos; ameaças e falhas; aceites e pendências; revisão.
+
+## 2. Escopo e decisões
+
+O smartphone com sessão Guardian ativa pode anunciar Beacon temporário após opt-in `guardian.beacon.emit`. Outro dispositivo pode observar anúncios GodMesh e enviar relatos mediante opt-in independente `crowdfind.observe`, identidade e vínculo válidos. Localização Guardian, emissão, observação e leitura precisa são direitos distintos. O titular escolhe destinatários e precisão. A audiência de rádio é qualquer receptor fisicamente capaz de captar o anúncio; a audiência do relato é restrita aos destinatários autorizados da sessão. O observador não recebe identidade do titular por ter transmitido relato.
+
+Android e iOS dependem de permissões, hardware e comportamento efetivo do SO, incluindo limitações em segundo plano. Outros clientes e acessórios dependem de capacidade e contrato homologados. Nenhuma busca arbitrária de aparelhos é autorizada. Redes Apple, Google e Samsung não são utilizadas sem integração autorizada. Acessórios futuros e proteção contra rastreamento físico exigem projeto e homologação próprios. UWB e disponibilidade contínua não são pressupostos.
+
+ADR-043 estabelece rede própria e opt-in, ADR-044 exige privacidade e revogação. Alternativa de rede externa exige autorização e integração separadas, com dependência de acordos e capacidades externas. Token aleatório por período é proposta do contrato de credenciais; derivação por segredo é alternativa sujeita a avaliação de comprometimento e revogação. O envelope cifrado ao serviço é proposta, com seleção de suite e chaves aberta. ADR-060 impede alegar E2EE quando serviço destinatário acessa conteúdo. ADR-062 exige política aprovada por finalidade, classe, cópia, jurisdição, prazo e gatilho antes de persistir.
+
+## 3. Beacon, estados e contratos
+
+O anúncio `gmp.beacon.rotating.v1` contém token opaco efêmero e apenas dados mínimos de enquadramento autorizados. Proibidos GMC, GMI, coordenada, nome, telefone, tenant e identificador persistente de pessoa ou dispositivo, inclusive MAC/BSSID como identidade. Tokens de épocas e sessões distintas devem ser independentes e não revelar vínculo por inspeção. A validade é limitada à sessão e ao intervalo registrado pela autoridade, com início inclusivo e fim exclusivo. Duração, formato final, entropia, antecipação e tolerância de relógio permanecem OPEN. O token não prova distância nem localização física e pode sofrer relay.
+
+Emissão requer sessão ativa, consentimento, vínculo de dispositivo, autorização e capacidade. Na expiração, conclusão ou revogação, cessam novas emissões autorizadas e a resolução é bloqueada. O cliente solicita parada e apresenta confirmação local ou estado desconhecido. Durante partição, token provisionado pode continuar no rádio até expirar ou o dispositivo conhecer a revogação. Em `paused`, suspensão é proposta conservadora até conciliar OPEN-07 da SPEC-012. A interface deve distinguir `ready`, `background_limited`, `disabled`, `unsupported` e `permission_required` conforme evidência local.
+
+O evento privado `gmp.crowdfind.sighting.v1` contém identificador idempotente, token, referência autenticada do observador, horário observado e recebido, origem da localização, posição protegida quando autorizada, incerteza e confiança. A posição é do observador e o resultado é avistamento de proximidade, não GNSS do Beacon. Sem posição confiável, registrar somente proximidade e incerteza desconhecida. Campos, versão e proteção final dependem da conciliação dos contratos existentes. Conteúdo não vai a tópico global ou bridge.
+
+## 4. Resolução, limites e falhas
+
+Somente serviço de localização autorizado resolve token para sessão. Ele valida identidade e prova de posse do observador, `crowdfind.observe`, vínculo do dispositivo, integridade, validade do token, sessão e consentimento atuais. Antes de entregar, valida grant vigente do destinatário, finalidade, tenant e precisão permitida. Nenhuma API oferece resolução arbitrária. Respostas a terceiros não distinguem token desconhecido, revogado e titular invisível. Consultas autorizadas registram principal, sessão, finalidade, horário e decisão em auditoria minimizada, sem token ou coordenada. Rate limits aplicam-se a observador, dispositivo, sessão e consultas, com limites e janelas OPEN. TTL de token, relato, fila e resultado são independentes e OPEN.
+
+`accepted` exige todas as provas e janela vigente. `duplicate` retorna resultado idempotente para mesmo evento e conteúdo; reutilização com conteúdo diferente é inválida. `stale`, `revoked`, `unauthorized`, `invalid` e `authority_unavailable` não entregam localização. Timeout, cancelamento e retry limitado devem preservar idempotência e revalidar autorização antes de nova entrega; parâmetros OPEN. Sem autoridade atual, negar emissão nova e leitura precisa. Relatos offline somente podem ser enfileirados sob política aprovada, protegidos e revalidados na reconexão. Sem prova de autorização atual ou validade, descartar. Falha de cifra não admite fallback em claro.
+
+Revogação bloqueia emissão de novas credenciais, resolução e consultas, invalida caches controlados e cancela filas não entregues. Operações em voo revalidam antes de entregar. Réplicas offline permanecem indisponíveis até sincronização e confirmação. Estado por cópia distingue bloqueio, descarte confirmado, pendência e cópia externa. Cópias já recebidas não são remotamente recolhíveis. Auditoria e conteúdo só persistem sob política ADR-062 aprovada, inclusive backup e exportação. Prazo e jurisdição estão OPEN.
+
+## 5. Antiabuso e antirrastreamento
+
+Predicados propostos, sujeitos a revisão e parametrização:
+
+- Correlação entre épocas: uma resposta ao observador não contém vínculo entre tokens ou sessões; logs e métricas não expõem token resolvível. Ensaios com tokens sucessivos verificam ausência de campo ou derivação pública que ligue épocas. Correlação por rádio, horário e movimento permanece possível.
+- Sybil: cada relato exige principal e dispositivo autenticados, prova de autorização vigente e limites por principal, dispositivo e sessão. Relatos de identidades distintas não são considerados independentes apenas por terem IDs distintos. Critérios de agrupamento, limiares e tratamento de falsos positivos permanecem OPEN; exceder limite aprovado bloqueia ou posterga processamento sem divulgar identidade.
+- Consultas repetidas: consultas sob mesmo grant e finalidade compartilham orçamento e política de precisão. Ao exceder limite aprovado ou ao tentar combinar respostas para obter precisão superior à concedida, negar ou retornar representação que não aumente precisão. Granularidade, composição entre identidades e janela permanecem OPEN. Sem política aprovada, não disponibilizar consulta que dependa desse controle.
+- Relay e replay: token expirado ou revogado não atualiza posição; duplicata não cria novo relato. Token vigente retransmitido não comprova proximidade. Detecção confiável de relay permanece OPEN.
+
+## 6. Aceites planejados
+
+Todos os casos estão `NOT_EXECUTED`. Evidências futuras devem identificar versão, plataforma, configuração e resultado.
+
+| Caso | Estímulo | Resultado observável |
+|---|---|---|
+| Positivo | Sessão ativa, opt-ins separados e grants válidos | Token válido é anunciado, relato protegido chega somente à audiência autorizada e exibe proximidade com incerteza. |
+| Negativo | Falta qualquer consentimento, prova ou grant, inclusive cross-tenant | Operação correspondente é negada e identidade não é revelada. |
+| Negativo | Varredura do anúncio, logs e respostas públicas | Campos proibidos e vínculo explícito entre épocas estão ausentes. |
+| Borda | Token no início e no fim da validade | Início é aceito sob demais condições; fim é rejeitado. |
+| Borda | Mesmo evento repetido ou alterado | Repetição idêntica é idempotente; conteúdo alterado é rejeitado. |
+| Falha | Autoridade indisponível, cifra falha ou política ausente | Sem emissão nova, leitura precisa ou persistência não autorizada; erro explícito. |
+| Recuperação | Relato em fila após revogação e réplica restaurada | Sem entrega; réplica isolada até sincronizar e confirmar estado. |
+| Abuso | Múltiplos observadores e consultas repetidas cruzam limites aprovados | Limites são aplicados e precisão concedida não aumenta por composição. |
+| Relay | Token vigente retransmitido remotamente | Resultado não é apresentado como prova de distância ou posição do Beacon. |
+| Plataforma | SO interrompe anúncio ou restringe background | Estado observado é apresentado; ausência de confirmação permanece desconhecida. |
+
+## 7. OPENs e revisão
+
+| OPEN | Dono proposto | Condição de fechamento |
+|---|---|---|
+| Token, rotação, validade, formato e relógio | Jack Ganssle e Bruce Schneier | Perfil e limites aprovados, análise criptográfica e testes de plataforma. |
+| Provas, scopes, resolução, limites e composição de consultas | Kim Cameron e Bruce Schneier | Contrato de autorização, orçamento e ensaios antiabuso aprovados. |
+| Sybil, correlação e relay | Bruce Schneier e Jack Ganssle | Predicados, limiares, falsos positivos e limites residuais revisados. |
+| Cifra, chaves e confidencialidade | Kim Cameron | Perfil, destinatário, rotação e tratamento conforme ADR-060 aprovados. |
+| TTL, retenção, cópias e jurisdição | Kim Cameron e produto/jurídico | Política por classe e cópia conforme ADR-062 aprovada. |
+| Offline, retry, timeout e sincronização | Lea Verou e Kim Cameron | Contratos e parâmetros aprovados com recuperação verificável. |
+| Pausa Guardian | Margaret e especialistas de plataforma | Conciliar OPEN-07 da SPEC-012 com consentimento e privacidade. |
+| Compatibilidade Android/iOS e acessórios | Jack Ganssle e P7 | Matriz de aparelhos, permissões e background homologada. |
+| Catálogo e revisão canônica | Ada Lovelace e Bruce Schneier | Conciliar catálogo e registrar revisão independente da versão e decisão de aprovação. |
+
+Revisão independente designada a Bruce Schneier está pendente, sem parecer ou aprovação registrado. Implementação, testes, homologação, métricas e validação operacional não foram verificados.
+
+## Casos por decisão (ADR-056…063)
+
+Casos planejados desta versão, complementares a §6 e sem substituí-los. Nenhum executado; identificador formal de teste `NOT_ASSIGNED`. Estados de relato são os de §4 (`accepted`, `duplicate`, `stale`, `revoked`, `unauthorized`, `invalid`, `authority_unavailable`); `ack_class` é o conjunto fechado da ADR-058. Parâmetro OPEN (duração/entropia do token, TTL, limites de consulta, janela N/N-1, retenção) resulta em **negar ou declarar `unknown`**, nunca em valor presumido.
+
+| ID local | Decisão | Pré-condição | Estímulo | Esperado observável | Tipo | Estado |
+|---|---|---|---|---|---|---|
+| S024-056-P | ADR-056 compatibilidade | Emissor e serviço no par declarado, sem versão final de schema conciliada | Anunciar token e enviar relato de avistamento | Relato carrega `compatibility=param_not_configured`; campo desconhecido preservado na leitura do relato; nenhuma versão declarada válida nem schema presumido | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-056-N | ADR-056 compatibilidade | Observador com formato de token/evento incompatível ou sem feature crítica | Enviar relato e solicitar resolução | Relato rejeitado antes de enfileirar ou resolver; estado `invalid`; nenhuma posição entregue; sem downgrade silencioso | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-056-B | ADR-056 compatibilidade | Versão final de campos/schema ainda não conciliada (OPEN) | Trocar relatos entre observador e serviço de versões distintas | Compatibilidade `unknown`; relato não é promovido a válido; campo desconhecido preservado e nenhum número de campo reutilizado | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-056-F | ADR-056 compatibilidade | Atualização parcial do app com relatos em fila no formato anterior | Reconectar e reenviar a fila | Fila rejeitada por incompatibilidade, sem descarte silencioso; estado de incompatibilidade visível; nenhuma resolução com dados incompletos | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-057-P | ADR-057 posição/cursor | Listagem de relatos/auditoria com cursor versionado vinculado a principal, escopo, filtros, perfil e retenção | Solicitar página seguinte | Página aceita; posição canônica completa na evidência; nenhum relato omitido ou repetido | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-057-N | ADR-057 posição/cursor | Cursor sem `partition` ou de `authority_epoch` incomparável | Reapresentar o cursor | Cursor rejeitado com erro explícito; nunca traduzido; nenhuma lista vazia apresentada como resultado definitivo | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-057-B | ADR-057 posição/cursor | Duas partições com a mesma `seq` em relatos distintos | Consultar e deduplicar relatos | Relatos tratados como distintos pelo par partição+seq; nenhum descarte por colisão; `duplicate` não é inferido só pela `seq` | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-057-F | ADR-057 posição/cursor | Réplica restaurada com cursor emitido antes e sincronização pendente | Consultar relatos na réplica | Falha fechada; cursor recusado; réplica permanece indisponível até sincronizar e confirmar estado; nenhuma posição inventada | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-058-P | ADR-058 ACK por classe | Relato persistido localmente com prova de commit | Consultar estado do relato na API e na UI | `ack_class=persisted_local` com emissor/evidência/escopo; `delivered_to_device` e `acknowledged_human` ausentes sem recibo do destino/pessoa | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-058-N | ADR-058 ACK por classe | Serviço responde `accepted` sem recibo do destinatário | Exibir "titular localizado" ou "entrega confirmada" | UI não exibe entrega, atendimento ou localização; texto mostra apenas a classe real; nenhuma promoção por tempo | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-058-B | ADR-058 ACK por classe | Resposta de relato/resolução sem `ack_class` | Consumir a resposta | Resposta tratada como inválida; nenhum `accepted` implícito; erro explícito registrado no cliente | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-058-F | ADR-058 ACK por classe | Relato enviado com confirmação perdida e conteúdo idêntico | Reenviar com o mesmo identificador idempotente | Resultado `unknown`/`duplicate` idempotente, nunca entrega; nenhuma segunda posição entregue a terceiro | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-059-P | ADR-059 grant offline | Grant válido de `crowdfind.observe`, frescor dentro do limite, sem revogação conhecida e política de fila aprovada | Enfileirar relato offline e reconectar | Relato enfileirado protegido e revalidado na reconexão antes do envio; registro de grant, frescor e revogação; estado `accepted` só após validação | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-059-N | ADR-059 grant offline | Grant `stale`/`unknown`, ausência de prova de autorização atual ou revogação conhecida | Reconectar e enviar a fila | Relato descartado/negado com motivo; nenhuma persistência não autorizada; nenhuma localização entregue | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-059-N2 | ADR-059 grant offline | Grant vigente para observação | Solicitar resolução de token, criação de grant ou entrega de posição precisa de terceiro | Negação por operação não enumerada, independente de frescor e de conectividade; nenhuma fila criada | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-059-B | ADR-059 grant offline | Janela de frescor não aprovada e TTL de token/fila ainda OPEN | Avaliar grant e tentar enfileirar relato | Negação classificada com `freshness_limit=param_not_configured`; nenhuma retenção ou TTL padrão aplicada à fila; nenhuma revogação do grant declarada por parâmetro ausente | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-059-F | ADR-059 grant offline | Snapshot/réplica com grant na validade e revogação conhecida chegando depois | Reabrir entrega após o restore | Grant negado; revogação prevalece sobre cache; filas não entregues canceladas; réplica isolada até sincronizar | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-060-P | ADR-060 confidencialidade | Relato com envelope cifrado ao serviço, que resolve o token e acessa conteúdo | Consultar relato/resultado na API e na UI | `confidentiality=terminated` presente e fiel, com o terminador identificado; nenhuma alegação de E2EE, já que o serviço destinatário acessa conteúdo | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-060-N | ADR-060 confidencialidade | Anúncio, log ou resposta pública contendo campos proibidos (GMC, GMI, coordenada, nome, telefone, tenant, MAC/BSSID como identidade) | Inspecionar anúncio, logs e respostas | Campos proibidos ausentes; nenhum vínculo explícito entre épocas; API rejeita alegação de E2EE ou anonimato sobre o relato | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-060-B | ADR-060 confidencialidade | Cópia de relato sem metadado de confidencialidade (D9 aberta) | Consumir a cópia | Cópia tratada como `confidentiality=terminated`; ausência não é suprida por cache ou versão anterior; nenhuma posição é entregue com base nesse metadado ausente | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-060-F | ADR-060 confidencialidade | Falha de cifra durante envio | Enviar relato com cifra indisponível | Sem fallback em claro: operação negada com erro explícito; nenhum relato persistido nem posição resolvida | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-061-P | ADR-061 transação/recuperação | Serviço com `outbox` na mesma transação do relato | Persistir relato e publicar | Commit único com `outbox`; publicação após commit; `ack_class` máximo coerente com o commit comprovado | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-061-N | ADR-061 transação/recuperação | Replay do evento de relato | Reprocessar o mesmo evento idempotente | Nenhuma nova posição entregue a terceiro, nenhuma notificação reemitida, nenhum relato duplicado; projeção reconstruída | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-061-F | ADR-061 transação/recuperação | Mesmo evento com conteúdo alterado e duplicata idêntica | Reenviar os dois relatos | Idêntico devolve `duplicate` idempotente; conteúdo alterado é `invalid`; nenhuma nova posição criada | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-061-F2 | ADR-061 transação/recuperação | Autoridade indisponível e réplica restaurada com relatos em voo | Reabrir resolução e entrega | `authority_unavailable`: nenhuma emissão nova nem leitura precisa; réplica isolada até sincronizar; mutação forte bloqueada até reconciliação | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-061-B | ADR-061 transação/recuperação | Relato commitado com `outbox` e publicação pendente | Consultar o relato antes do publish | `ack_class` máximo `persisted_local` com prova de commit; `materialized` e notificação a terceiro ausentes; leitor não publica nem promove classe | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-062-P | ADR-062 retenção fail-closed | Classe de relato/auditoria com política aprovada em `(finalidade, classe, cópia, jurisdição)` e prazo/gatilho não decididos | Gravar relato e consultar a retenção aplicada | Registro grava `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo ou gatilho aplicado como aprovado; estado de descarte por cópia permanece `unknown` | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-062-N | ADR-062 retenção fail-closed | Classe de relato, backup ou exportação sem política aprovada | Persistir relato e exportar | Persistência falha fechada com erro explícito; nenhum `accepted` para conteúdo não autorizado; apenas mínimo do efeito imediato | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-062-B | ADR-062 retenção fail-closed | TTL de token, relato, fila e resultado ainda OPEN | Consultar validade dos registros | Cada TTL permanece independente e `unknown`; nenhuma retenção indefinida implícita; sem política, não persiste nem é retido | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-062-F | ADR-062 retenção fail-closed | Revogação com cópias entregues e caches controlados | Revogar e auditar destinos | Emissão nova, resolução e consultas bloqueadas; caches invalidados; filas não entregues canceladas; estado por cópia (bloqueio, descarte confirmado, pendência, cópia externa); cópia já recebida não é recolhível nem declarada apagada | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-063-P | ADR-063 supply chain/anti-rollback | Release de app que habilita Beacon com SBOM, assinatura verificada, canal autenticado e `generation` ≥ piso | Instalar e repetir o build | Instalação aceita; digest do build repetido igual; Beacon habilitado só com opt-in e capacidade; SBOM e `generation` na evidência | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-063-N | ADR-063 supply chain/anti-rollback | Release sem assinatura verificável ou artefato adulterado | Instalar e anunciar token | Instalação rejeitada antes do efeito; nenhum anúncio emitido; release declarado não distribuível; erro sanitizado | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-063-N2 | ADR-063 supply chain/anti-rollback | Piso de versão assinado superior ao artefato ofertado | Instalar artefato com `generation` inferior | Rejeição registrada; nenhuma substituição; downgrade para release vulnerável proibido | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-063-B | ADR-063 supply chain/anti-rollback | Piso de `generation` não publicado para o app que habilita Beacon e releases N/N-1 assinadas | Instalar a release mais recente e consultar anti-rollback | Piso exposto como `param_not_configured`; instalação não declara `generation` aceita contra piso desconhecido e não habilita Beacon por omissão | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S024-063-F | ADR-063 supply chain/anti-rollback | Chave de assinatura comprometida ou lista de revogação `unknown` | Atualizar e, depois, executar rollback autorizado | Atualização bloqueada com revogação `unknown`; revogação/reemissão verificada no cliente; rollback aceito só como exceção autorizada, limitada e auditada com piso rebaixado | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+
+### Casos por requisito (P/N/B/F)
+
+Uma linha por requisito/ADR coberto. Células citam casos da tabela `Casos por decisão` ou ID novo descrito na Nota; prefixo `S024-R###` agrupa os quatro tipos. Todos `NOT_EXECUTED`; ID formal `NOT_ASSIGNED`. TTL de token, relato e fila permanecem OPEN e nunca viram valor.
+
+| Requisito | Positivo (ID local) | Negativo | Borda | Falha/recuperação | Nota |
+|---|---|---|---|---|---|
+| RF-030 | S024-058-P; S024-R030-P | S024-R030-N | S024-R030-B | S024-062-F | P: Beacon opcional com identificador rotativo e relato só após opt-in independente. N: descoberta não autoriza conexão nem publicação; observador não recebe identidade do titular. B: emissão bloqueada em segundo plano mantém estado `unknown`, sem alegar anúncio. F: revogação bloqueia emissão/resolução e invalida caches, sem declarar cópia recolhida. |
+| ADR-043/044 (rede própria) | S024-060-P | S024-060-N | S024-R043-B | S024-060-F | P: fluxo próprio de anúncio/relato/resolução sem redes Apple/Google/Samsung. N: campos proibidos (GMC, GMI, coordenada, MAC/BSSID como identidade) ausentes em anúncio e logs. B: ausência de rede proprietária não aciona fallback não autorizado nem reduz capacidade declarada. F: falha de cifra nega a operação sem fallback em claro. |
+| ADR-058 (relato e aviso) | S024-058-P | S024-058-N | S024-058-B | S024-058-F | Classe de ACK exibida como recebida; `accepted` do serviço não é entrega nem localização do titular. |
+| ADR-059 (grant de observação) | S024-059-P | S024-059-N; S024-059-N2 | S024-059-B | S024-059-F | P verifica `freshness_limit=param_not_configured`; revogação prevalece sobre cache e filas não entregues são canceladas. |
+| ADR-061 (transação do relato) | S024-061-P | S024-061-N | S024-061-B | S024-061-F | Replay reconstrói projeção sem nova posição entregue a terceiro; conteúdo alterado é `invalid`. |
+| ADR-063 (app que habilita Beacon) | S024-063-P | S024-063-N; S024-063-N2 | S024-063-B | S024-063-F | Beacon só habilita com opt-in, capacidade e artefato verificado acima do piso. |

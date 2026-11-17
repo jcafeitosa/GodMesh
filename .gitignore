@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Local secrets and environment configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Editor and agent-local state
+.idea/
+.vscode/
+.cursor/
+.claude/
+.agents/
+
+# Temporary and backup artifacts
+*.bak
+*.bak-*
+*.pre-*
+*.orig
+*.rej
+*~
+
+# Build output from future components
+/target/
+/build/
+/dist/
+/node_modules/
