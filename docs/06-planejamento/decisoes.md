@@ -76,7 +76,9 @@ Criar ADR detalhada com contexto, alternativas, decisão, consequências, status
 
 ## ADR-055 — Plataformas de entrega e seleção de interfaces
 
-**Estado:** plataformas e SwiftUI aprovados por instrução explícita do usuário; recomendações específicas de Windows/Linux/Android propostas, não validadas. Registro documental; não inicia SPECs nem implementação.
+**Estado:** **SUPERADA por ADR-068 (17/11/2026).** O usuário decidiu unificar todos os clientes em tecnologia web. Este registro permanece como histórico da decisão anterior; plataformas e SwiftUI nativas deixam de ser o alvo.
+
+**Estado original:** plataformas e SwiftUI aprovados por instrução explícita do usuário; recomendações específicas de Windows/Linux/Android propostas, não validadas. Registro documental; não inicia SPECs nem implementação.
 
 **Origem:** nesta conversa, o usuário definiu servidor em contêiner Linux, macOS universal Apple Silicon e Intel com SwiftUI, Windows/Linux e mobile iOS com SwiftUI e Android; em seguida pediu usar o que há de melhor em Windows, Linux e Android. A segunda instrução estabelece o objetivo de seleção; não nomeia um framework específico.
 
@@ -244,6 +246,16 @@ Achado do crítico C4: a regra de herança de confidencialidade existia apenas e
 | **Verificação** | Dois testes **complementares**, não exclusivos: (a) tenant brasileiro não tem conteúdo restrito replicado na Colômbia sem autorização; (b) falha da região primária mantém continuidade degradada apenas dos serviços cuja cópia é autorizada — o resto informa indisponibilidade. Teste de residência declarada no contrato e na API. |
 | **Pendente do usuário/jurídico** | Entidade e foro; bases legais por finalidade; contrato de transferência internacional; obrigações de radioamador e de emergência por país. |
 
+
+### Emenda à ADR-067 (17/11/2026) — shadcn/ui permanece, com regra de convivência
+
+Decisão do usuário: "shadcn fica". Regras para não virar dois sistemas:
+1. **Um componente, um dono.** Botão, dialog, menu, tabela, input, toast, tabs, tooltip, popover, sheet, avatar, badge, progress, skeleton: **Astryx**. shadcn entra apenas para padrões que o Astryx não oferece — e cada adoção é registrada em `web/ui/README.md` com motivo.
+2. **Tema único.** shadcn é configurado para consumir as mesmas CSS custom properties do tema Astryx; não existe paleta paralela.
+3. **Fronteira.** Nenhuma tela importa shadcn direto: sempre por `web/ui/`. Isso permite remover um dos dois sem tocar em telas.
+4. **Acessibilidade e atualização** são verificadas por componente adotado, não por biblioteca.
+5. **Critério de revisão:** se um padrão do shadcn passar a existir no Astryx, o shadcn correspondente é removido no ciclo seguinte.
+
 ## ADR-067 — Stack da interface web: Astryx + Tailwind, sem segunda biblioteca de componentes
 
 | Campo | Conteúdo |
@@ -256,3 +268,15 @@ Achado do crítico C4: a regra de herança de confidencialidade existia apenas e
 | **Verificação** | Instalação limpa resolvendo as versões acima com digest registrado; build com Astryx + Tailwind sem conflito de reset; auditoria de acessibilidade em 3 telas; teste de tema claro/escuro só por CSS vars; teste de que nenhuma tela importa componente de duas bibliotecas; verificação de que um upgrade minor do Astryx não exige edição fora de `web/ui/`. |
 | **Pendente do usuário** | Confirmar adoção exclusiva do Astryx como base (shadcn fora), ou autorizar shadcn como segunda base e assumir o custo duplo. |
 | **Escopo** | Vale para a interface **web**. macOS/iOS seguem SwiftUI e Android segue Kotlin/Compose conforme ADR-055; se a intenção for unificar todos os clientes em tecnologia web, isso revoga a ADR-055 e exige decisão explícita — não é o que este ADR decide. |
+"
+## ADR-068 — Todos os clientes em tecnologia web, com núcleo Rust embarcado
+
+| Campo | Conteúdo |
+|---|---|
+| **Status** | Aprovada pelo usuário em 17/11/2026 ("sim" à unificação). **Supera a ADR-055.** Impacto em SPEC-013, 014, 015 e 016: esses documentos precisam de nova versão; SwiftUI, WinUI 3, Qt Quick e Jetpack Compose saem como alvo de UI. |
+| **Contexto** | A ADR-055 fixava interfaces nativas por plataforma (SwiftUI, WinUI 3, Qt Quick, Compose) e um núcleo Rust exposto por FFI. O usuário decidiu uma única tecnologia web para todos os clientes, com Astryx + shadcn + Tailwind (ADR-067). Isso reduz quatro bases de UI a uma e **elimina a necessidade de FFI Rust↔Swift↔Kotlin para a camada de aplicação**. |
+| **Decisão** | Cliente único em **React 19 + Astryx + shadcn + Tailwind**, empacotado com **Tauri 2** para macOS, Windows, Linux, **iOS e Android**. O núcleo Rust (GMP, sync, identidade, mídia) roda **no processo do app** como backend Tauri, exposto por comandos/eventos tipados — não por FFI manual. Onde o sistema operacional não permite web API, o recurso é implementado como **plugin nativo do Tauri**, com contrato tipado e teste próprio: BLE/beacon, localização em segundo plano, sessão de áudio/PTT em segundo plano, notificações push, Live Activities/Dynamic Island, NFC/biometria, atalhos e integração com o discador. UI nativa por plataforma deixa de existir como código de produto; plugins nativos são a única superfície nativa. |
+| **Versões resolvidas em 17/11/2026** | `@tauri-apps/cli` 2.12.5 e `@tauri-apps/api` 2.12.5 · `@astryxdesign/core` 0.7.16 · Tailwind CSS 4.3.5 · shadcn CLI 4.23.0 · React 19.3.1 · Next.js 16.4.6 (web) · TypeScript 7.0.2 · `@stylexjs/stylex` 0.19.2. Fontes: `npm view`, README de `meta/astryx` e documentação oficial `v2.tauri.app` (início, pré-requisitos, plugins: barcode, biometric, NFC, geolocation, notifications, deep linking), consultados em 17/11/2026. |
+| **Consequências e riscos** | (1) **Ganho:** uma UI, um design system, um pipeline; núcleo Rust único em todas as plataformas; FFI some do caminho crítico. (2) **Risco de WebView:** WKWebView (iOS/macOS), WebView2 (Windows), WebKitGTK (Linux) e Android WebView divergem em APIs, mídia e desempenho — a matriz de suporte passa a ser por *engine*, não por toolkit. (3) **Segundo plano é o ponto fraco:** PTT contínuo, rastreamento e BLE exigem plugin nativo e política de bateria própria; sem isso, RF-005/RF-028/RF-030/RF-042 não são entregáveis. (4) **Live Activities/Dynamic Island** exigem extensão nativa iOS, não são web. (5) Tauri mobile está em 2.x estável, mas o ecossistema de plugins móveis é menor que o nativo puro — cada plugin usado precisa de dono e teste. (6) Tamanho e assinatura de app mudam por plataforma. |
+| **Verificação** | Build do mesmo código para as 5 plataformas; teste de PTT em segundo plano por plataforma; teste de BLE e localização em background; teste de push; teste de Live Activity; auditoria de acessibilidade em WebView; medição de memória/CPU/bateria por engine; teste de que nenhum código de tela conhece a plataforma, só capacidades declaradas. |
+| **Impacto documental obrigatório** | ADR-055 sai de vigência; SPEC-013 (experiência por plataforma), SPEC-014 (cliente offline/FFI) e as SPECs de plataforma 015/016 precisam de nova versão **substituindo "Kotlin/Compose" e "Swift/SwiftUI" por "cliente web + plugins Tauri"**, preservando os contratos de lifecycle, permissões e capacidades que já estavam especificados. SPEC-007 (PTT), SPEC-012 (Guardian) e SPEC-024 (CrowdFind) ganham requisito de plugin nativo em vez de API de plataforma nativa. |

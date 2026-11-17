@@ -17,7 +17,7 @@
 
 ## Plataformas de entrega
 
-Plataformas propostas: servidor em contêiner Linux; desktop macOS universal Apple Silicon/Intel com SwiftUI, Windows e Linux; mobile iOS com SwiftUI e Android. Consulte a [arquitetura de referência](01-arquitetura/arquitetura-referencia.md); isso não afirma implementação.
+Plataformas propostas: servidor em contêiner Linux; **cliente único em tecnologia web (React 19 + Astryx + shadcn/ui + Tailwind) empacotado com Tauri 2** para macOS, Windows, Linux, iOS e Android, com núcleo Rust embarcado (ADR-068, que supera a ADR-055). Recursos que o sistema operacional não expõe à web — BLE, segundo plano, áudio de PTT, push, Live Activities, NFC — entram como plugins nativos do Tauri. Consulte a [arquitetura de referência](01-arquitetura/arquitetura-referencia.md); isso não afirma implementação.
 
 ## Produto
 - [Operação normal do aplicativo — estados, telas, offline e energia](01-arquitetura/aplicativo-operacao-normal.md)
@@ -122,7 +122,7 @@ Documentos de decisões, rastreabilidade, roadmap, pendências, aceites comporta
 
 18. **Wi-Fi Share:** descoberta privada automática não publica rede de terceiros; AP físico tem posição interna precisa quando disponível, publicável exatamente somente com opt-in explícito do administrador; auditoria de visitantes é restrita, sem histórico de navegação.
 19. **Live Presence:** ActivityKit e Android Live Updates se aplicam a atividades elegíveis em andamento; notificações e fallback dependem do SO; telas bloqueadas não recebem coordenadas precisas nem credenciais.
-20. **App normal:** modos coexistem, início offline e estados honestos, com prioridade de SOS sem presumir entrega ou disponibilidade universal.
+20. **Cliente único:** todas as interfaces de usuário são web (ADR-068); plugins nativos existem apenas onde a API do SO não é acessível à web, com contrato tipado e teste próprio. **App normal:** modos coexistem, início offline e estados honestos, com prioridade de SOS sem presumir entrega ou disponibilidade universal.
 
 ## Manutenção desta documentação
 

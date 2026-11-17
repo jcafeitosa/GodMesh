@@ -1,5 +1,11 @@
 # Histórico da documentação
 
+## Cliente único em tecnologia web — 17/11/2026
+- ADR-068: React 19 + Astryx + shadcn/ui + Tailwind, empacotado com Tauri 2 (macOS, Windows, Linux, iOS, Android) e núcleo Rust embarcado via comandos/eventos tipados; plugins nativos só onde o SO não expõe API web. **Supera a ADR-055.**
+- Emenda à ADR-067: shadcn/ui permanece, com regra de convivência (um componente, um dono; tema único; fronteira `web/ui/`; remoção quando o Astryx cobrir o padrão).
+- Versões resolvidas: Tauri CLI/API 2.12.5, Astryx 0.7.16, Tailwind 4.3.5, React 19.3.1, Next 16.4.6, TypeScript 7.0.2, StyleX 0.19.2.
+- Pendente: novas versões de SPEC-013, SPEC-014, SPEC-015 e SPEC-016 no modelo web+Tauri; ajuste de SPEC-007/012/024 para plugin nativo. Nada instalado, nada compilado.
+
 ## Stack de interface web — 17/11/2026
 - ADR-067: Astryx (`@astryxdesign/core` 0.7.16, MIT, React 19+) como base de componentes; Tailwind 4.3.5 para utilitários e layout via `className`; tema por CSS custom properties.
 - coss.com e alignui.com rebaixados a referência de padrão visual/composição; coss.com registrado também como candidato de integração de API (e-mail/SMS/forms/webhooks), não como UI.
