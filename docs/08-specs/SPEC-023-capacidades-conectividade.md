@@ -1,6 +1,6 @@
 # SPEC-023 — Capacidades, conectividade e contingência
 
-**Versão:** DRAFT-0.6
+**Versão:** DRAFT-0.7
 **Data:** 2026-11-17
 **Autor documental:** Gregor Hohpe
 **Revisão independente designada:** Vint Cerf — pendente
@@ -9,7 +9,7 @@
 
 ## 1. Objetivo, escopo e rastreabilidade
 
-Esta proposta cobre RF-003, RF-031, RF-032 e RF-033 nos clientes Android e iOS e nas interfaces de dispositivos, gateways e serviços GodMesh. Define avaliação de capacidades, evidência de conectividade, orientação manual e prioridade de tráfego próprio. Especificações de SOS, Guardian, autorização, sincronização e plataformas continuam responsáveis por seus contratos especializados.
+Esta proposta cobre RF-003, RF-031, RF-032 e RF-033 no cliente único web+Tauri (ADR-068) em todas as plataformas e nas interfaces de dispositivos, gateways e serviços, gateways e serviços GodMesh. Define avaliação de capacidades, evidência de conectividade, orientação manual e prioridade de tráfego próprio. Especificações de SOS, Guardian, autorização, sincronização e plataformas continuam responsáveis por seus contratos especializados.
 
 | Requisito | Direção | Seções e aceite planejado |
 |---|---|---|

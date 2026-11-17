@@ -1,6 +1,6 @@
 # SPEC-011 — Localização geoespacial
 
-**Versão:** DRAFT-0.7  
+**Versão:** DRAFT-0.8  
 **Data:** 2026-11-17  
 **Estado:** DRAFT / OPEN. Não aprovada.  
 **Autor documental:** Paul Ramsey  
@@ -173,7 +173,7 @@ Os IDs GEO-OPEN identificam lacunas locais desta SPEC, não requisitos RF/RNF, t
 - `docs/README.md`: hierarquia documental; arquitetura de referência e ADRs prevalecem.
 - `docs/00-produto/requisitos.md`: RF-009 (linha 15), RF-029 (linha 58), RF-038 (linha 72), RF-039 (linha 73), RF-021, RF-026 e RNF-003/015/017.
 - `docs/06-planejamento/matriz-rastreabilidade.md`: integração da cobertura dos requisitos, aceites propostos e estado NOT_ASSIGNED/NOT_EXECUTED.
-- `docs/06-planejamento/decisoes.md`: ADR-049 e ADR-054 aprovadas; ADR-055 para plataformas, com seleções não validadas preservadas como propostas.
+- `docs/06-planejamento/decisoes.md`: ADR-049 e ADR-054 aprovadas; ADR-068 para clientes (ADR-055 superada): cliente web+Tauri com plugin nativo de localização em background. Residência BR/CO (ADR-066).
 - `docs/02-dominio/modelo-dados.md` §§ Tabelas centrais, Origem e precisão da localização; descreve observações e dados propostos, não implementação.
 - `docs/02-dominio/wifi-modelo-dados.md` §§ Inventário local e Governança de dados no mapa; não aplicar 50 km de localização pessoal automaticamente ao AP.
 - `docs/01-arquitetura/guardian-localizacao-trajetoria.md` §§ Regras de qualidade, Privacidade por destino, Processamento e consumo, API conceitual; API é conceitual.

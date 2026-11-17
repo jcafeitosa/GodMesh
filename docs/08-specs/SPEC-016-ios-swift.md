@@ -1,6 +1,6 @@
 # SPEC-016 — cliente web offline, lifecycle e fronteira de comandos/eventos Tauri
 
-**Versão:** DRAFT-0.8
+**Versão:** DRAFT-0.9
 **Estado:** DRAFT / OPEN. Não aprovada, implementada ou validada.
 **Autor documental:** Alex Crichton (fronteira de comandos/eventos Tauri, estado offline e persistência). O recorte Swift/SwiftUI e iOS de Donny Wals passa a revisão de extensão nativa iOS.
 **Revisão independente designada:** Donny Wals (extensão nativa iOS, WKWebView e Live Activities), por hash desta versão.
@@ -240,7 +240,7 @@ As afirmações sobre APIs de plataforma citadas nas versões anteriores foram c
 
 ## 14. Dependências e divergências
 
-- **SPEC-014 (cliente offline e fronteira):** ainda em versão que descreve **FFI Rust–Swift** e nomeia binding. Pela ADR-068 exige nova versão; a substituição por comandos/eventos Tauri está **fora** do escopo de edição desta SPEC e permanece pendente com seu autor. Enquanto isso, esta SPEC é a descrição vigente da fronteira para o cliente web.
+- **SPEC-014 (cliente offline e fronteira):** já migrou para **comandos/eventos Tauri** (DRAFT-0.6+); esta SPEC não redefine esse contrato — em divergência, vale a SPEC-014. Observação histórica mantida: a versão anterior descrevia FFI Rust–Swift, **fora** do escopo de edição desta SPEC e permanece pendente com seu autor. Enquanto isso, esta SPEC é a descrição vigente da fronteira para o cliente web.
 - **SPEC-015 (Chet):** matriz por engine de WebView e capacidade declarada; é a contraparte desta SPEC em capacidade e acessibilidade.
 - **SPEC-006, Nancy:** autorização, estados e ACK de SOS; não declarar atendimento humano por estado de UI.
 - **SPEC-004, Martin Kleppmann:** outbox/inbox, cursores, replay, idempotência e revogação em reconexão.

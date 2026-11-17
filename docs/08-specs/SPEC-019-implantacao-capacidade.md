@@ -1,6 +1,6 @@
 # SPEC-019 — Implantação, modalidades e capacidade
 
-**Versão:** DRAFT-0.9, 2026-11-17. **Estado:** DRAFT/OPEN; não aprovada, implementada ou validada. **Autor documental:** Grady Booch. **Revisão independente:** Leslie Lamport revisou DRAFT-0.2 (versão anterior); revisão de DRAFT-0.4 pendente. Esta SPEC trata implantação, perfis de operação, carga, custo e elegibilidade de failover; contratos de autoridade, dados, recuperação e observabilidade pertencem aos respectivos domínios.
+**Versão:** DRAFT-0.10, 2026-11-17. **Estado:** DRAFT/OPEN; não aprovada, implementada ou validada. **Autor documental:** Grady Booch. **Revisão independente:** Leslie Lamport revisou DRAFT-0.2 (versão anterior); revisão de DRAFT-0.4 pendente. Esta SPEC trata implantação, perfis de operação, carga, custo e elegibilidade de failover; contratos de autoridade, dados, recuperação e observabilidade pertencem aos respectivos domínios.
 
 ## Residência e regiões (ADR-066)
 
@@ -17,7 +17,7 @@ Região primária Brasil (São Paulo) e secundária Colômbia (Bogotá). Replica
 
 ## Fontes e decisões
 
-- `docs/README.md:98`; `docs/01-arquitetura/arquitetura-referencia.md:3,64–69`; `docs/06-planejamento/decisoes.md:3,10–19,33–38,77–100`: arquitetura e ADRs prevalecem; arquitetura é proposta não validada em produção. ADR-004/005/008/010/012/013/027/030 são intenções aprovadas; ADR-055 define o alvo de entrega e conserva decisões específicas pendentes.
+- `docs/README.md:98`; `docs/01-arquitetura/arquitetura-referencia.md:3,64–69`; `docs/06-planejamento/decisoes.md:3,10–19,33–38,77–100`: arquitetura e ADRs prevalecem; arquitetura é proposta não validada em produção. ADR-004/005/008/010/012/013/027/030 são intenções aprovadas; ADR-068 define o alvo de entrega e conserva decisões específicas pendentes.
 - `docs/00-produto/visao.md:10–16,30–32,39–42`; `docs/05-operacao/implantacao.md:3–10,59–79`; `docs/05-operacao/observabilidade.md:3,13,29,40–55,62–82,101–103,124,132–136`; `docs/06-planejamento/pendencias.md:123–131`. Especificações operacionais descrevem intenção, não execução.
 - `docs/06-planejamento/matriz-rastreabilidade.md:44–46,58,70,78,98,102,106,117,122`: vínculos em escopo e autores de domínio; a matriz central permanece autoridade de rastreabilidade e não é alterada aqui.
 - Base lida: `Shared/GodMesh/Planejamento-Integral-2026-11-16/SPECS-EM-ANDAMENTO/contribuicao-grady-booch.md`, SHA-256 `87563f661abefec3897816ee62e9a56f8c8d800058258f5cc7e4cb6e97b64e0b`; revisão Leslie §§8–9/11/13 no arquivo `contribuicao-leslie-lamport.md`: GB-1 respondido textualmente; GB-2/3/4 e S019-L1/L2/L3 permanecem parciais e OPEN; L4 respondido textualmente sem afirmar prova operacional. `revisao-desktop-grady-fowler.md` SHA-256 `8cfcc4871b33aff30b197333f3072067040f635dbf45585a3ec119bbf3b42127` e `contribuicao-bruce-schneier.md` §26/HASH de leitura informado pelo revisor `558ff2f141945b69801afdee1051ed734fc9ffeeb76c07f689d83be37518ba15`: comentários Windows/Linux integrados como evidência documental, não homologação. A avaliação refere-se aos artefatos citados, não prova suporte/execução.
@@ -200,3 +200,6 @@ Uma linha por requisito do §Fontes/decisões. Células citam casos da tabela `C
 | S019-065-N | ADR-065 | Cópia sem jurisdição declarada | Tentar gravar | `RETENTION_SCOPE_UNRESOLVED`; nada persistido | N | NOT_EXECUTED |
 | S019-066-P | ADR-066 | Classe não autorizada a replicar | Consultar região secundária | Conteúdo ausente; estado `not_replicated_by_policy` | P | NOT_EXECUTED |
 | S019-066-F | ADR-066 | Falha da região primária | Continuar serviço | Só classes autorizadas seguem; demais informam indisponibilidade | F | NOT_EXECUTED |
+
+| S019-064-N | ADR-064 | Dispositivo sem F1/F2/F3 | Acionar SOS offline | Negado; nada enfileirado; discador oferecido | N | NOT_EXECUTED |
+| S019-068-P | ADR-068 | Build único web+Tauri | Instalar nas cinco plataformas | Mesmo binário lógico; plugins exigidos declarados por plataforma | P | NOT_EXECUTED |

@@ -1,6 +1,10 @@
 # SPEC-001 — Arquitetura do núcleo, federação e compatibilidade
 
-**Versão:** DRAFT-0.6, 2026-11-17. **Estado:** DRAFT / OPEN; não aprovada nem pronta para implementação. **Autor documental:** Martin Fowler; **revisor independente designado:** Erich Gamma, revisão de DRAFT-0.4 pendente. Alan Turing consolida; Ada Lovelace mantém índice. IDs de casos futuros abaixo são locais a esta SPEC e descrevem cenários planejados, não testes executados. Observado: NOT_EXECUTED.
+**Versão:** DRAFT-0.7, 2026-11-17. **Estado:** DRAFT / OPEN; não aprovada nem pronta para implementação. **Autor documental:** Martin Fowler; **revisor independente designado:** Erich Gamma, revisão de DRAFT-0.4 pendente. Alan Turing consolida; Ada Lovelace mantém índice. IDs de casos futuros abaixo são locais a esta SPEC e descrevem cenários planejados, não testes executados. Observado: NOT_EXECUTED.
+
+## Clientes e residência (ADR-066/068)
+
+Clientes são web empacotados em Tauri 2 (ADR-068), não toolkits nativos; a matriz de plataformas abaixo vale como **alvo de empacotamento**, não de interface. Residência: Brasil primária, Colômbia secundária; replicação só por classe autorizada (ADR-065/066).
 
 ## Mudanças desta versão
 
@@ -72,7 +76,7 @@ Isolamento tenant e finalidade são verificados antes de consultar ou persistir 
 
 | Superfície | Aplicabilidade nesta SPEC | Limite específico |
 |---|---|---|
-| Servidor Linux | nós, serviços e federação quando habilitados | modalidade hospedada/autogerida e região parametrizável informadas pela coordenação; perfil e residência não aprovados. |
+| Servidor Linux | nós, serviços e federação quando habilitados | modalidade hospedada/autogerida; **residência aprovada na ADR-066: região primária Brasil (São Paulo), secundária Colômbia (Bogotá)**. |
 | macOS arm64/x86_64, iOS | clientes/integração quando suportados | macOS universal é direção documental, não evidência de fatias/ABI ou suporte. Não presumir full node, relay permanente, background irrestrito ou equivalência de hardware. |
 | Windows e Linux desktop | clientes no escopo integral | stack e capacidades por plataforma ainda a qualificar; documentação de APIs/portais não prova backend, concessão, processo ativo ou suporte de runtime. |
 | Android | cliente no escopo integral | permissões, lifecycle e meios dependem da plataforma e SPEC-015. |

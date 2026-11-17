@@ -1,10 +1,14 @@
 # SPEC-009 — Wi-Fi AutoDiscover, AutoShare e AutoConnect
 
-**Versão:** DRAFT-0.6
+**Versão:** DRAFT-0.7
 **Estado:** DRAFT / OPEN
 **Autor:** Jouni Malinen  
 **Revisor independente designado:** Richard Bejtlich  
 **Data:** 2026-11-17
+
+## Superfície nativa exigida (ADR-068)
+
+No cliente web+Tauri, inventário e associação Wi-Fi passam por **plugin nativo** (as APIs web não enumeram redes nem associam SSID): Android via plugin que respeita a política de sugestão de redes; iOS sem enumeração, apenas configuração aprovada pelo usuário. Sem plugin, o recurso é declarado indisponível — nunca simulado. Teste negativo: cliente web puro tentando inventariar redes → indisponível, sem lista inventada.
 
 ## Mudanças desta versão
 

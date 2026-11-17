@@ -1,6 +1,6 @@
 # SPEC-005 — Dados, isolamento e persistência
 
-- **Versão:** DRAFT-0.7, 2026-11-17. **Estado:** DRAFT / OPEN; não aprovada nem pronta para implementação.
+- **Versão:** DRAFT-0.8, 2026-11-17. **Estado:** DRAFT / OPEN; não aprovada nem pronta para implementação.
 - **Autor documental:** Michael Stonebraker. **Revisor independente designado:** Bruce Momjian; revisão independente de DRAFT-0.1 registrada; revisão focal de DRAFT-0.2 realizada; revisão do delta DRAFT-0.3 pendente. **Consolidação:** Alan Turing.
 - **Rastreabilidade:** RF-002, comportamento de ativos/dispositivos/endpoints. Interfaces com RF-013/RF-016 e RNF-017 para cópias e sincronização; não se atribui cobertura integral desses requisitos a esta SPEC. Demais requisitos por classe de dado e cópia: OPEN com Ada/produto; não inferir vínculos. IDs de casos: NOT_ASSIGNED. Execução/observado: NOT_EXECUTED.
 
@@ -173,7 +173,7 @@ Casos locais desta SPEC. `Estado` sempre `NOT_EXECUTED`, ID formal `NOT_ASSIGNED
 | S005-058-N2 | ADR-058 | Resposta de confirmação sem `ack_class` | Cliente/SDK processa a resposta | Resposta inválida; nenhuma classe presumida e estado local `unknown` | N | NOT_EXECUTED / NOT_ASSIGNED |
 | S005-058-B1 | ADR-058 | Inbox em ledger separado confirmou o prefixo; projeção pendente | Consultar `ack_class` da cópia e da projeção | ACK máximo `persisted_local`; projeção permanece `pending` e a borda entre classes não é apagada por tempo ou retry | B | NOT_EXECUTED / NOT_ASSIGNED |
 | S005-058-F1 | ADR-058 | Commit local concluído e resposta perdida | Repetir a operação com a mesma chave de idempotência | Estado conhecido retornado; nenhum segundo registro e nenhuma classe elevada | F | NOT_EXECUTED / NOT_ASSIGNED |
-| S005-059-P1 | ADR-059 | Grant offline válido, operação enumerada; limite de frescor pode estar declarado ou não | Registrar observação de localização local | Com frescor declarado, registro local aceito e enfileirado sem divulgação nem cópia federada; sem limite configurado, `param_not_configured` negando o registro, sem TTL presumido | P | NOT_EXECUTED / NOT_ASSIGNED |
+| S005-059-P1 | ADR-059/064 | Grant offline válido, operação enumerada; limite de frescor pode estar declarado ou não | Registrar observação de localização local | Com frescor declarado, registro local aceito e enfileirado sem divulgação nem cópia federada; sem limite configurado, `param_not_configured` negando o registro, sem TTL presumido | P | NOT_EXECUTED / NOT_ASSIGNED |
 | S005-059-N1 | ADR-059 | Grant offline válido | Tentar gravar ou alterar grant, vínculo de tenant ou ACL | Negado antes do commit; nenhuma linha criada ou alterada | N | NOT_EXECUTED / NOT_ASSIGNED |
 | S005-059-N2 | ADR-059 | Cópia restaurada cuja evidência de contador é anterior à alta marca | Gravar dado condicionado ao grant | Negado com `rollback_suspected`; nenhum registro persistido | N | NOT_EXECUTED / NOT_ASSIGNED |
 | S005-059-B1 | ADR-059 | Limite de frescor da operação condicional não declarado (OPEN) | Gravar dado condicionado ao grant offline | Negado com `param_not_configured` informando frescor não definido; nenhum registro persistido e nenhum TTL presumido | B | NOT_EXECUTED / NOT_ASSIGNED |

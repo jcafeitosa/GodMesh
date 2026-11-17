@@ -16,7 +16,7 @@
 - Nenhum valor numérico novo, aprovação ou execução é criado por este delta.
 
 - Casos por requisito e casos P desbloqueados (C3-1): nova subseção "Casos por requisito (P/N/B/F)" com uma linha por requisito coberto e quatro colunas de caso; casos P dependentes de parâmetro OPEN reescritos para comportamento `param_not_configured`; caso de borda acrescentado em ADR-061. Nenhum caso foi executado.
-- Casos por decisão (resposta ao veto C3-1): nova seção "Casos por decisão (ADR-056…063)", com negativo e falha/recuperação por decisão aplicável; todos `NOT_EXECUTED`, ID formal `NOT_ASSIGNED`. Nenhum caso foi executado.
+- Casos por decisão (resposta ao veto C3-1): nova seção "Casos por decisão (ADR-056…066)", com negativo e falha/recuperação por decisão aplicável; todos `NOT_EXECUTED`, ID formal `NOT_ASSIGNED`. Nenhum caso foi executado.
 - ADR-058: taxonomia de seis classes de ACK com `ack_class` obrigatório; proíbe inferir entrega ou atendimento.
 - ADR-060: define perfis MLS para mensagens/grupos e SRTP para voz; explicita consentimento para ASR no servidor, terminação de confidencialidade e proibições de alegação.
 - ADR-062: exige política de retenção fail-closed pela tupla `(finalidade, classe, cópia, jurisdição, prazo, gatilho)`; detalha hold e revogação por destino.

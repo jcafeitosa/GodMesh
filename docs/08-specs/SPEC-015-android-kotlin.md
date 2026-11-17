@@ -255,7 +255,7 @@ DRAFT-0.5, OPEN. Esta versão substitui o recorte “por plataforma nativa” pe
 
 Revisões citadas são de versões anteriores; revisão independente desta versão/hash continua pendente. Execução permanece `NOT_EXECUTED`.
 
-## Casos por decisão (ADR-056…063)
+## Casos por decisão (ADR-056…068)
 
 Casos documentais planejados. ID formal: `NOT_ASSIGNED`. `Estado` em todos: `NOT_EXECUTED`. Estados citados são os desta SPEC §4 (`ready`, `unavailable`, `permission_required`, `hardware_unsupported`, `background_limited`, `unknown`). Parâmetro OPEN resulta em negar/exibir desconhecido.
 

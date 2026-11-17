@@ -1,6 +1,6 @@
 # SPEC-014 — Cliente offline e fronteira de comandos Tauri
 
-**Versão:** DRAFT-0.7  
+**Versão:** DRAFT-0.8  
 **Estado:** DRAFT / OPEN — não aprovada; nenhuma implementação ou validação é afirmada.  
 **Autor documental:** Alex Crichton  
 **Revisor independente designado:** Donny Wals; revisão desta versão pendente.  
@@ -11,6 +11,10 @@
 **Pareceres incorporados:** Donny Wals, `contribuicao-donny-wals.md`, SHA-256 `d9f22f920222343d50125a193e9e6ed78c8bb4c8718e13f23fc56d85bd7b0b6a`; Chet Haase, `revisao-chet-alex-crichton.md`, SHA-256 `61eaa4532fd3a1d140ba5f8079b955550d599bef7b8b7efd3ffa55253b80241c`.
 
 > **Mudança de eixo nesta versão:** a fronteira Rust↔Swift/Kotlin (FFI, binding UniFFI ou C ABI, ownership, ABI) **sai do caminho crítico**. O núcleo Rust roda no processo do app como backend Tauri e a UI web o consome por **comandos e eventos tipados**. Os contratos de estado offline, cancelamento, lifecycle, persistência protegida e erro **permanecem** — mudam de transporte, não de semântica. Ver “Mudanças desta versão — ADR-068”.
+
+## Precedência da fronteira
+
+Esta SPEC é a **fonte normativa** do contrato de comandos/eventos Tauri entre UI web e núcleo Rust. SPEC-015/016 descrevem o recorte por engine e plugin e **não** redefinem esse contrato; em divergência, vale esta SPEC.
 
 ## 1. Propósito e limites
 
