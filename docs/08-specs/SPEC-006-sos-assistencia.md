@@ -1,12 +1,19 @@
 # SPEC-006 — SOS e assistência
 
-**Versão:** DRAFT-0.7 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
+**Versão:** DRAFT-0.8 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
 **Autora documental:** Nancy Leveson · **Revisor designado:** Edsger Dijkstra  
 O parecer existente refere-se ao DRAFT-0.1. Revisão independente do DRAFT-0.4 por Edsger Dijkstra **pendente**. Execução: `NOT_EXECUTED`. Metas quantitativas: **OPEN — a medir**.
 
 Documento proposto, não aprovado, implementado nem validado. Não habilita operação de emergência, atendimento, despacho ou entrega garantida. Casos formais `NOT_ASSIGNED`; execução `NOT_EXECUTED`. Nenhum parâmetro quantitativo é aprovado por este texto.
 
 ## Mudanças desta versão
+
+### DRAFT-0.8 — ADR-064 na negativa offline e alinhamento à ADR-065
+
+- `C006-059-P` deixa de esperar incidente aberto e enfileirado: conforme ADR-064, sem fonte de frescor verificável (F1/F2) e sem verificação online (F3), a abertura de incidente por grant offline é **negada**, nada é enfileirado e o estado observável informa indisponibilidade offline. O caminho positivo é preservado em **`C006-059-P2`**, restrito ao caso com F3 verificado antes do efeito. O ID e a posição do caso original foram mantidos para rastreabilidade; o `Tipo` migrou de P para N.
+- A subseção “Retenção mínima de SOS” deixa de declarar prazo, jurisdição e gatilho como `OPEN`: o prazo padrão é o da **ADR-065** e o que falta é **confirmação jurídica por jurisdição**, não o prazo.
+- `C006-062-F2` passa a falhar fechado quando a cópia específica não tem prazo declarado, em vez de tratar o prazo como `OPEN`.
+- Nenhum valor numérico novo é criado; nada é aprovado, implementado ou executado por este delta.
 
 ### DRAFT-0.7 — casos por requisito e casos P desbloqueados (C3-1)
 
@@ -82,7 +89,7 @@ Sem prova dos domínios exigidos, inclusive em instalação autogerida, a confir
 
 ### Por que existe esta subseção
 
-A ADR-062 exige política aprovada identificada por `(finalidade, classe, cópia, jurisdição, prazo, gatilho de descarte)` e manda falhar fechada sem política. Aplicada sem exceção ao acionamento de SOS, essa regra produz duas condutas inaceitáveis: descartar o próprio SOS sem estado observável, ou gravar de improviso sem prazo declarado. A ADR-062 já admite “preservando apenas o mínimo necessário para o efeito imediato autorizado”; a classe abaixo é a aplicação desse trecho ao SOS. Ela **não** é política de retenção aprovada: a finalidade é declarada, mas prazo, jurisdição e gatilho de descarte continuam `OPEN — decisão do usuário`. Registro documental, sem efeito de aprovação.
+A ADR-062 exige política aprovada identificada por `(finalidade, classe, cópia, jurisdição, prazo, gatilho de descarte)` e manda falhar fechada sem política. Aplicada sem exceção ao acionamento de SOS, essa regra produz duas condutas inaceitáveis: descartar o próprio SOS sem estado observável, ou gravar de improviso sem prazo declarado. A ADR-062 já admite “preservando apenas o mínimo necessário para o efeito imediato autorizado”; a classe abaixo é a aplicação desse trecho ao SOS. Ela **não** é política de retenção aprovada por si: a finalidade é declarada e o **prazo padrão é o da ADR-065** (tabela por classe em `04-seguranca/retencao-revogacao.md`, linha de incidente SOS, com prazo por classe e por cópia, gatilho e descarte verificado). O que permanece pendente é a **confirmação jurídica por jurisdição** — não o prazo. Registro documental, sem efeito de aprovação.
 
 ### Classe mínima de emergência (CME-SOS)
 
@@ -245,7 +252,8 @@ Casos planejados, sem ID formal: `Estado` é sempre `NOT_EXECUTED` e o ID formal
 | C006-058-N | ADR-058 | Etapa declarada como entrega a dispositivo destinatário | Resposta traz somente `persisted_local` | UI não promove: exibe etapa comprovada (`persisted_local`) e etapa pendente (`delivered_to_device`) separadas; nenhum texto de entrega | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-058-B | ADR-058 | Resposta de API de SOS sem o campo `ack_class` | Consumir a resposta | Resposta tratada como inválida; etapa fica `unknown`; nenhuma confirmação exibida (nome do código de erro permanece `OPEN` em C07/C08) | B | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-058-F | ADR-058 | Envio cujo recibo se perde após a submissão | Aguardar e repetir a consulta de recibo | Resultado da etapa `unknown`, nunca sucesso; nenhuma classe promovida por tempo, silêncio ou ausência de erro | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
-| C006-059-P | ADR-059 | Grant offline com ação enumerada (abrir incidente), `epoch` comparável e vigente, sem revogação conhecida, contador anti-rollback íntegro; **limite de frescor do perfil não decidido** (`OPEN`) | Acionar SOS offline | Esperado reformulado com parâmetro ausente: incidente aberto e enfileirado apenas como registro local, com a avaliação de frescor reportada como `param_not_configured`; nenhuma classe acima de `persisted_local`, nenhuma transmissão implícita e nenhum prazo exibido como decidido. `C006-059-B` cobre a negativa quando a política exigir frescor decidido | P | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
+| C006-059-P | ADR-059 / ADR-064 | Grant offline com ação enumerada (abrir incidente), `epoch` comparável e vigente, sem revogação conhecida, contador anti-rollback íntegro, porém **sem fonte de frescor verificável (F1/F2) e sem verificação online (F3)** | Acionar SOS offline | Conforme ADR-064: operação **negada**, com nada aberto e **nada enfileirado**; estado observável na UI e no log informa “modo offline indisponível neste aparelho” com motivo registrado; nenhuma classe de ACK emitida, nenhuma transmissão implícita e nenhuma promessa de persistência. ID e posição originais mantidos; o comportamento passou de positivo a negado pela ADR-064 | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
+| C006-059-P2 | ADR-059 / ADR-064 | Mesmo grant enumerado, agora com **F3 disponível**: a verificação online ocorre antes do efeito | Acionar SOS offline com verificação online disponível | Caminho positivo: verificação online executada e registrada antes do efeito; incidente aberto e enfileirado apenas como registro local, com nenhuma classe acima de `persisted_local`, nenhuma transmissão implícita e nenhum prazo exibido como decidido. Caso positivo preservado para o caminho com F3 verificado | P | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-059-N | ADR-059 | Grant offline válido apenas para abrir incidente | Pedir divulgação de posição precisa ou mutação federada | Operação negada, sem efeito e com motivo registrado; nenhuma coordenada divulgada | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-059-N2 | ADR-059 | Grant com `epoch` anterior ao último observado, ainda dentro da validade nominal | Acionar SOS com esse grant | Grant recusado antes de qualquer efeito; nenhum incidente criado sob autoridade antiga; motivo registrado | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-059-F | ADR-059 | Restore de snapshot antigo contendo grant nominalmente válido; contador monotônico à frente do snapshot | Tentar usar o grant após o restore | Uso negado por estado anti-rollback / `stale`; incidente não aberto sob o grant restaurado; estado apresentado como desconhecido até nova autoridade | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
@@ -263,7 +271,7 @@ Casos planejados, sem ID formal: `Estado` é sempre `NOT_EXECUTED` e o ID formal
 | C006-062-N | ADR-062 | Nenhuma política aprovada para classe enriquecida (posição precisa, áudio, texto livre) | Tentar gravar a classe enriquecida | Persistência negada com erro explícito; campo ausente do registro e do log; nenhuma gravação improvisada | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-062-B | ADR-062 | Política da classe enriquecida ausente, porém a cópia admite a CME-SOS | Acionar SOS | Registro degrada para o piso; degradação informada na UI e no log; nenhuma classe enriquecida persistida | B | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-062-F | ADR-062 | Escrita negada ou espaço esgotado no armazenamento protegido | Acionar SOS | UI e log com o mesmo veredito “não salvo / não enfileirado”; ação oficial de emergência ainda oferecida; nenhum texto “acionado” | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
-| C006-062-F2 | ADR-062 | Prazo e gatilho de descarte da CME-SOS permanecem `OPEN` | Consultar histórico de incidente envelhecido | Nenhuma expiração ou descarte automático anunciado ou executado; artefato exibido com a política pendente declarada | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
+| C006-062-F2 | ADR-062 / ADR-065 | Cópia específica sem prazo declarado: a tabela da ADR-065 não cobre aquela classe/cópia, que fica sem entrada de política | Consultar histórico de incidente envelhecido naquela cópia | Falha fechada: nenhuma expiração ou descarte automático anunciado ou executado; artefato exibido com a lacuna de política declarada e a cópia bloqueada para uso comum até existir política daquela cópia. Nenhum prazo da ADR-065 é emprestado de outra classe/cópia | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-063-P | ADR-063 | Artefato do cliente (desktop/mobile) com SBOM por release, assinatura válida e `generation` igual ou superior ao piso assinado | Instalar em ambiente limpo e acionar SOS | Instalação aceita; SO assinada, build reproduzível com digest comparado e `generation` registrada; incidente criado com o binário verificado | P | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-063-N | ADR-063 | Release anterior com vulnerabilidade conhecida assinada e legível | Instalar esse release sobre o piso atual | Rejeição por `generation` inferior ao piso; binário anterior não é substituído; motivo registrado; nenhum downgrade silencioso | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C006-063-N2 | ADR-063 | Artefato adulterado mantendo o mesmo número de versão | Instalar o artefato | Rejeição por assinatura/digest inválidos antes de qualquer execução; nenhum código do artefato roda | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
@@ -276,7 +284,7 @@ Uma linha por requisito declarado nesta SPEC. IDs são locais a este documento; 
 
 | Requisito | Positivo (ID local) | Negativo | Borda | Falha/recuperação | Nota |
 |---|---|---|---|---|---|
-| RF-026 | C006-059-P (reformulado) | C006-059-N, C006-059-N2 | C006-059-B; C006-RF026-B1 (novo) | C006-062-F, C006-062-F2 | Subescopo SOS. Escalonamento, destinatários e cobertura seguem `OPEN`; ACK técnico nunca vira atendimento humano |
+| RF-026 | C006-059-P2 (novo; F3 verificado) | C006-059-P (reformulado pela ADR-064: negado, nada enfileirado), C006-059-N, C006-059-N2 | C006-059-B; C006-RF026-B1 (novo) | C006-062-F, C006-062-F2 | Subescopo SOS. Escalonamento, destinatários e cobertura seguem `OPEN`; ACK técnico nunca vira atendimento humano |
 | RNF-012 | C006-058-P | C006-058-N | C006-058-B | C006-058-F | Evidência por camada (ADR-058); nome do código de resposta inválida segue `OPEN` em C07/C08 |
 | RF-011 | C006-057-P | C006-057-N | C006-057-B | C006-057-F | Apenas a interface de eventos/ACK por etapa; wire, nomes de campo e retenção da chave dependem de C07/C08 |
 | RNF-009 | C006-061-P | C006-061-N2 | C006-061-B (novo) | C006-061-F | Interface de sync/outbox; prova de ACK protegido pós-ACK permanece `OPEN` (B06/B12) |

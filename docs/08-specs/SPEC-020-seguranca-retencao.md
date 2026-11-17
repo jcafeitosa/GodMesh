@@ -1,6 +1,6 @@
 # SPEC-020 — Segurança, privacidade e retenção
 
-**Versão:** DRAFT-0.4 · 17/11/2026  
+**Versão:** DRAFT-0.5 · 17/11/2026  
 **Estado:** DRAFT/OPEN; não aprovada, implementada ou validada.  
 **Autor documental:** Bruce Schneier · **Revisores independentes designados:** Dan Kaminsky e Raphael Mudge; revisão desta versão pendente.  
 **Data:** 2026-11-17 · **Revisor:** Dan Kaminsky e Raphael Mudge (independentes; parecer desta versão pendente).  
@@ -10,6 +10,10 @@
 ## 1. Origem e precedência
 
 ## Mudanças desta versão
+
+- ADR-065: onde havia “prazos de retenção OPEN”, o texto passa a declarar que os prazos são os da ADR-065 (tabela com finalidade/cópia/jurisdição/gatilho), com confirmação jurídica por jurisdição apenas pendente. Acrescenta os casos `S020-065-P1/P2/B1/N1/F1` (gravação com política, expiração registrada, redução por tenant, cópia sem jurisdição fail-closed, hold revisado).
+- ADR-066: região primária Brasil/São Paulo e secundária Colômbia/Bogotá, com réplica só por classe e autorização; caso negativo `S020-066-N1`. Título da seção de casos passa a cobrir ADR-056…066.
+- Nenhum valor numérico novo, aprovação ou execução é criado por este delta.
 
 - Casos por requisito e casos P desbloqueados (C3-1): nova subseção "Casos por requisito (P/N/B/F)" com uma linha por requisito coberto e quatro colunas de caso; casos P dependentes de parâmetro OPEN reescritos para comportamento `param_not_configured`; caso de borda acrescentado em ADR-061. Nenhum caso foi executado.
 - Casos por decisão (resposta ao veto C3-1): nova seção "Casos por decisão (ADR-056…063)", com negativo e falha/recuperação por decisão aplicável; todos `NOT_EXECUTED`, ID formal `NOT_ASSIGNED`. Nenhum caso foi executado.
@@ -75,7 +79,7 @@ Guardian depende de finalidade, sessão e contatos autorizados; CrowdFind de ade
 
 ## 7. Retenção, cópias e restore
 
-Conforme ADR-062, nenhuma classe de dado pode ser persistida sem política aprovada identificada pela tupla `(finalidade, classe, cópia, jurisdição, prazo, gatilho)`. A falta de política bloqueia persistência e degrada explicitamente a operação, preservando somente o mínimo necessário ao efeito imediato autorizado. Uma política efetiva também identifica `policy_id/version`, tenant, operador/destino, disposição, autoridade e vigência. Representação é lógica e não cria SQL. A política trata separadamente primária, réplica/índice, fila/outbox/cache, dispositivo offline, backup, exportação, derivados e auditoria. Prazos e jurisdições permanecem `OPEN — decisão do usuário`; nenhum prazo jurídico é presumido.
+Conforme ADR-062, nenhuma classe de dado pode ser persistida sem política aprovada identificada pela tupla `(finalidade, classe, cópia, jurisdição, prazo, gatilho)`. A falta de política bloqueia persistência e degrada explicitamente a operação, preservando somente o mínimo necessário ao efeito imediato autorizado. Uma política efetiva também identifica `policy_id/version`, tenant, operador/destino, disposição, autoridade e vigência. Representação é lógica e não cria SQL. A política trata separadamente primária, réplica/índice, fila/outbox/cache, dispositivo offline, backup, exportação, derivados e auditoria. Prazos são os da ADR-065 (tabela com finalidade/cópia/jurisdição/gatilho, com prazo por classe e por cópia); pendente apenas a confirmação jurídica por jurisdição. Nenhum prazo jurídico é presumido além do padrão declarado, e cópia fora da tabela falha fechada até ter política própria.
 
 | Cópia | Contrato proposto | Falha e evidência |
 |---|---|---|
@@ -87,7 +91,7 @@ Conforme ADR-062, nenhuma classe de dado pode ser persistida sem política aprov
 
 Cada resultado de disposição referencia objeto/classe, cópia e destino, operador, versão da política, instante, autoridade e evidência; alcance da consulta deve ser explícito. Acesso, disposição e controle são dimensões distintas: `access_blocked` não implica `delete_confirmed`; `crypto_inaccessible` só equivale a descarte se todas as cópias de chave e recuperação forem tratadas e verificadas. `pending/unknown` não são sucesso; exportação fora do controle é apresentada separadamente. Inventário incompleto impede declarar conclusão global; um resultado pode afirmar sucesso apenas para subconjunto identificado e comprovado. Estados são de RR-001, não novo evento de sync.
 
-Hold específico exige autoridade, escopo e revisão identificados; suspende somente o descarte abrangido e nunca reativa grant nem acesso/uso comum. Revogação e seu resultado são declarados por destino/cópia, nunca globalmente. Autoridade de hold, prazos e jurisdições permanecem `OPEN — decisão do usuário`; seleção de região não determina base legal.
+Hold específico exige autoridade, escopo e revisão identificados; suspende somente o descarte abrangido e nunca reativa grant nem acesso/uso comum. Revogação e seu resultado são declarados por destino/cópia, nunca globalmente. Autoridade de hold permanece `OPEN — decisão do usuário`; prazos são os da ADR-065 (tabela com finalidade/cópia/jurisdição/gatilho), pendente apenas confirmação jurídica por jurisdição; seleção de região não determina base legal.
 
 ## 8. Ameaças e controles planejados
 
@@ -121,7 +125,7 @@ Os seguintes comportamentos são critérios propostos de revisão; cada caso for
 | Autorização ASR / Daniel, Kim, Radia, Alan/Ada | Referência de política/consentimento de canal versus autorização por sessão/processador; segundo pode melhorar escopo mas depende de autoridade e experiência. Direção relatada precisa fonte/alcance. | Registrar decisão rastreável, emissor, ações, validade, revogação e negativos; revisar sem presumir consentimento universal. |
 | Revogação, grants e cancelamento / Kim, Martin, Daniel, Radia | Revalidação por unidade de efeito versus lease limitado; lease não permite envio após revogação conhecida. | Escolher fronteira, frescor e evidência por destino, com cenários em voo e partição; risco residual reconhecido. |
 | Autoridade e restore / Leslie, Martin, Michael, Momjian | Fronteira atômica quando demonstrável ou protocolo recuperável com fence/ledger; segundo exige prova de completude. | Definir autoridade, corte, resultados desconhecidos e comportamento sem histórico/fence, com revisão independente. |
-| Retenção e descarte / Bruce, Michael, Lawrence, Alan/Ada | Prazos por finalidade/classe/cópia, descarte físico versus criptográfico comprovável; maior retenção pode facilitar recuperação e ampliar exposição. | Aprovar gatilhos, duração, operador, método e evidência por cópia e jurisdição; sem número inventado. |
+| Retenção e descarte / Bruce, Michael, Lawrence, Alan/Ada | Prazos por classe/cópia já definidos na ADR-065 (tabela com finalidade/cópia/jurisdição/gatilho); resta decidir descarte físico versus criptográfico comprovável. Maior retenção pode facilitar recuperação e ampliar exposição. | Confirmar jurídicamente prazo e jurisdição por cópia, aprovar operador, método e evidência de descarte por cópia; sem número inventado. |
 | Proteção de conteúdo/E2EE / Kim, Radia, Daniel, Gregor | Endpoint protegido versus processador terminador; disponibilidade e exposição diferem. | Declarar destinatários, chaves, metadados, terminação, recuperação e ausência de downgrade por operação. |
 | Localização, SOS e Wi-Fi / Paul, Nancy, Jouni, Kim | Bloqueio em ausência de frescor e operações locais limitadas dentro das negativas; diferentes impactos de disponibilidade e privacidade. | Política por operação/destino, frescor e risco de atraso/perda por ACK, sem simular atendimento. |
 | Auditoria e telemetria / Richard, Brendan, Bruce | Centralização ou escopos distribuídos, com limites de correlação, acesso e retenção. | Definir campos, papéis, fonte/cobertura, estados unknown, autoridade de contenção e evidência sanitizada. |
@@ -142,7 +146,7 @@ Revisões independentes de Dan e Raphael são exigidas para **esta versão/hash*
 
 Esta resposta integra o estado das revisões, sem fechar riscos ou decisões de produto. A alteração muda o hash: Dan e Raphael devem verificar este adendo e a versão subsequente antes de considerar sua revisão aplicável ao arquivo completo. Nenhuma política, SPEC, teste ou resultado operacional é aprovado por este registro.
 
-## Casos por decisão (ADR-056…063)
+## Casos por decisão (ADR-056…066)
 
 Casos locais desta SPEC. `Estado` sempre `NOT_EXECUTED`, ID formal `NOT_ASSIGNED`; nada foi executado nem medido. `Tipo`: P positivo, N negativo, B borda, F falha/recuperação. Parâmetro OPEN produz negativa, bloqueio ou informação de desconhecido, nunca valor presumido.
 
@@ -183,7 +187,7 @@ Casos locais desta SPEC. `Estado` sempre `NOT_EXECUTED`, ID formal `NOT_ASSIGNED
 | S020-061-F2 | ADR-061 | Crash entre commit e publicação de evento de disposição | Retry | Mesmo evento e digest publicados uma vez; nenhum efeito externo (bridge, notificação) repetido | F | NOT_EXECUTED / NOT_ASSIGNED |
 | S020-062-P1 | ADR-062 | Política aprovada identificada pela tupla `(finalidade, classe, cópia, jurisdição, prazo, gatilho)`; prazo ou jurisdição podem faltar | Persistir dado pessoal da classe | Com tupla completa, aceito com `policy_id/version` e tupla registrados e disposição por cópia planejada; com prazo ou jurisdição ausentes, `param_not_configured` com falha fechada e nenhuma retenção presumida | P | NOT_EXECUTED / NOT_ASSIGNED |
 | S020-062-N1 | ADR-062 | Classe sem política aprovada | Tentar persistir, replicar ou exportar | Falha fechada com erro explícito; apenas o mínimo do efeito imediato autorizado é mantido e a degradação é declarada | N | NOT_EXECUTED / NOT_ASSIGNED |
-| S020-062-N2 | ADR-062 | Prazo ou jurisdição não decididos (OPEN) | Consultar retenção da classe | Informa prazo não definido; nenhum valor presumido e nenhuma retenção indefinida apresentada como política | N | NOT_EXECUTED / NOT_ASSIGNED |
+| S020-062-N2 | ADR-062 | Cópia ou classe sem jurisdição declarada, ou fora da tabela da ADR-065 | Consultar retenção da classe | `RETENTION_SCOPE_UNRESOLVED` com negativa; nenhum valor presumido, nenhum `null` lido como retenção indefinida e nenhuma retenção indefinida apresentada como política | N | NOT_EXECUTED / NOT_ASSIGNED |
 | S020-062-N3 | ADR-062 | Revogação aplicada a um destino; cópia offline e exportação a terceiro | Declarar revogação | Declaração por destino/cópia, nunca global; `out_of_control` reportado como limite de controle e `pending`/`unknown` não é sucesso | N | NOT_EXECUTED / NOT_ASSIGNED |
 | S020-062-B1 | ADR-062 | Hold com autoridade, escopo e revisão; auditoria sob hold | Acesso comum e expiração de prazo durante o hold | Descarte suspenso apenas no escopo; acesso comum segue negado e o hold não reativa grant | B | NOT_EXECUTED / NOT_ASSIGNED |
 | S020-062-F1 | ADR-062 | Expurgo solicitado para classe e cópia específicas | Acionar descarte por destino | Recibo por objeto/classe/cópia com política, instante e evidência; `access_blocked` sem `delete_confirmed`; inventário incompleto impede conclusão global | F | NOT_EXECUTED / NOT_ASSIGNED |
@@ -195,8 +199,16 @@ Casos locais desta SPEC. `Estado` sempre `NOT_EXECUTED`, ID formal `NOT_ASSIGNED
 | S020-063-F1 | ADR-063 | Release anterior com vulnerabilidade conhecida e `generation` inferior ao piso | Tentar downgrade | Rejeitado pelo piso; instalação existente preservada | F | NOT_EXECUTED / NOT_ASSIGNED |
 | S020-063-F2 | ADR-063 | Chave de assinatura comprometida; lista de revogação publicada | Cliente verifica artefato assinado pela chave revogada | Rejeitado; artefato da chave reemitida aceito e revogação registrada no cliente | F | NOT_EXECUTED / NOT_ASSIGNED |
 | S020-063-F3 | ADR-063 | Rollback de release autorizado e limitado no tempo | Aplicar o rollback | Aceito somente com auditoria e piso rebaixado por decisão registrada; sem exceção, rejeitado | F | NOT_EXECUTED / NOT_ASSIGNED |
+| S020-065-P1 | ADR-065 | Classe e cópia com entrada na tabela da ADR-065 e política `effective` (finalidade, cópia, jurisdição, prazo, gatilho) | Gravar dado pessoal da classe | Gravação aceita com `policy_id/version`, classe, cópia, prazo e gatilho registrados; expiração agendada pelo gatilho; nenhum prazo emprestado de outra classe | P | NOT_EXECUTED / NOT_ASSIGNED |
+| S020-065-P2 | ADR-065 | Registro com prazo da ADR-065 vencido no gatilho declarado da classe | Executar o descarte por cópia | Descarte executado e **registrado** com classe, cópia, política, instante e evidência; leitura posterior negada; réplicas reportadas por destino, nunca `delete_confirmed` global | P | NOT_EXECUTED / NOT_ASSIGNED |
+| S020-065-B1 | ADR-065 | Tenant reduziu o prazo de uma classe/cópia dentro do permitido | Gravar e consultar retenção no escopo do tenant | Redução aplicada só àquele tenant; prazo padrão preservado para os demais; tentativa de ampliar sem nova decisão registrada é recusada e informada | B | NOT_EXECUTED / NOT_ASSIGNED |
+| S020-065-N1 | ADR-065 | Cópia sem jurisdição declarada (vazio/desconhecido) | Persistir, replicar ou exportar dado pessoal nessa cópia | Falha fechada com `RETENTION_SCOPE_UNRESOLVED`; nenhum `null` lido como retenção indefinida e nenhum prazo presumido | N | NOT_EXECUTED / NOT_ASSIGNED |
+| S020-065-F1 | ADR-065 | Hold legal com autoridade, escopo e revisão sobre a classe/cópia | Atingir a expiração durante o hold e revisar o hold | Descarte suspenso só no escopo (`DATA_UNDER_LEGAL_HOLD`), revisão a cada 90 dias registrada, acesso comum negado; encerrado o hold, o prazo volta a correr e o descarte é verificado | F | NOT_EXECUTED / NOT_ASSIGNED |
+| S020-066-P1 | ADR-066 | Tenant com residência declarada; classe autorizada a replicar entre regiões | Replicar para a região secundária (Colômbia/Bogotá) | Réplica criada apenas para a classe autorizada, com região, cópia, política e residência expostas na API; primária Brasil/São Paulo registrada | P | NOT_EXECUTED / NOT_ASSIGNED |
+| S020-066-N1 | ADR-066 | Classe sem autorização de replicação regional | Consultar o conteúdo dessa classe na região secundária | Conteúdo **não** aparece na região secundária: nenhum registro, nenhuma posição e nenhuma cópia derivada; resposta negada sem revelar existência | N | NOT_EXECUTED / NOT_ASSIGNED |
+| S020-066-F1 | ADR-066 | Região primária indisponível | Consultar classes replicadas e não replicadas na secundária | Continuidade apenas para as classes replicadas; as demais ficam indisponíveis e declaradas como tal, sem cópia de emergência não autorizada | F | NOT_EXECUTED / NOT_ASSIGNED |
 
-Sem caso executável por decisão ausente, nesta SPEC: (1) prazos, bases legais e jurisdição por classe — decisão jurídica/produto; (2) algoritmos complementares, gestão e recuperação de chaves MLS/SRTP; (3) ratificação de produto para ASR no servidor; (4) perfis e enum de `confidentiality` — campo inexistente nos contratos (D9); (5) nome wire de `replicated_to_authority` (D8); (6) janela N/N-1 por perfil; (7) autoridade, escopo e revisão de hold; (8) fronteira de cancelamento de ASR e tratamento de ação já iniciada.
+Sem caso executável por decisão ausente, nesta SPEC: (1) bases legais e confirmação jurídica por jurisdição — decisão jurídica/produto (o prazo padrão por classe está na ADR-065); (2) algoritmos complementares, gestão e recuperação de chaves MLS/SRTP; (3) ratificação de produto para ASR no servidor; (4) perfis e enum de `confidentiality` — campo inexistente nos contratos (D9); (5) nome wire de `replicated_to_authority` (D8); (6) janela N/N-1 por perfil; (7) autoridade, escopo e revisão de hold; (8) fronteira de cancelamento de ASR e tratamento de ação já iniciada; (9) entidade controladora, foro e bases legais por finalidade da ADR-066.
 
 ### Casos por requisito (P/N/B/F)
 
@@ -213,4 +225,4 @@ Uma linha por requisito da §2. Cada célula referencia caso S020-xxx já defini
 | RNF-017 | S020-059-P1 | S020-059-N2 | S020-058-B1 | S020-061-F1 | Subescopo de privacidade em partição, revogação e recuperação. |
 | RF-025, RF-026 | n/a — motivo: aceitação protegida de SOS exige predicado e prova por camada ainda não aprovados; não há positivo de atendimento | §9 caso 7 (ACK técnico não é atendimento; posição expirada gera estado honesto) | S020-058-B1 | §9 caso 3 (revogação entre inferência e publicação ASR/bridge) | Dependência de segurança de ASR/SOS, não cobertura funcional integral. |
 
-Casos desta subseção são critérios documentais; nada foi executado, medido ou validado.
+Casos desta subseção são critérios documentais; nada foi executado, medido ou validado. Prazos de retenção têm caso próprio em ADR-065 (`S020-065-*`) e residência em ADR-066 (`S020-066-*`).

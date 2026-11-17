@@ -1,13 +1,13 @@
 # SPEC-022 — Produto: conta, organizações e governança
 
 **Identificador:** SPEC-022
-**Versão:** DRAFT-0.3
+**Versão:** DRAFT-0.4
 **Data:** 2026-11-17
 **Estado:** DRAFT / OPEN. Não revisada, não aprovada, não autoriza implementação.
 **Autora documental:** Margaret Hamilton (pod P5 — Emergência, produto e jornadas)
 **Revisão independente designada:** Ada Lovelace — revisão desta versão **pendente**.
 **Casos desta SPEC:** planejados. Identificadores formais de teste `NOT_ASSIGNED`. Nenhum caso executado.
-**Mudanças desta versão:** casos por decisão (resposta ao veto C3-1); casos por requisito e casos P desbloqueados (C3-1).
+**Mudanças desta versão:** casos por decisão (resposta ao veto C3-1); casos por requisito e casos P desbloqueados (C3-1); DRAFT-0.4 acrescenta ADR-064 (aviso “modo offline indisponível” antes do incidente) e ADR-065 (retenção no encerramento com prazo definido) às §3.1 e aos casos (`S022-064-*`, `S022-065-*`) e troca “conforme política” por critério observável em `P22-C03`.
 
 ## 1. Identificação, versão, estado, autoria, revisão e fontes com localizadores
 
@@ -23,7 +23,7 @@ Fontes normativas e locais consultados (caminhos relativos à raiz do repositór
 | Registro de gaps | `docs/09-equipe/registro-gaps.md` §5 (U1–U7), §6 (G1-01, G1-02, G1-03, G1-06, G1-10), §11 | Origem do escopo, donos e ordem de execução |
 | Visão de produto | `docs/00-produto/visao.md:1–49`, §Produtos, §Capacidades integrais | Personal/Teams/Node e fronteira de ofertas |
 | Requisitos | `docs/00-produto/requisitos.md` RF-001, RF-020, RNF-003, RNF-015 | Requisitos cobertos e limites de cobertura |
-| Decisões | `docs/06-planejamento/decisoes.md` ADR-004, ADR-034, ADR-035, ADR-036, ADR-056…ADR-063 | Decisões rastreáveis, incluindo ACK (058) e retenção (062) |
+| Decisões | `docs/06-planejamento/decisoes.md` ADR-004, ADR-034, ADR-035, ADR-036, ADR-056…ADR-065 | Decisões rastreáveis, incluindo ACK (058), retenção (062/065) e aviso de SOS offline (064) |
 | Pendências | `docs/06-planejamento/pendencias.md` §Direções de produto (itens 1, 2, 3, 4, 5), §Autorização posterior | Direções aprovadas do usuário e gate de planejamento |
 | Identidade e autorização | `docs/08-specs/SPEC-002-identidade-autorizacao.md` §§3, 4, 5.1, 5.3, 6, 7, 8, 9, 10, 13 | Grants, estados de credencial, provas, migração e erros |
 | Autoridade de contratos | `docs/07-contratos/autoridade-contratos.md` §1 (ACK), §2 (enums), §3 (confidencialidade), §4 (D1–D9) | Autoria única de enum; não duplicar ACK nem estado de credencial |
@@ -90,6 +90,8 @@ A semântica é comum. Superfícies previstas: servidor Linux/GodMesh Node, macO
 | ADR-036 (indicativo em mensagem, rejeição de impersonação) | Aceite de convite não pode ser forjado por indicação de identidade no corpo da requisição |
 | ADR-058 (taxonomia de ACK) | Convite e notificação administrativa carregam `ack_class`; nenhuma classe superior é inferida |
 | ADR-062 (retenção fail-closed) | Encerramento/exclusão não apaga classe sem política aprovada; ausência de política falha fechado |
+| ADR-065 (política inicial de retenção por classe) | O encerramento aplica o prazo da classe na tabela da ADR-065 (conta encerrada com carência declarada; cópias em backup expiram no ciclo da classe), com prazo por classe e por cópia, redução permitida ao tenant e descarte verificado e registrado |
+| ADR-064 (SOS offline: negar sem fonte de frescor confiável) | O produto declara “modo offline indisponível neste aparelho” **antes** do incidente, quando não há F1/F2 nem verificação online; organização não promete em contrato, convite ou material de onboarding uma operação offline que o aparelho do membro não pode sustentar, e o caminho oferecido é o discador do sistema |
 | ADR-056 (N/N-1 por perfil; rejeição antes do efeito) | Cliente incompatível com a versão de contrato de organização é rejeitado antes de criar/alterar membership |
 | ADR-061 (outbox/Inbox, replay não reemite efeito externo) | Convite/notificação reenviada por replay não gera segunda mensagem externa nem segundo convite válido |
 | ADR-059 (grant offline limitado) | Nenhuma mutação de membership, convite, papel ou recuperação é autorizada offline |
@@ -284,7 +286,7 @@ Todos os casos abaixo são **NOT_EXECUTED**. Cada linha descreve resultado obser
 |---|---|---|---|---|
 | P22-C01 — primeiro acesso (RF-001) | Vínculo `(iss, sub)` validado ativa a conta e permite escolher contexto entre vínculos permitidos | GMC, e-mail ou nome no corpo da requisição não ativa conta nem cria vínculo | Conta com dois vínculos não usa tenant padrão ambíguo | Autoridade indisponível mantém `pending_first_access` explícito; nova tentativa idempotente |
 | P22-C02 — cadastro de prova (RF-001) | Prova cadastrada com titularidade atual verificável habilita recuperação futura | Pedido de recuperação não cadastra o fator que aprovará o mesmo pedido | Conta sem prova opera, mas exibe recuperação indisponível | Falha ao persistir prova não deixa estado parcial; operação pode ser repetida com mesma chave |
-| P22-C03 — recuperação (RF-001) | Prova previamente cadastrada e válida transfere acesso conforme política | Prova não cadastrada, expirada, reutilizada, comprometida ou de titular errado não transfere | Resultado `unknown` mantém vínculo atual e bloqueia mutações sensíveis | Timeout não aprova; estado fica `recovery_pending` e reconsulta é idempotente |
+| P22-C03 — recuperação (RF-001) | Prova previamente cadastrada e válida transfere acesso com `policy_id/version` da classe de auditoria e motivo registrados na trilha | Prova não cadastrada, expirada, reutilizada, comprometida ou de titular errado não transfere | Resultado `unknown` mantém vínculo atual e bloqueia mutações sensíveis | Timeout não aprova; estado fica `recovery_pending` e reconsulta é idempotente |
 | P22-C04 — criação de organização (RF-020) | Principal válido cria `tenant_id` com exatamente um `owner` | Principal sem vínculo válido não cria organização | Repetição com mesma `idempotency_key` retorna a mesma organização | Falha entre criação e auditoria não deixa organização sem owner; operação é reconciliada |
 | P22-C05 — convite (RF-020, ADR-058) | Convite emitido com escopo, papel, audiência e validade; `ack_class` fiel ao estágio real | Convite não concede acesso antes do aceite; corpo da requisição não define papel | Convite expirado é negado com erro explícito e sem criar associação | Entrega não confirmada aparece como classe menor, nunca como entregue/lido |
 | P22-C06 — aceite (RF-020) | Principal igual à audiência aceita e recebe exatamente o papel proposto | Outro principal ou convite revogado/expirado é negado | Aceite repetido devolve o mesmo resultado sem duplicar associação | Aceite offline é negado; reconexão revalida convite antes de consumir |
@@ -348,7 +350,7 @@ Aceite observável exige, para cada caso aprovado no futuro: ambiente, versão d
 - **Não demonstrado:** nenhum fluxo, endpoint, schema, política, tela, integração de e-mail/push ou adjudicação existe. Nenhum número, prazo, preço, limite ou SLA foi fixado.
 - **`NOT_EXECUTED`:** casos P22-C01…P22-C15 não executados; nenhum código, build, teste, medição, ambiente ou revisão independente realizado. Identificadores de teste `NOT_ASSIGNED`.
 - **Gate:** implementação só depois de planejamento encerrado e **todas** as SPECs aprovadas (`pendencias.md` §Autorização posterior; `SPECS.md` §Estados e liberação). Esta SPEC não altera esse gate e não aprova nada.
-## Casos por decisão (ADR-056…063)
+## Casos por decisão (ADR-056…066)
 
 Casos planejados desta versão, complementares a §7 e sem substituí-la. Nenhum foi executado; identificador formal de teste `NOT_ASSIGNED`. Rótulos de erro citados são os de §4.8 (`invite_expired`, `stale_epoch`, `retention_policy_missing`, `closure_blocked_hold`, `outcome_unknown`, `authority_unavailable`); `ack_class` é o conjunto fechado da ADR-058. Parâmetro OPEN (validade de convite, janela N/N-1, prazos de retenção, wire do `ack_class`) resulta em **negar ou declarar `unknown`**, nunca em valor presumido.
 
@@ -389,6 +391,12 @@ Casos planejados desta versão, complementares a §7 e sem substituí-la. Nenhum
 | S022-063-N2 | ADR-063 supply chain/anti-rollback | Piso de versão assinado superior ao artefato ofertado | Instalar artefato com `generation` inferior | Rejeição registrada pelo cliente; nenhuma substituição; downgrade para release vulnerável proibido | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S022-063-B | ADR-063 supply chain/anti-rollback | Piso de `generation` não publicado para o console/API e releases N/N-1 assinadas | Instalar a release mais recente e consultar anti-rollback | Piso exposto como `param_not_configured`; ingresso não declara `generation` aceita contra piso desconhecido; nenhum piso presumido a partir da versão instalada | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S022-063-F | ADR-063 supply chain/anti-rollback | Chave de assinatura comprometida ou lista de revogação `unknown` | Atualizar e, depois, executar rollback autorizado | Atualização bloqueada com revogação `unknown`; revogação/reemissão verificada no cliente; rollback aceito só como exceção autorizada, limitada e auditada com piso rebaixado registrado | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S022-064-N | ADR-064 SOS offline | Membro em aparelho sem F1/F2 e sem verificação online; organização com onboarding ativo | Abrir o app do membro antes de qualquer incidente e tentar acionar SOS offline | UI declara “modo offline indisponível neste aparelho” **antes** do acionamento, oferece o discador do sistema como caminho e **não promete persistência**; nenhum texto de contrato, convite ou onboarding promete SOS offline nesse aparelho | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S022-064-P | ADR-064 SOS offline | Aparelho com F3 disponível (verificação online) | Acionar SOS offline com verificação online | Verificação executada antes do efeito e registrada; incidente aberto com `ack_class` máximo `persisted_local`; aviso de indisponibilidade ausente porque o caminho é sustentado | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S022-065-P | ADR-065 retenção no encerramento | Conta/organização encerrada; classes com prazo na tabela da ADR-065 (mensagem, metadado, auditoria, backup, conta encerrada com carência) | Executar `closure_requested → closing → closed` | Cada classe segue o prazo da ADR-065 por classe e por cópia; expiração verificada e registrada com `policy_id/version`, classe, cópia e instante; UI declara o que fica, por quanto tempo e com qual política | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S022-065-B | ADR-065 retenção no encerramento | Tenant configurou redução de prazo permitida para uma classe | Encerrar a conta/organização daquele tenant | Redução aplicada só ao escopo do tenant; prazo padrão preservado para os demais; tentativa de ampliar prazo sem nova decisão registrada é recusada e informada | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S022-065-N | ADR-065 retenção no encerramento | Classe/cópia sem entrada na tabela da ADR-065 (nem por padrão, nem por política do tenant) | Encerrar e tentar excluir essa classe | Falha fechada com `retention_policy_missing`; dado permanece, UI informa a lacuna e a cópia fica bloqueada para uso comum até existir política própria | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S022-065-F | ADR-065 retenção no encerramento | Hold legal com autoridade, escopo e revisão durante `closing` | Atingir o prazo da classe durante o hold | `closure_blocked_hold`/`DATA_UNDER_LEGAL_HOLD` explícito; descarte suspenso só no escopo, revisão registrada e acesso comum negado; encerrado o hold, o prazo volta a correr e o descarte é verificado | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 
 ### Casos por requisito (P/N/B/F)
 
@@ -402,3 +410,5 @@ Uma linha por requisito do §1, respeitando o limite de cobertura declarado (par
 | RNF-015 (interface) | S022-062-P | S022-062-N | S022-062-B | S022-062-F | P: matriz papel/tenant e retenção declarada para informação administrativa. N: sem política, encerramento falha fechado. B: hold ativo bloqueia `closed`. F: descarte declarado por cópia, nunca global. Objeto "AP e visitantes" pertence a SPEC-009/020. |
 | ADR-058 (convites) | S022-058-P | S022-058-N | S022-058-B | S022-058-F | Classe de ACK exibida como recebida; ausência de `ack_class` é erro de contrato, não sucesso. |
 | ADR-060 (dados administrativos) | S022-060-P | S022-060-N | S022-060-B | S022-060-F | Perna terminadora declarada também em e-mail/push/exportação; nenhuma alegação de E2EE sobre dado administrativo. |
+| ADR-064 (aviso de offline) | S022-064-P | S022-064-N | n/a — motivo: a borda pertence à superfície do cliente (SPEC-013) e ao contrato de grant (SPEC-002/006) | S022-059-F | O produto se compromete apenas com o que o aparelho pode demonstrar: sem F1/F2/F3 a UI avisa antes do acionamento, oferece o discador do sistema e não promete persistência. |
+| ADR-065 (retenção no encerramento) | S022-065-P | S022-065-N | S022-065-B | S022-065-F | Prazos por classe e por cópia da tabela da ADR-065 aplicados ao `closing`; redução por tenant permitida, ampliação exige nova decisão; hold suspende descarte com revisão. |

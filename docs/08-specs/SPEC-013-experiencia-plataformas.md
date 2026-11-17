@@ -1,6 +1,8 @@
-# SPEC-013 — Experiência e superfícies por plataforma
+# SPEC-013 — Experiência e superfícies por engine de WebView e capacidade declarada
 
-**Versão:** DRAFT-0.4 · **Estado:** DRAFT / OPEN · **Autora:** Lea Verou · **Revisão independente designada:** James Bach (pendente desta versão/hash) · **Data:** 2026-11-17
+**Versão:** DRAFT-0.6 · **Estado:** DRAFT / OPEN · **Autora:** Lea Verou · **Revisão independente designada:** James Bach (pendente desta versão/hash) · **Data:** 2026-11-17 · **Base de plataforma:** ADR-068 (cliente único web + Tauri 2)
+
+> **Mudança de eixo nesta versão:** a unidade de especificação deixa de ser “plataforma nativa” (SwiftUI, WinUI 3, Qt Quick, Compose) e passa a ser **engine de WebView mais capacidade declarada** (WKWebView no macOS/iOS, WebView2 no Windows, WebKitGTK no Linux, Android WebView). Nenhuma tela conhece a plataforma; telas declaram e consomem capacidades. Ver “Mudanças desta versão — ADR-068”.
 
 Esta SPEC define comportamento observável de UX, estados acessíveis e Live Presence com as fontes disponíveis. Não declara decisão aprovada, API implantada, implementação, teste ou homologação. A cobertura direta comprovada nesta rodada é RF-042 e RNF-016; jornada operacional geral e as referências a RF-033/RF-034 são dependências, conforme limites abaixo.
 
@@ -8,30 +10,35 @@ Esta SPEC define comportamento observável de UX, estados acessíveis e Live Pre
 
 | Requisito / escopo | Evidência de origem | Cobertura nesta versão |
 |---|---|---|
-| RF-042 | `docs/00-produto/requisitos.md:76`; `docs/01-arquitetura/live-presence.md` §§1–5; `docs/07-contratos/live-presence.md` | Coberto parcialmente: estados, projeção, elegibilidade, privacidade e cenários propostos; falta decisão de proveniência/frescor e homologação por plataforma |
+| RF-042 | `docs/00-produto/requisitos.md:76`; `docs/01-arquitetura/live-presence.md` §§1–5; `docs/07-contratos/live-presence.md` | Coberto parcialmente: estados, projeção, elegibilidade, privacidade e cenários propostos; falta decisão de proveniência/frescor e homologação por engine de WebView e por plugin nativo (ADR-068) |
 | RNF-016 | `docs/00-produto/requisitos.md:84`; RF-042; contrato Live Presence | Coberto parcialmente: rótulo não pode exceder evidência; falta ligação por rótulo/fase a eventos de domínio definidos |
 | RF-034 (dependência) | `docs/00-produto/requisitos.md:68`; `docs/01-arquitetura/aplicativo-operacao-normal.md` §§1–6 | Não reivindicado como aceite próprio: jornada e estados gerais dependem de produto (Margaret) e clientes (Alex/Donny/Chet) |
 | RF-033 (dependência) | `docs/00-produto/requisitos.md:62`; `docs/01-arquitetura/conectividade-contingencia-satelite.md` §§1–8; contrato de contingência | Não reivindicado como aceite próprio: prioridade sob link restrito e permissões dependem de serviço, produto e especialistas móveis |
 
-Fontes comuns conferidas: `docs/README.md` (prevalência e limites), `docs/00-produto/visao.md`, `docs/01-arquitetura/arquitetura-referencia.md`, `docs/06-planejamento/decisoes.md` (ADR-047, 052–055), `docs/06-planejamento/pendencias.md`, `docs/06-planejamento/matriz-rastreabilidade.md`, mais `docs/01-arquitetura/aplicativo-operacao-normal.md` §§1–6 e referências relacionadas. Entradas de projeto: `AGENTS.md`, `.agents/AGENTS.md` e perfil Lea; protocolo em `SPECS-EM-ANDAMENTO/CONSOLIDACAO-CANONICA.md`.
+Fontes comuns conferidas: `docs/README.md` (prevalência e limites), `docs/00-produto/visao.md`, `docs/01-arquitetura/arquitetura-referencia.md`, `docs/06-planejamento/decisoes.md` (ADR-047, 052–054, 067 e ADR-068, que supera a ADR-055), `docs/06-planejamento/pendencias.md`, `docs/06-planejamento/matriz-rastreabilidade.md`, mais `docs/01-arquitetura/aplicativo-operacao-normal.md` §§1–6 e referências relacionadas. Entradas de projeto: `AGENTS.md`, `.agents/AGENTS.md` e perfil Lea; protocolo em `SPECS-EM-ANDAMENTO/CONSOLIDACAO-CANONICA.md`.
 
 Contribuições consultadas como propostas, não normas: `contribuicao-lea-verou.md` SHA-256 `7227af2035594ea3190e38738436a7916d92d7bf9c36bbb411d7dd0fa4be2d3e`; parecer `contribuicao-james-bach.md` SHA-256 `9c7da745a1fe3b9ed5f21542e967e9efb03092c32d9630a280e4619cc91642e9`; `contribuicao-chet-haase.md` SHA-256 `c3b7cddcffe4076e68795fcb034200befebe63b539f22972a5f2226843443cfe`; `contribuicao-donny-wals.md` SHA-256 `d9f22f920222343d50125a193e9e6ed78c8bb4c8718e13f23fc56d85bd7b0b6a`. Os pareceres de James apontam casos ainda esquemáticos; esta versão os detalha como cenários planejados, mantendo versões, parâmetros, eventos e IDs de casos em OPEN/NOT_ASSIGNED.
 
-## 2. Objetivo, limites e plataformas
+## 2. Objetivo, limites, engines de WebView e capacidades declaradas
 
 Pessoas autorizadas reconhecem a fase de uma atividade contínua em andamento e sua atualidade sem depender de abrir o app, quando a superfície do sistema operacional comportar. O app principal conserva detalhes e estado acessíveis. Projeção Live Presence não inicia “GodMesh online”; mensagem avulsa e AP detectado continuam fora da superfície persistente.
 
-RF-042 nomeia iOS/Android. Esta SPEC não estende esse requisito à web ou desktop. O SPEC-013, entretanto, reserva contratos de interação para essas plataformas quando seus requisitos e superfícies estiverem confirmados. Até lá, web e desktops macOS/Windows/Linux mantêm o comportamento próprio já definido para o aplicativo e não simulam ActivityKit/Live Updates. Servidor Linux, Node e Platform/SDK não recebem um requisito de UI nesta peça. N/A refere-se à projeção Live Presence, não ao produto inteiro.
+**Regra de fronteira (ADR-068):** nenhuma tela — nem componente de tela — conhece plataforma, nome de engine, caminho de arquivo nativo ou API do sistema operacional. A tela declara o que precisa e consome **capacidades declaradas** (`supported`, `permission_required`, `unavailable`, `unknown`); o mapeamento engine→capacidade e a chamada nativa vivem no shell Tauri e nos plugins nativos. Uma tela que importa código nativo por plataforma (bindings, `#[cfg]` por SO, `Platform.OS`, condicional por engine) viola esta SPEC.
 
-| Plataforma | Escopo Live Presence documentado | Decisão de execução ainda OPEN |
-|---|---|---|
-| iOS | ActivityKit/WidgetKit; Dynamic Island somente quando hardware e visualização forem compatíveis; tela bloqueada nos demais casos | versões, entitlement, permissões, condições de encerramento e fallback homologados; Donny |
-| Android | Live Updates em dispositivos/versões elegíveis; notificação adequada ou app nas demais | versão/dispositivo, permissão, dispensa, foreground/background e fallback; Chet |
-| Web | sem requisito RF-042 nem superfície persistente definida | ação/eventos de página, foco/teclado, notificações e background só entram após decisão de produto/plataforma |
-| macOS, Windows, Linux desktop | sem requisito RF-042 nem superfície persistente definida | notificação nativa, janela minimizada, foco/teclado e preferência local exigem especificação de plataforma antes de aceite |
-| Servidor Linux / Node / SDK | não aplicável à projeção visual de cliente | contratos de serviço/evento permanecem necessários; pertencem aos donos de serviço/protocolo |
+| Engine de WebView | Alvo de produto | Escopo Live Presence documentado | Decisão de execução ainda OPEN |
+|---|---|---|---|
+| WKWebView (macOS arm64/x86_64) | macOS desktop | sem requisito RF-042 nem superfície persistente definida; notificação do SO e estado no app são o fallback conhecido | versão mínima de macOS/engine, entitlement, notificações, janela minimizada e preferência local; autor/revisor nativo pendente |
+| WKWebView (iOS) | iOS | ActivityKit/WidgetKit por **extensão nativa iOS** exposta ao cliente como plugin Tauri; Dynamic Island somente quando hardware e visualização forem compatíveis; tela bloqueada nos demais casos | versão de iOS, entitlement, permissão, condições de encerramento, homologação da extensão e do plugin; Donny |
+| WebView2 (Windows) | Windows desktop | sem requisito RF-042 nem superfície persistente definida | versão/runtime do WebView2, modo de distribuição, notificações, background e leitor de tela; Grady/Fowler propostos |
+| WebKitGTK (Linux) | Linux desktop | sem requisito RF-042 nem superfície persistente definida | versão de WebKitGTK, dependência de sessão/portal/desktop, notificações e background; Grady/Fowler propostos |
+| Android WebView | Android | Live Updates em aparelhos/versões elegíveis por **plugin nativo**, com notificação adequada ou app nas demais | versão de Android/WebView, permissão, dispensa, foreground/background e fallback; Chet |
+| Servidor Linux / Node / SDK | não aplicável à projeção visual de cliente | — | contratos de serviço/evento permanecem necessários; pertencem aos donos de serviço/protocolo |
 
-Não seleciono frameworks ou novas APIs para plataformas sem decisão documentada. As capacidades mobile acima são referências da arquitetura e ADR-052, não prova de que funcionem em versões ou aparelhos específicos.
+**Live Activities e Dynamic Island não são web.** Exigem extensão nativa iOS declarada, com contrato tipado e teste próprio, exposta ao cliente por plugin Tauri; a WebView apenas renderiza o estado que o plugin entregar. **Push também não é capacidade da WebView:** exige plugin Tauri por plataforma, e notificação recebida ou aceita pelo serviço de push nunca é prova de entrega, leitura ou atendimento (ADR-058). Sem o plugin correspondente, a capacidade é `unavailable` e a tela não presume o contrário.
+
+RF-042 nomeia iOS/Android. Esta SPEC não estende esse requisito à web ou desktop. O SPEC-013, entretanto, reserva contratos de interação para essas engines quando seus requisitos e superfícies estiverem confirmados. Até lá, web e desktops macOS/Windows/Linux mantêm o comportamento próprio já definido para o aplicativo e não simulam ActivityKit/Live Updates. N/A refere-se à projeção Live Presence, não ao produto inteiro.
+
+Não seleciono engine, versão de engine, framework de estado, plugin nem nova API. As capacidades acima são referências da arquitetura e das ADR-052/ADR-068, não prova de que funcionem em versões, aparelhos ou engines específicos.
 
 ## 3. Atores, autoridade e contrato de dados
 
@@ -44,7 +51,7 @@ Não seleciono frameworks ou novas APIs para plataformas sem decisão documentad
 
 ## 4. Máquina de apresentação e semântica
 
-A camada cliente mantém dois planos: **estado do domínio**, vindo do contrato de serviço, e **estado da superfície**, que descreve capacidade/autorização/renderização do SO. A falha da superfície não muda por si só o resultado do domínio.
+A camada cliente mantém dois planos: **estado do domínio**, vindo do contrato de serviço, e **estado da superfície**, que descreve capacidade/autorização/renderização do SO. A falha da superfície não muda por si só o resultado do domínio. Na arquitetura ADR-068 o plano de superfície é produzido pelo plugin nativo (ou pelo shell Tauri) e chega à tela como capacidade declarada; a tela não pergunta o nome da engine, a versão do sistema nem se há API disponível.
 
 | Estado visível / situação | Evidência mínima exigida | Interação e limite |
 |---|---|---|
@@ -71,7 +78,7 @@ A camada cliente mantém dois planos: **estado do domínio**, vindo do contrato 
 | `wifi_provisioning` | pedido de provisionamento elegível iniciado pelo usuário | pedido não prova autorização do SO, associação, autenticação ou internet | etapa observada, aprovação necessária ou erro; não persistir projeção como status conectado |
 | mensagem, AP detectado, “online” | nenhuma | não converter presença ou evento avulso em atividade contínua | notificação normal/estado no app, conforme política existente |
 
-Quando há simultaneidade, ADR-053 e arquitetura colocam SOS ativo em prioridade visual; o estado principal das demais atividades continua acessível no app. Critério concreto de coexistência exige comparar estado-fonte e projeções sob a mesma autoridade/versão; a superfície nativa e affordance não são garantidas uniformes.
+Quando há simultaneidade, ADR-053 e arquitetura colocam SOS ativo em prioridade visual; o estado principal das demais atividades continua acessível no app. Critério concreto de coexistência exige comparar estado-fonte e projeções sob a mesma autoridade/versão; a superfície do SO e a affordance não são garantidas uniformes entre engines.
 
 ## 6. Jornada, permissão e recuperação
 
@@ -99,7 +106,8 @@ Quando há simultaneidade, ADR-053 e arquitetura colocam SOS ativo em prioridade
 - Texto ampliado e contraste não podem ocultar status/ação. Movimento não essencial pode ser reduzido; nenhuma mudança essencial depende de animação.
 - Evitar anúncio repetitivo a cada atualização; frequência e agrupamento de anúncios são OPEN e devem ser testados com leitores de tela das plataformas.
 - Cada erro/negativa apresenta explicação, estado atual conhecido, ação de recuperação disponível e alternativa manual segura quando automação/capability não existir.
-- Para Live Activity/Update, conteúdo e semântica acessíveis dependem do SO; se não forem verificáveis para determinada capability, cenário fica bloqueado/inconclusivo, nunca declarado acessível por inferência.
+- Para Live Activity/Update, conteúdo e semântica acessíveis dependem do SO e da extensão nativa; se não forem verificáveis para determinada capability, cenário fica bloqueado/inconclusivo, nunca declarado acessível por inferência.
+- Acessibilidade **dentro** da tela roda na WebView de cada engine: mapeamento para leitor de tela, ordem de foco, zoom e contraste não são equivalentes entre WKWebView, WebView2, WebKitGTK e Android WebView. É OPEN e não pode ser declarado equivalente por inferência (ADR-068, verificação em aberto).
 
 ## 8. Aceite comportamental e cenários planejados
 
@@ -121,6 +129,22 @@ Os cenários são planos de teste, não executados. Sem IDs atribuídos, usar r�
 | LP-accessibility | estados normal, stale, permissão negada, falha, ação e concorrência com leitor de tela/texto grande/contraste/redução de movimento | nome, finalidade, atualização importante e recuperação são percebidos sem cor ou motion essencial | foco não se perde em fluxo do app; anúncios não repetitivos conforme política ainda a aprovar |
 | LP-concurrency | SOS e Guardian/PTT simultâneos; aplicar atualização a cada fonte | superfície SOS prioritária quando fase ativa aprovada; app permite consultar outras; comparar versão de estado de ambas | prioridade não apaga, encerra ou falsifica outro estado; divergência entre projeção e app é falha do aceite |
 
+### 8.1 Casos por engine de WebView e por capacidade declarada (ADR-068)
+
+Mesma regra de estado: casos planejados, sem ID formal (`NOT_ASSIGNED`) e sem execução (`NOT_EXECUTED`). A coluna “engine” indica onde o caso deve rodar; a ausência de versão registrada mantém o caso `BLOCKED`/`INCONCLUSIVE`, nunca PASS.
+
+| Caso planejado | Engine/alvo | Pré-condição e estímulo | Esperado verificável | Invariante/negativo |
+|---|---|---|---|---|
+| LP-offline-sos-ios | iOS sem F1/F2 demonstráveis e sem conectividade para F3; abrir a área SOS antes de qualquer incidente e, depois, tentar acionar | aviso “modo offline indisponível neste aparelho” exibido **antes** do acionamento, com motivo e caminho alternativo; oferta do discador do sistema presente; acionamento offline negado e nada enfileirado | nenhum texto “acionado”, “salvo” ou “enfileirado”; nenhuma promessa de persistência; a negativa não encerra a oferta da chamada de emergência do sistema |
+| LP-offline-sos-android | Android sem F1/F2 demonstráveis e sem conectividade para F3; abrir a área SOS e tentar acionar offline | idem: aviso prévio, discador do sistema oferecido, estado observável de indisponibilidade offline e nada enfileirado | nenhuma promessa de persistência; nenhuma garantia alegada por background, notificação persistente ou intent do SO |
+| LP-offline-sos-desktop | macOS (arm64/x86_64), Windows ou Linux desktop sem F1/F2 e sem F3; abrir a área SOS e tentar acionar offline | aviso prévio de indisponibilidade offline, oferta do caminho de emergência do sistema e motivo registrado | não prometer retenção local nem enfileiramento pela gravação local/FFI; gravação local não é entrega (ADR-058) |
+| LP-engine-api-divergence | WKWebView (macOS e iOS), WebView2, WebKitGTK, Android WebView | executar a mesma jornada de Live Presence/estado em cada engine, com o mesmo build de UI | a tela renderiza estado idêntico a partir das mesmas capacidades declaradas; nenhuma capacidade aparece só em uma engine sem declaração | divergência de API de engine **não** pode mudar semântica de fase, `stale` ou terminalidade; se a capacidade não existir, o resultado é `unavailable`/`unknown`, nunca “funcionou em outra engine” |
+| LP-engine-audio-background | iOS (WKWebView), Android (Android WebView), e WKWebView macOS/WebView2/WebKitGTK como comparação | iniciar PTT/chamada e enviar o app para segundo plano ou tela bloqueada | estado de sessão e de transmissão corresponde à evidência do plugin de áudio; a tela mostra perda de atualidade quando o áudio for suspenso | WebView em background não sustenta áudio por si; suspensão ou interrupção do SO não vira “transmitindo” nem “encerrado” sem evento; nenhuma tela assume sessão ativa por continuar renderizando |
+| LP-engine-permission-denied | as cinco engines, com permissão negada, revogada e “não perguntada” como condições separadas | abrir atividade que depende de plugin (notificação, localização, microfone, BLE) | tela informa capacidade `permission_required`/`unavailable`, motivo conhecido e alternativa no app | não afirmar que o SO continuará mostrando a atividade; não alterar configuração do usuário; negação em uma capacidade não desabilita áreas independentes |
+| LP-webview-native-import | todas | inspeção de código/build da camada de tela | nenhum arquivo de tela importa módulo nativo, plugin, binding por SO ou checa nome de engine/plataforma; a dependência aparece só no shell Tauri/plugin | **caso negativo:** qualquer import nativo por plataforma em código de tela reprova o build; nenhuma exceção por “só no mobile” ou “só no desktop” |
+
+Para executar estes casos faltam: build por engine, versão de engine/SO registrada, permissões, fixtures sintéticas, plugin correspondente e dono técnico por engine. Nada foi executado.
+
 Para cada caso futuro, James Bach revisa roteiro com precondição, versão/capability, ação concreta, dados de fixture sintéticos, evento de origem, observado esperado na superfície e app, evidência correlacionável, pós-condições e resultado `PASS/FAIL/BLOCKED/INCONCLUSIVE`. Fixtures e IDs ainda não existem; não coletar dados reais de emergência/localização em especificação documental.
 
 ## 9. Decisões OPEN, donos e alternativas
@@ -131,6 +155,8 @@ Para cada caso futuro, James Bach revisa roteiro com precondição, versão/capa
 | frescor, clock, `expires_at` ausente e stale | regra comum ou específica por categoria; nenhum limiar é aprovado | produto e donos de domínio/sync (Kleppmann) | política, fonte de tempo, tolerância, expiração e reconciliação decididas; limites sem parâmetro são inconclusivos |
 | enum elegibilidade vs estado de atividade | unificar enum ou separar estados locais de superfície e domínio | Graydon + Donny/Chet + Lea | enum, transições e responsabilidade iguais em contrato e interface |
 | versão/capability e fallback | Live Surface, notificação permitida ou somente app | Donny iOS, Chet Android | matriz de versão/entitlement/política oficialmente homologada, sem afirmar suporte universal |
+| matriz por engine de WebView | especificar por engine (WKWebView macOS/iOS, WebView2, WebKitGTK, Android WebView) versus manter uma matriz por produto; matriz por engine expõe divergência de API, mídia e acessibilidade que a matriz por produto esconde | Lea + Alex + Donny/Chet | matriz engine × capacidade × versão registrada, com fonte oficial e data, sem versão de engine inventada; cada capacidade tem plugin declarado e teste próprio (ADR-068) |
+| superfície nativa iOS de Live Activity | extensão nativa iOS como único caminho (ADR-068) versus adiar RF-042 no iOS; adiar deixa RF-042 descoberto no alvo nomeado pelo requisito | Donny + produto | decisão registrada, extensão e plugin com contrato tipado, homologação e fallback de tela bloqueada documentados |
 | prioridade e convivência SOS | SOS ativo como topo visual; definir fase ativa e acesso às atividades paralelas | produto/Nancy + Lea/Donny/Chet | observáveis de prioridade, estados concomitantes acessíveis e fonte comparável definidos |
 | conteúdo bloqueado e preferência | resumo genérico por padrão versus conteúdo resumido configurável; conteúdo detalhado só autenticado | usuário/produto + privacidade | política por superfície, preferências, campos e resultado do deep link decididos |
 | atualização acessível | anúncio por toda atualização versus apenas mudanças de fase relevantes | Lea + revisores iOS/Android | frequência/agrupamento e acessibilidade definidos, sem perda de mudança crítica |
@@ -160,7 +186,7 @@ O parecer é evidência documental sobre a versão/hash citado, não comprova co
 
 **Estado:** adição documental DRAFT/OPEN; critérios e casos planejados, não executados. RF-034 segue como requisito de produto aprovado na origem; integração desktop nesta SPEC ainda requer revisão de Margaret e Alex e revisão independente atualizada. Este complemento não muda estado de RF-034 nem valida a aplicação.
 
-**Fonte e fronteira:** `docs/00-produto/requisitos.md:68` requer as áreas Início, Comunicações, Mapa, Redes, Dispositivos, Guardian e SOS, modos simultâneos e offline. `docs/01-arquitetura/aplicativo-operacao-normal.md:7–19,83–85` descreve intenção, conteúdo e aceites de operação offline, simultaneidade, SOS e independência de permissões. A visão `docs/00-produto/visao.md:18–20` e ADR-055 incluem macOS universal arm64/x86_64, Windows e Linux desktop sem demonstrar API ou função implementada. SPEC-012 §§3–6 trata contexto/Guardian e OPEN-01/04/05; SPEC-014 §§5–8,10,12 (DRAFT-0.1, SHA-256 `96df15483c1b2741d5c3e865ebea2a5a5bee4dd9e311c522eb3969c9b60b1bac`) declara núcleo offline/persistência/FFI e fronteiras OPEN. A SPEC-013 especifica observabilidade UX, não estado autoritativo local nem contrato de sync. Margaret confirmou os fatos de produto e OPENs em mensagem 6935a21e-19a5-4a46-bb2e-ff64c717ea1d; Alex confirmou estado local/FFI e limites em mensagem 37122cf4-63c0-4d64-b9b7-29db6cbbf428. São contribuições documentais, não decisões ou aceite.
+**Fonte e fronteira:** `docs/00-produto/requisitos.md:68` requer as áreas Início, Comunicações, Mapa, Redes, Dispositivos, Guardian e SOS, modos simultâneos e offline. `docs/01-arquitetura/aplicativo-operacao-normal.md:7–19,83–85` descreve intenção, conteúdo e aceites de operação offline, simultaneidade, SOS e independência de permissões. A visão `docs/00-produto/visao.md:18–20` inclui macOS universal arm64/x86_64, Windows e Linux desktop como alvos de produto sem demonstrar API ou função implementada; a partir da ADR-068 esses alvos são atendidos pelo cliente web único com Tauri 2 (a ADR-055, que fixava SwiftUI/WinUI 3/Qt Quick, está superada). SPEC-012 §§3–6 trata contexto/Guardian e OPEN-01/04/05; SPEC-014 DRAFT-0.6 §§5–8,10,12 declara estado offline, persistência protegida e a fronteira de comandos/eventos Tauri, com fronteiras OPEN. A SPEC-013 especifica observabilidade UX, não estado autoritativo local nem contrato de sync. Margaret confirmou os fatos de produto e OPENs em mensagem 6935a21e-19a5-4a46-bb2e-ff64c717ea1d; Alex confirmou estado local e limites de fronteira em mensagem 37122cf4-63c0-4d64-b9b7-29db6cbbf428. São contribuições documentais, não decisões ou aceite.
 
 ### 12.1 Jornada desktop
 
@@ -175,10 +201,10 @@ O parecer é evidência documental sobre a versão/hash citado, não comprova co
 
 | Plataforma | Base do produto | Interação UX coberta | Limites / OPENs |
 |---|---|---|---|
-| macOS Apple Silicon arm64 | App desktop universal com SwiftUI consta no `docs/README.md` e ADR-055 | teclado/foco, áreas, navegação de estados, redução de movimento e alternativas a ação indisponível | APIs de permissão/background, comportamento em janela minimizada/bloqueada, capacidades locais e versão mínima não determinados nesta SPEC |
-| macOS Intel x86_64 | mesma modalidade universal indicada documentalmente | mesmas jornadas, com aplicabilidade e estados descritos sem presumir paridade de capability | validar diferença por capability/OS; nenhuma execução/hardware verificada |
-| Windows desktop | plataforma de produto no README/ADR-055; seleção de interface/tecnologia permanece aberta onde não aprovada | áreas e estados via superfície que vier a ser aprovada; navegação de teclado/foco, recuperação e feedback de serviço | não escolher stack nem APIs; capacidades/permissões/background e leitor de tela a homologar |
-| Linux desktop | plataforma de produto no README/ADR-055 | mesmas jornadas; reconhecer função não suportada e preservação de áreas independentes | não presumir paridade com servidor Linux; stack, notificações, capabilities e background permanecem OPEN |
+| macOS Apple Silicon arm64 | cliente web único empacotado com Tauri 2 (ADR-068), engine WKWebView | teclado/foco, áreas, navegação de estados, redução de movimento e alternativas a ação indisponível | APIs de permissão/background, janela minimizada/bloqueada, capacidades locais e versão mínima não determinados nesta SPEC |
+| macOS Intel x86_64 | mesmo cliente e engine; a diferença é de arquitetura, não de UI | mesmas jornadas, com aplicabilidade e estados descritos sem presumir paridade de capability | validar diferença por capability/OS; nenhuma execução/hardware verificada |
+| Windows desktop | cliente web único com engine WebView2 (ADR-068); runtime e distribuição do WebView2 OPEN | áreas e estados via shell Tauri; navegação de teclado/foco, recuperação e feedback de serviço | não escolher versão de engine nem APIs nativas; capacidades/permissões/background e leitor de tela a homologar |
+| Linux desktop | cliente web único com engine WebKitGTK (ADR-068); dependência de sessão/portal/desktop OPEN | mesmas jornadas; reconhecer função não suportada e preservação de áreas independentes | não presumir paridade com servidor Linux; engine, notificações, capabilities e background permanecem OPEN |
 | Web | parte do escopo integral, mas RF-034 não define superfície/jornada web específica | nenhuma interação nova é presumida; requisito web e comportamento por jornada ficam rastreáveis como OPEN | não excluir web do produto; produto define escopo, contexto de permissão, abas/foco, notificação, background e recuperação antes de aceite web |
 
 As áreas são intenção de navegação do produto, não decisão sobre composição de janelas, abas, rotas ou framework. Não inferir que localização, Bluetooth, Wi-Fi, sensores, notificações ou background estão disponíveis. Um cenário sem confirmação de capability deve resultar em `unknown`/`unavailable` e função limitada, não assumir suporte.
@@ -192,7 +218,7 @@ As áreas são intenção de navegação do produto, não decisão sobre composi
 | Modos simultâneos | PTT e Guardian ativos e conectividade degradada; depois incidente SOS válido | estados permanecem identificáveis; SOS recebe prioridade sem apagar estado de Guardian/PTT; detalhe de cada atividade continua acessível | iniciar SOS não encerra Guardian/PTT; atraso Guardian não vira SOS |
 | Permissão negada/revogada | permissão/capacidade requerida é ausente, negada ou revogada, separadamente | identificar área afetada, motivo conhecido e alternativa suportada; funções independentes mantidas | não afirmar ação de sistema concluída; sem leitura autorizada após revogação observada |
 | Capacidade ausente | sensor/recurso requerido não suportado ou desconhecido | explicar limitação da plataforma e limitar somente função dependente | não transformar desconhecido em permissão negada nem falha global; não inferir API disponível |
-| Mensagem sem entrega | criar mensagem em estado local pendente e manter sem confirmação do contrato | texto e indicador refletem persistido local, pendente/tentado, confirmado pelo destino ou `unknown` em campos separados; estado muda apenas em evento da fase respectiva | gravação local/FFI não é entrega; sem ACK não pode aparecer como enviada/entregue/recebida; retry/replay depende de SPEC-004 e não duplica operação |
+| Mensagem sem entrega | criar mensagem em estado local pendente e manter sem confirmação do contrato | texto e indicador refletem persistido local, pendente/tentado, confirmado pelo destino ou `unknown` em campos separados; estado muda apenas em evento da fase respectiva | gravação local via comando Tauri não é entrega; sem ACK não pode aparecer como enviada/entregue/recebida; retry/replay depende de SPEC-004 e não duplica operação |
 | Foco/teclado | executar jornadas sem mouse, abrir diálogo, negar/dispensar e retornar | foco inicial, ordem, rótulo e retorno ao ponto de origem permanecem utilizáveis; erro tem ação acessível | não prender foco nem esconder estado atrás de hover/cor; casos ficam OPEN até design/capability da interface definido |
 | Leitor de tela/texto/contraste/motion | percorrer estados normal, offline, stale, negado, erro e SOS prioritário | nomes e atualizações essenciais são anunciados; informação não depende de cor/animação; conteúdo ampliado permanece disponível | alternativa não pode omitir motivo/recuperação; anúncio não repetitivo exige decisão de política de frequência |
 | Layout/plataforma reduzida | abrir área não suportada, janela sem espaço ou recurso sem capability | mensagem identifica recurso/área e alternativa, preserva estado não relacionado | não afirmar que serviço está operante; não descartar dado local ou atividade por mera indisponibilidade visual |
@@ -201,24 +227,25 @@ Cada linha é caso futuro sem ID: `NOT_ASSIGNED`; `observed=NOT_EXECUTED`. Para 
 
 ### 12.4 Estado, permissão e recuperação — responsabilidade
 
-Esta SPEC descreve o que a pessoa observa. Dono do domínio determina autoridade e estado de SOS/Guardian/PTT; Alex especifica persistência/estado local e a fronteira offline; Kleppmann/Graydon definem sync/evento; Donny cobre fronteiras iOS e Chet cobre Android, conforme atribuições atuais. Em macOS, Lea é integradora documental de jornada/UX/acessibilidade desktop e Alex cobre a interface documental do estado local/FFI; nenhum dos dois recebe responsabilidade por APIs/capabilities nativas, suporte por versão, plantão ou validação. Margaret decide a jornada e semântica de produto. A UI não inventa transições, retenção nem ordem de retry. Para cada área, exibir separadamente conectividade, disponibilidade local (`absent`, memória não durável, persistido, inacessível), autorização (`valid`, denied, expired, unknown), sync (`pending`, attempted, destination-confirmed, unknown), frescor e capacidade por função; nomes de wire-state dependem da conciliação com SPEC-014/004. Escrita local/FFI não é commit, sync nem entrega; falha de persistência não pode ser apresentada como durável. Mutação offline só é permitida se domínio e política/grant a autorizam. Retry/replay segue SPEC-004, retenção/recuperação SPEC-005 e autorização SPEC-002; FFI deve resolver ownership/lifetime, erro, executor/thread, async/cancelamento/shutdown antes de fixar bindings. Revogação deve impedir acessos subsequentes quando comprovada pela autoridade pertinente; remoção de cópias, propagação offline, conflitos e reconciliação seguem contratos de estado/sync ainda dependentes.
+esta SPEC descreve o que a pessoa observa. Dono do domínio determina autoridade e estado de SOS/Guardian/PTT; Alex especifica persistência/estado local e a fronteira offline; Kleppmann/Graydon definem sync/evento; Donny cobre fronteiras iOS e Chet cobre Android, conforme atribuições atuais. Lea é integradora documental de jornada/UX/acessibilidade para todas as engines; Alex cobre a interface documental do estado local e dos comandos/eventos Tauri; nenhum dos dois recebe responsabilidade por APIs/capabilities nativas, suporte por versão, plantão ou validação. Margaret decide a jornada e semântica de produto. A UI não inventa transições, retenção nem ordem de retry. Para cada área, exibir separadamente conectividade, disponibilidade local (`absent`, memória não durável, persistido, inacessível), autorização (`valid`, denied, expired, unknown), sync (`pending`, attempted, destination-confirmed, unknown), frescor e capacidade por função; nomes de wire-state dependem da conciliação com SPEC-014/004. Escrita local não é commit, sync nem entrega; falha de persistência não pode ser apresentada como durável. Mutação offline só é permitida se domínio e política/grant a autorizam. Retry/replay segue SPEC-004, retenção/recuperação SPEC-005 e autorização SPEC-002; o contrato de comandos/eventos Tauri deve resolver erro tipado, cancelamento solicitado/observado/concluído, executor e shutdown antes de ser aceito (SPEC-014 §7). Revogação deve impedir acessos subsequentes quando comprovada pela autoridade pertinente; remoção de cópias, propagação offline, conflitos e reconciliação seguem contratos de estado/sync ainda dependentes.
 
 ### 12.5 OPENs do complemento
 
-- **Matriz de capacidades/versões:** por plataforma, produto/oferta, recurso e estado foreground/background; donos de UX documental: Lea para jornadas/acessibilidade desktop; Alex para estado local/FFI; Donny para iOS, Chet para Android. Dono técnico de API/capability/suporte macOS ainda não designado. Fechamento: fontes oficiais e homologação documental sem presumir API.
+- **Matriz de capacidades/versões:** por **engine de WebView** (WKWebView macOS/iOS, WebView2, WebKitGTK, Android WebView), produto/oferta, recurso e estado foreground/background; donos de UX documental: Lea para jornadas/acessibilidade; Alex para estado local e comandos/eventos Tauri; Donny para iOS, Chet para Android. Dono técnico de API/capability/suporte macOS ainda não designado. Fechamento: fontes oficiais e homologação documental sem presumir API nem versão de engine.
+- **Plugins nativos e extensão iOS:** quais capacidades (push, BLE/beacon, localização em segundo plano, áudio/PTT em segundo plano, Live Activities/Dynamic Island, NFC/biometria, atalhos, discador) precisam de plugin Tauri, qual contrato tipado cada um expõe, quem é dono e qual teste próprio valida. Fechamento: inventário por capacidade com contrato, dono e caso; nenhuma capacidade declarada sem plugin e teste (ADR-068).
 - **Jornada e rotas das áreas RF-034:** estrutura de navegação e áreas exibidas por perfil; dona: Margaret; fechamento: escopo e regras de conteúdo aprovados e rastreados.
-- **Estado local/offline/FFI:** cache autorizado, idade/frescor, fila, conflitos, retry, falha de escrita e reconciliação; dono: Alex/SPEC-014 e Kleppmann/SPEC-004; fechamento: contrato de origem e transições explícito, incluindo ownership/lifetime, erro, executor/thread, async/cancelamento/shutdown na fronteira FFI.
+- **Estado local/offline:** cache autorizado, idade/frescor, fila, conflitos, retry, falha de escrita e reconciliação; dono: Alex/SPEC-014 e Kleppmann/SPEC-004; fechamento: contrato de origem e transições explícito, incluindo erro tipado, cancelamento, executor e shutdown nos comandos/eventos Tauri (SPEC-014 DRAFT-0.6 §7).
 - **Permissões por feature e sistema:** quando pedir, negado/revogado, Settings/manual action, capacidade indisponível; donos: plataformas; fechamento: matriz por SO/release apoiada por documentação oficial.
 - **Acessibilidade por desktop/web:** padrões observáveis de teclado/foco/leitor/zoom/contraste/motion e ações de recuperação; dono: UX com revisores de plataforma; fechamento: casos vinculados às superfícies aprovadas.
 - **Web:** escopo por jornada permanece aberto; produto precisa decidir comportamento e cobertura antes de qualquer alegação de N/A ou aceite web.
-- **Persistência local e retry:** gravação via fronteira local/FFI não prova envio ou entrega; replay depende de SPEC-004, retenção/recuperação de SPEC-005 e autorização de SPEC-002. Seleção/binding, lifecycle e compatibilidade por sistema operacional não foram validados.
+- **Persistência local e retry:** gravação feita pela fronteira local (comando Tauri) não prova envio ou entrega; replay depende de SPEC-004, retenção/recuperação de SPEC-005 e autorização de SPEC-002. Contrato por comando/evento, lifecycle, armazenamento protegido por engine e compatibilidade por versão de engine/SO não foram validados.
 - **Prioridade/energia RF-043:** P0–P3 é direção documental em `aplicativo-operacao-normal.md:6`, não se transforma nesta SPEC em agenda normativa para desktop; perfis de energia, metas e impacto continuam OPEN com produto/plataformas.
 
 Nenhum desses OPENs autoriza escolha de framework, serviço ou API. Critério de fechamento deste complemento: Margaret/Alex e responsáveis de plataforma revisam as fronteiras; tabela de estados referencia SPECs de domínio/offline; matrizes de plataforma e casos são completados sem valores ou suporte inventados; responsável técnico de API/capability macOS é explicitamente designado; James revisa o novo hash. Não representa implementação, suporte validado ou aprovação de RF-034.
 
 ### 12.6 Insumo de estado local recebido de Alex Crichton
 
-Alex confirmou, em mensagens 984a0856-49d4-4dc7-b6a0-7c1029f6cee4 e 37122cf4-63c0-4d64-b9b7-29db6cbbf428, as distinções entre disponibilidade local (ausente/memória não durável/persistido/inacessível), autorização (válida/negada/expirada/desconhecida), sync (pendente/tentado/confirmado por destino/unknown), frescor e capacidade. A mutação offline depende do domínio/política/grant; falha de escrita não prova durabilidade; replay, retenção/recuperação e autorização dependem das SPECs 004/005/002. Integrei essas distinções aos cenários e à fronteira da seção 12.4. FFI, binding, lifecycle e compatibilidade por OS seguem OPEN; P0–P3/energia não foram promovidos a nova política desktop. Nenhum caso executado.
+Alex confirmou, em mensagens 984a0856-49d4-4dc7-b6a0-7c1029f6cee4 e 37122cf4-63c0-4d64-b9b7-29db6cbbf428, as distinções entre disponibilidade local (ausente/memória não durável/persistido/inacessível), autorização (válida/negada/expirada/desconhecida), sync (pendente/tentado/confirmado por destino/unknown), frescor e capacidade. A mutação offline depende do domínio/política/grant; falha de escrita não prova durabilidade; replay, retenção/recuperação e autorização dependem das SPECs 004/005/002. Integrei essas distinções aos cenários e à fronteira da seção 12.4. Após a ADR-068, a fronteira técnica deixa de ser FFI e passa a ser comando/evento Tauri (SPEC-014 DRAFT-0.6 §7); contrato por comando, cancelamento, lifecycle e compatibilidade por engine/SO seguem OPEN. P0–P3/energia não foram promovidos a nova política desktop. Nenhum caso executado.
 
 ### 12.7 Mapeamento de UX para inventário de cliente da SPEC-014
 
@@ -231,7 +258,7 @@ SPEC-014 §8 define somente possibilidade de semântica local comum sob condiç�
 | Autorização válida, negada, expirada, desconhecida | indicar função limitada e respeitar decisão; sem Settings/API assumida | mesmo princípio, caminhos de SO OPEN | mesmo princípio, caminhos de SO OPEN | autorização/escopo/propagação dependem SPEC-002 e contrato por plataforma OPEN |
 | Sync pendente, tentado, destino-confirmado, unknown | comunicar fases distintas; local write não é envio | idem | idem | SPEC-004 define evento/replay; confirmação e nomes finais OPEN |
 | Lifecycle, bloqueio, shutdown/restart | indicar perda/inacessibilidade somente com evidência | cenários e mecanismo OPEN | cenários e mecanismo OPEN | lifecycle desktop nativo não inventariado; responsável técnico adicional/designação e fontes OPEN |
-| FFI e binding do núcleo | erro/cancelamento não vira sucesso de UI | sem binding definido; não presumir Rust consumido | sem binding definido; não confundir alvo cliente com server | Alex integra contrato comum; adapters nativos/ownership/async/thread/cancelamento/shutdown OPEN; revisão técnica independente necessária |
+| Comandos/eventos Tauri do núcleo | erro/cancelamento não vira sucesso de UI sob WKWebView | mesmo contrato tipado sob WebView2; integração nativa para armazenamento/chave OPEN | mesmo contrato tipado sob WebKitGTK; integração nativa para armazenamento/chave OPEN | Alex integra o contrato comum de comandos/eventos (SPEC-014 DRAFT-0.6 §7); cancelamento, lifecycle e shutdown OPEN; revisão técnica independente necessária |
 | Recuperação / migração / chave indisponível | apresentar dado não disponível e ação segura, se definida | comportamento por classe OPEN | comportamento por classe OPEN | SPEC-005 dados; SPEC-002 autorização; nenhuma disposição ou recovery policy selecionada aqui |
 
 Cobertura de interface documentada por Lea abrange somente os estados e jornadas observáveis; Alex integra contratos técnicos comuns de cliente/local/FFI nos três desktops conforme atribuição de Alan. SPEC-014 §18 confirma que a integração não define bindings específicos, APIs, armazenamento, lifecycle, chaves ou compatibilidade por versão. Não há responsável técnico nativo nem revisor especializado designado para macOS/Windows/Linux; essa lacuna impede concluir suporte, mas não elimina os alvos do produto. Donny continua apenas iOS; Chet, Android. Plataformas e arquiteturas nomeadas no produto não significam suporte validado. Web fica fora desta tabela porque seu fluxo de estado local e jornada de página ainda não foram definidos; não é excluída do produto.
@@ -253,6 +280,44 @@ Na cópia local consultada em 2026-11-16, SPEC-014 §18 tinha SHA-256 `17ebf2717
 ### 12.11 Divergência de cópias da SPEC-014
 
 Na re-revisão, James confirmou que SPEC-014 §18 na cópia local corresponde ao SHA-256 `e16b4a252e4713374d05575dd725280b1eb451558b15c3dd55ed91ffa79c8670` citado em §12.7. Corrigiu também a origem do hash `df02aea8`: ele veio de uma consulta ao caminho errado e não constitui evidência de divergência da cópia canônica. Não foram encontradas cópias arquivadas dos hashes históricos `17eb…` ou `df02…`; por isso, a recuperação/reconciliação histórica permanece OPEN, embora a referência atual seja rastreável na cópia local. Suporte e implementação continuam não verificados.
+
+- **ADR-064 (mantido da DRAFT-0.5):** `LP-offline-sos-ios`, `LP-offline-sos-android` e `LP-offline-sos-desktop` — sem F1/F2/F3 a UI avisa antes do acionamento, oferece o discador e não promete persistência.
+
+## Mudanças desta versão — ADR-068 (DRAFT-0.6)
+
+**Decisão de origem:** [ADR-068](../06-planejamento/decisoes.md), aprovada pelo usuário em 17/11/2026, **supera a ADR-055**. Cliente único em React 19 + Astryx + shadcn + Tailwind, empacotado com Tauri 2 para macOS, Windows, Linux, iOS e Android; núcleo Rust no processo do app, exposto por comandos/eventos tipados; superfície nativa apenas em plugins. Esta revisão não aprova nada: continua DRAFT/OPEN.
+
+### O que muda
+
+1. **Unidade de especificação.** Sai “por plataforma nativa”, entra **por engine de WebView e por capacidade declarada** (§2): WKWebView (macOS e iOS), WebView2 (Windows), WebKitGTK (Linux), Android WebView.
+2. **Regra de fronteira vinculante.** Nenhuma tela conhece plataforma, engine, versão de SO ou API nativa; telas consomem capacidades declaradas. A regra tem caso negativo próprio (§8.1, `LP-webview-native-import`).
+3. **Live Activities/Dynamic Island** deixam de ser “superfície do SO a homologar” e passam a exigir **extensão nativa iOS** exposta por plugin Tauri; **push** passa a exigir **plugin Tauri** por plataforma. Sem plugin, a capacidade é `unavailable` e não há promessa de superfície (§2).
+4. **Acessibilidade interna** roda na engine de cada alvo; equivalência entre WKWebView, WebView2, WebKitGTK e Android WebView é OPEN e não pode ser presumida (§7, §8.1).
+5. **Matrizes** §12.2 e §12.7 passam a nomear engine onde antes nomeavam toolkit nativo; §9 ganha duas linhas OPEN (matriz por engine e superfície nativa iOS de Live Activity).
+
+### O que não muda
+
+- Contratos de estado (§4), regras de apresentação por atividade (§5), jornada/permissão/recuperação (§6), privacidade e acessibilidade observáveis (§7) e todos os casos `LP-*` (§8) permanecem íntegros.
+- Invariantes herdados seguem palavra por palavra: classe de ACK (ADR-058), `confidentiality` herdada (ADR-060), retenção fail-closed e prazos por classe (ADR-062/065), compatibilidade N/N-1 antes do efeito (ADR-056), SOS offline negado sem raiz de confiança (ADR-064), prioridade SOS (ADR-053).
+- A recusa de estender RF-042 a web/desktop continua; a razão agora é o requisito, não a escolha de toolkit.
+- Nenhum parâmetro temporal, versão de engine, entitlement ou limiar é fixado nesta versão.
+
+### Impacto por requisito
+
+| Requisito | Impacto desta versão |
+|---|---|
+| RF-034 | O cliente é um só, com as mesmas áreas; a matriz deixa de ser macOS/Windows/Linux por toolkit e passa a ser por engine (§12.2). Nenhuma área, rota ou capacidade nova é prometida; a jornada continua de Margaret e a cobertura integral de RF-034 segue não reivindicada. |
+| RF-043 | Prioridade e energia continuam por comportamento observável (P0–P3 como direção, não agenda normativa). O que muda é a fronteira que a tela consome: comando/evento Tauri (SPEC-014 DRAFT-0.6 §7), não binding nativo. Metas de energia e latência seguem OPEN; nenhuma medição foi feita. |
+| RF-042 | Live Presence continua restrito a iOS/Android. No iOS a superfície exige extensão nativa; no Android, plugin nativo; a projeção renderizada na tela é web. Elegibilidade por aparelho/versão continua OPEN. |
+| RNF-016 | Inalterado: rótulo não excede evidência; push aceito ou notificação exibida não é prova de entrega, leitura ou atendimento. |
+
+### SwiftUI e Kotlin deixam de ser alvo
+
+Nenhum código de tela em SwiftUI ou Jetpack Compose é especificado, e as duas stacks saem como alvo de UI. Swift/Objective-C permanecem apenas onde a ADR-068 permite superfície nativa: extensão iOS de Live Activity e plugins Tauri. Kotlin, se usado, fica dentro de plugin nativo Android, nunca como camada de tela. WinUI 3 e Qt Quick idem.
+
+### Rastreabilidade, revisão e limites
+
+As revisões de James Bach registradas em §11, §12.8, §12.9 e §12.11 são de versões anteriores (`DRAFT-0.1` a `DRAFT-0.4`) e **não** cobrem esta edição; revisão independente deste hash permanece pendente. `SPECS.md` ainda cita o hash anterior de SPEC-013 (G3-01); atualizar o catálogo exige autorização fora desta tarefa e fica OPEN. Nada foi executado: todos os casos, inclusive os novos de §8.1, permanecem `NOT_ASSIGNED` / `NOT_EXECUTED`, e nenhum teste de engine, plugin, extensão iOS, acessibilidade em WebView ou push foi realizado.
 
 ## Mudanças desta versão — ADR-058 e ADR-060
 
@@ -313,7 +378,7 @@ Uma linha por requisito coberto. Células citam casos já existentes (§8 `LP-*`
 
 | Requisito | Positivo (ID local) | Negativo | Borda | Falha/recuperação | Nota |
 |---|---|---|---|---|---|
-| RF-042 | LP-SOS-normal; LP-Guardian-normal; LP-PTT-normal; LP-WiFi-normal | LP-terminal; LP-duplicate-order | LP-capability; LP-concurrency | LP-offline-recovery; LP-permissão | Cobertura iOS/Android; matriz de versão/capability por SO segue OPEN (§9). Web e desktops sem RF-042 não recebem caso por analogia. |
+| RF-042 | LP-SOS-normal; LP-Guardian-normal; LP-PTT-normal; LP-WiFi-normal | LP-terminal; LP-duplicate-order | LP-capability; LP-concurrency; LP-engine-api-divergence | LP-offline-recovery; LP-permissão; LP-engine-audio-background | Cobertura iOS/Android; matriz de versão/capability por engine segue OPEN (§9). Web e desktops sem RF-042 não recebem caso por analogia. Plugins e extensão iOS entram em §8.1 (ADR-068) e permanecem `NOT_EXECUTED`. |
 | RNF-016 | LP-PTT-normal; LP-SOS-normal | LP-terminal; S013-058-N1 | LP-lock-screen; LP-capability | LP-stale; S013-058-F1 | Rótulo nunca excede a evidência; classe de ACK é exibida como recebida (ADR-058), sem promoção por tempo. |
-| RF-034 (§12.3) | Navegação normal; Modos simultâneos | Mensagem sem entrega; Capacidade ausente | Layout/plataforma reduzida | Inicialização offline; Permissão negada/revogada | Complemento desktop; capability/autorização por SO seguem OPEN (§12.5) e não há paridade presumida entre macOS/Windows/Linux. |
+| RF-034 (§12.3) | Navegação normal; Modos simultâneos | Mensagem sem entrega; Capacidade ausente; LP-webview-native-import | Layout/plataforma reduzida | Inicialização offline; Permissão negada/revogada; LP-engine-permission-denied | Complemento desktop, agora por engine (§12.2) após a ADR-068; capability/autorização por engine seguem OPEN (§12.5) e não há paridade presumida entre WKWebView, WebView2 e WebKitGTK. |
 | RF-033 (dependência) | n/a — esta SPEC não reivindica aceite próprio de prioridade sob link restrito (§1) | S013-059-N1 | S013-059-B1 | S013-059-F1 | Apenas o efeito de UI do grant é verificado aqui; prioridade e orçamento pertencem à SPEC-023. |

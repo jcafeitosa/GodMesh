@@ -1,12 +1,16 @@
 # SPEC-008 — Transcrição ASR autorizada por canal
 
-**Versão:** DRAFT-0.4 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
+**Versão:** DRAFT-0.5 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
 **Autor documental:** Daniel Povey · **Revisor designado:** Bruce Schneier  
 O parecer existente refere-se ao DRAFT-0.1. Revisão independente do DRAFT-0.2 pendente. Execução: `NOT_EXECUTED`. Metas quantitativas: **OPEN — a medir**.
 
 **Requisitos diretamente cobertos:** RF-025; RNF-011. Cobertura destes requisitos é parcial enquanto as decisões abaixo permanecerem abertas. Esta SPEC não declara requisito aprovado por ela, implementação ou validação.
 
 ## Mudanças desta versão
+
+### DRAFT-0.5 — critério observável no lugar de “conforme política”
+
+`C008-062-F` deixa de exigir “bloqueio conforme política” e passa a nomear o código e o estado observáveis (`RETENTION_POLICY_MISSING` quando classe/cópia/prazo não resolvem, estado da cópia `unknown`/`pending` até evidência de disposição). Nenhum valor numérico, aprovação ou execução é criado.
 
 ### DRAFT-0.4 — casos por requisito e casos P desbloqueados (C3-1)
 
@@ -258,7 +262,7 @@ Casos planejados, sem ID formal: `Estado` é sempre `NOT_EXECUTED` e o ID formal
 | C008-062-P | ADR-062 | Política com finalidade, classe e cópia declaradas para áudio, parcial e final, mas **prazo e gatilho não decididos** (`OPEN RET-1`) | Gerar e persistir transcrição | Esperado reformulado com parâmetro ausente: objetos gravados com a política identificada e `retention_policy_ref` presente; prazo e gatilho reportados como `param_not_configured`, sem expiração automática anunciada; retenção de áudio e de texto registrada de forma independente | P | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C008-062-N | ADR-062 | Nenhuma política aprovada para a classe de texto/áudio daquela cópia | Persistir transcrição ou áudio | Persistência negada com erro explícito; nenhum texto ou áudio gravado, indexado ou exportado; motivo informado sem interromper o PTT | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C008-062-B | ADR-062 | Cópia em backup/exportação com classe própria e política distinta | Expurgar a cópia primária | Estado por cópia registrado separadamente; cópia sem confirmação permanece `unknown`/`pending`; nenhuma disposição global declarada | B | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
-| C008-062-F | ADR-062 | Expiração vencida e disposição física sem evidência | Consultar, restaurar e repetir o evento após a expiração | Consulta bloqueada conforme política antes de haver evidência de disposição; restore/replay não reexpõe conteúdo antes da reconciliação; estado da cópia `unknown`/`pending` | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
+| C008-062-F | ADR-062 | Expiração vencida e disposição física sem evidência | Consultar, restaurar e repetir o evento após a expiração | Consulta negada com `RETENTION_POLICY_MISSING` enquanto a classe/cópia/prazo não resolverem, antes de haver evidência de disposição; restore/replay não reexpõe conteúdo antes da reconciliação; estado da cópia permanece `unknown`/`pending` até recibo de descarte por destino | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C008-063-P | ADR-063 | Pacote do worker/modelo ASR com assinatura válida, SBOM por release e `generation` igual ou superior ao piso | Carregar o worker e processar uma fala autorizada | Worker carregado após verificação; estado `processing` → `final`; versão e `generation` registradas na evidência | P | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C008-063-N | ADR-063 | Artefato de modelo com `generation` inferior ao piso assinado | Carregar o modelo | Modelo não carregado; estado `processor_unavailable`; nenhum processamento e nenhum texto gerado | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C008-063-N2 | ADR-063 | Artefato de modelo adulterado, com assinatura inválida | Carregar o modelo | Rejeição antes de qualquer execução; nenhum modelo carregado; falha registrada sem expor conteúdo de áudio | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
