@@ -154,23 +154,23 @@ Especificação documental apenas; nenhuma classe está efetiva por este documen
 
 ## Política inicial de retenção por classe (ADR-065)
 
-> **Origem:** decisão do CTO em 17/11/2026, a pedido do usuário, para desbloquear a ADR-062. **Não é parecer jurídico.** Cada prazo precisa de confirmação por jurisdição antes de operação comercial. Critério: o mínimo que sustenta a função declarada, com folga para disputa, suporte e auditoria.
+> **Origem:** decisão do CTO em 17/11/2026, a pedido do usuário, para desbloquear a ADR-062. **Não é parecer jurídico.** Cada prazo precisa de confirmação por jurisdição antes de operação comercial. Critério: o mínimo que sustenta a função declarada, com folga para disputa, suporte e auditoria. Cada linha declara as seis dimensões da ADR-062 (finalidade, classe, cópia, jurisdição, prazo, gatilho); a política só é efetiva quando finalidade, cópia e jurisdição estiverem confirmadas por jurisdição — até lá vale o fail-closed. Jurisdição padrão: Brasil (primária) e Colômbia (secundária), conforme ADR-066.
 
-| Classe | Conteúdo retido | Prazo padrão | Justificativa | Exceção |
-|---|---|---|---|---|
-| Mensagem (conteúdo) | texto, anexo, metadados de autoria | 24 meses | permite histórico útil e defesa em disputa sem virar arquivo permanente | tenant pode reduzir; E2EE não permite busca |
-| Metadado de mensagem | remetente, destinatário, canal, horário, estado de entrega | 24 meses | necessário para auditoria e suporte | — |
-| Transcrição ASR | texto derivado de áudio autorizado | 12 meses | subproduto de maior risco; função cumprida em prazo menor | canal com gravação opt-in segue a classe de gravação |
-| Áudio PTT / gravação | mídia de voz | **não retido por padrão**; gravação opt-in 30 dias | voz é o dado mais sensível e a função não exige arquivo | opt-in explícito por canal, com aviso a todos |
-| Posição e trajetória | observações GNSS/BLE/Wi-Fi, histórico | 30 dias | suficiente para mapa e suporte; reduz vigilância | Guardian: 7 dias após fim da sessão; SOS: 12 meses (ver abaixo) |
-| Sessão Guardian | trajetória e check-ins de uma sessão | 7 dias após o término | prestação de contas do acompanhamento | — |
-| Incidente SOS | estado, ACK por etapa, evidência de acionamento, posição precisa autorizada | 12 meses | evidência de dever de cuidado e de disputa | hold legal |
-| Log de auditoria | acesso a dado sensível, mudança de papel, emissão/revogação de grant | 12 meses | detecção e investigação de abuso | acesso a posição precisa: 24 meses |
-| Telemetria e sinais | métricas, traces, logs técnicos | 30 dias brutos; 13 meses agregados | operação e capacidade; agregado sem identificador | — |
-| Wi-Fi: cadastro de AP | coordenadas e titularidade | enquanto o AP estiver ativo + 90 dias | o dado é do administrador, não do visitante | revogação imediata do opt-in público |
-| Wi-Fi: sessões de acesso | usuário/GMC, AP, duração, volume | 90 dias; **sem histórico de navegação** | auditoria de acesso, não de comportamento | — |
-| CrowdFind | token rotativo e avistamentos | token 15 min; avistamento 24 h | reduz correlação e rastreio | — |
-| Backups | cópia do estado persistido | 35 dias de rotação | recuperação de desastre sem arquivo morto | hold legal |
-| Conta encerrada | dados de conta | 30 dias de carência; cópias em backup expiram no ciclo | permite reverter engano sem reter indefinidamente | obrigação legal específica |
+| Classe | Finalidade | Cópia | Jurisdição | Prazo | Gatilho de descarte | Justificativa |
+|---|---|---|---|---|---|---|
+| Mensagem (conteúdo) | histórico e disputa | primária; secundária só meta | BR/CO (declarada) | 24 meses | `expiry` a partir do último evento do canal | permite histórico útil sem arquivo permanente; E2EE não permite busca |
+| Metadado de mensagem | auditoria e suporte | primária; secundária só meta | BR/CO | 24 meses | `expiry` | necessário para suporte e disputa |
+| Transcrição ASR | função do canal autorizado | primária | BR/CO | 12 meses | `expiry` | subproduto de maior risco; função cumprida em prazo menor |
+| Áudio PTT / gravação | não retido por padrão | — | — | 0 (efêmero); opt-in 30 dias | `opt_in_end` | voz é o dado mais sensível e a função não exige arquivo |
+| Posição e trajetória | mapa e suporte | primária | BR/CO | 30 dias | `expiry` | reduz vigilância; suficiente para mapa |
+| Sessão Guardian | prestação de contas do acompanhamento | primária | BR/CO | 7 dias após o fim | `session_end + 7d` | vínculo temporário por desenho |
+| Incidente SOS | dever de cuidado e disputa | primária; cópia de recuperação autorizada | BR/CO | 12 meses | `incident_closed + 12m` | evidência de acionamento e ACK; posição precisa só com autorização |
+| Log de auditoria | detecção e investigação de abuso | primária; exportação autorizada | BR/CO | 12 meses (posição precisa: 24 meses) | `expiry` | rastreabilidade proporcional; par com a classe auditada |
+| Telemetria e sinais | operação e capacidade | agregado pode ir à secundária | BR/CO | 30 dias brutos; 13 meses agregados | `rollup_complete` | operação sem identificador |
+| Wi-Fi: cadastro de AP | titularidade do AP | primária | BR/CO | enquanto ativo + 90 dias | `ap_inactive + 90d` | dado do administrador, não do visitante |
+| Wi-Fi: sessões de acesso | auditoria de acesso | primária | BR/CO | 90 dias; sem navegação | `expiry` | auditoria de acesso, não de comportamento |
+| CrowdFind | resolução de avistamento | primária | BR/CO | token 15 min; avistamento 24 h | `token_rotate` / `expiry` | reduz correlação e rastreio |
+| Backups | recuperação de desastre | primária + cópia secundária declarada | BR/CO | 35 dias de rotação | `backup_expiry` | recuperação sem arquivo morto; restore testado |
+| Conta encerrada | reverter engano | primária + backup | BR/CO | 30 dias de carência | `delete_requested + 30d` | permite desfazer erro sem reter indefinidamente |
 
 Regras de execução: prazo é por classe **e por cópia**; tenant pode reduzir, nunca ampliar sem nova decisão registrada; expiração é verificada e registrada, não presumida; classe sem política falha fechada (ADR-062); conteúdo já entregue a destinatário ou bridge não é recolhível; hold suspende descarte com autoridade, escopo e revisão a cada 90 dias.
