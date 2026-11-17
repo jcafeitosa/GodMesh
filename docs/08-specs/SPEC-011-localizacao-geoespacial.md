@@ -1,6 +1,6 @@
 # SPEC-011 — Localização geoespacial
 
-**Versão:** DRAFT-0.5  
+**Versão:** DRAFT-0.7  
 **Data:** 2026-11-17  
 **Estado:** DRAFT / OPEN. Não aprovada.  
 **Autor documental:** Paul Ramsey  
@@ -216,7 +216,7 @@ Casos documentais planejados; nenhum parâmetro ausente foi preenchido. ID forma
 | S011-061-B1 | ADR-061 | Duplicata do mesmo `event_id` de observação/geofence no outbox | Replay do outbox | Uma única linha de observação e um único evento de geofence; duplicata descartada pela chave idempotente e registrada; nenhuma transição de geofence emitida duas vezes | B | NOT_EXECUTED |
 | S011-061-F1 | ADR-061 | Crash entre commit e publish | Reinício do serviço com outbox pendente | Outbox reprocessada após retomada; observação não duplicada pela chave idempotente; nenhuma perda silenciosa | F | NOT_EXECUTED |
 | S011-061-F2 | ADR-061 | Autoridade de escrita `stale`/`unknown` ou fence inválido | Mutação forte de observação/histórico | Bloqueio com erro explícito de autoridade; nenhuma escrita aceita; leitura permanece com estado incerto declarado | F | NOT_EXECUTED |
-| S011-062-P1 | ADR-062 | Política com `(finalidade, classe, cópia)` declarados, mas **jurisdição, prazo e gatilho não decididos** (OPEN) | Gravação de observação e derivado de geofence | Esperado reformulado com parâmetro ausente: gravação aceita com `retention_policy_ref` presente; prazo, jurisdição e gatilho reportados como `param_not_configured`; nenhuma expiração automática anunciada e nenhuma degradação apresentada como conformidade | P | NOT_EXECUTED |
+| S011-062-P1 | ADR-062 | Política com `(finalidade, classe, cópia)` declarados, com jurisdição BR/CO; com jurisdição BR/CO e prazo/gatilho da ADR-065 (posição 30 dias, `expiry`) | Gravação de observação e derivado de geofence | Esperado reformulado com parâmetro ausente: gravação aceita com `retention_policy_ref` presente; prazo, jurisdição e gatilho reportados como `param_not_configured`; nenhuma expiração automática anunciada e nenhuma degradação apresentada como conformidade | P | NOT_EXECUTED |
 | S011-062-N1 | ADR-062 | Classe/cópia sem política aprovada | Tentativa de persistir histórico ou derivado | Falha fechada com erro explícito de política ausente; zero linhas persistidas; operação limitada ao efeito imediato e degradação declarada | N | NOT_EXECUTED |
 | S011-062-F1 | ADR-062 | Política expirada; cópias enumeradas incluem cache, índice, réplica e backup | Gatilho de descarte acionado | Descarte registrado por cópia com estado individual; cópia sem confirmação permanece `pending`; nenhuma alegação de remoção global | F | NOT_EXECUTED |
 | S011-062-B1 | ADR-062 | Hold com autoridade, escopo e revisão registrados sobre dado de auditoria | Consulta de acesso comum ao dado retido | Retenção estendida sob prazo próprio; acesso comum não reativado; revisão do hold registrada | B | NOT_EXECUTED |

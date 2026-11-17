@@ -1,7 +1,7 @@
 # SPEC-022 — Produto: conta, organizações e governança
 
 **Identificador:** SPEC-022
-**Versão:** DRAFT-0.5
+**Versão:** DRAFT-0.6
 **Data:** 2026-11-17
 **Estado:** DRAFT / OPEN. Não revisada, não aprovada, não autoriza implementação.
 **Autora documental:** Margaret Hamilton (pod P5 — Emergência, produto e jornadas)
@@ -382,7 +382,7 @@ Casos planejados desta versão, complementares a §7 e sem substituí-la. Nenhum
 | S022-061-F | ADR-061 transação/recuperação | Falha entre criação da organização e gravação da auditoria | Retomar a operação com a mesma `idempotency_key` | Reconciliação conclui sem organização sem `owner`; nenhuma auditoria ausente publicamente declarada como completa; resultado permanece `outcome_unknown` até prova | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S022-061-F2 | ADR-061 transação/recuperação | Restore com Inbox em voo e autoridade `stale`/`unknown` | Reabrir acesso administrativo | Mutação forte bloqueada com `authority_unavailable`/`stale_epoch`; replay reconstrói projeção e não reemite convite, e-mail ou push; revalidação de autoridade, epoch, membership e retenção antes de reabrir | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S022-061-B | ADR-061 transação/recuperação | Organização criada com `outbox` commitado e publicação pendente | Consultar estado da criação antes da publicação | `tenant_id` e auditoria legíveis com prova de commit; `ack_class` máximo coerente com o commit; materialização e efeito externo ausentes; leitor não publica nem promove classe | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
-| S022-062-P | ADR-062 retenção fail-closed | Classe de conta/convite/membership com política aprovada em `(finalidade, classe, cópia, jurisdição)` e prazo/gatilho não decididos | Consultar e depois aplicar o gatilho de descarte | Registro grava `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo ou gatilho aplicado como aprovado; estado de descarte por cópia permanece `unknown` na UI e na auditoria | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S022-062-P | ADR-062 retenção fail-closed | Classe de conta/convite/membership com política aprovada em `(finalidade, classe, cópia, jurisdição)` com prazo e gatilho da ADR-065 | Consultar e depois aplicar o gatilho de descarte | Registro grava `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo ou gatilho aplicado como aprovado; estado de descarte por cópia permanece `unknown` na UI e na auditoria | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S022-062-N | ADR-062 retenção fail-closed | Classe sem política aprovada (OPEN-09) | Encerrar conta ou organização e excluir a classe | Operação falha fechada com `retention_policy_missing`; dado permanece; UI informa o que fica e por quê; nenhum descarte declarado | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S022-062-B | ADR-062 retenção fail-closed | Hold ativo sobre dados de uma classe | Encerrar conta ou organização | `closure_blocked_hold` explícito; estado `closed` não é declarado; hold exige autoridade, escopo e revisão e não reativa acesso comum | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S022-062-F | ADR-062 retenção fail-closed | Falha no meio de `closing` com cópias parciais | Retomar o encerramento | Retomada idempotente; nenhuma declaração de descarte sem prova; revogação e estado por cópia (bloqueio, descarte confirmado, pendência, cópia fora de controle) declarados por destino, nunca global | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |

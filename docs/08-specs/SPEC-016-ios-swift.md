@@ -1,6 +1,6 @@
 # SPEC-016 — cliente web offline, lifecycle e fronteira de comandos/eventos Tauri
 
-**Versão:** DRAFT-0.6
+**Versão:** DRAFT-0.8
 **Estado:** DRAFT / OPEN. Não aprovada, implementada ou validada.
 **Autor documental:** Alex Crichton (fronteira de comandos/eventos Tauri, estado offline e persistência). O recorte Swift/SwiftUI e iOS de Donny Wals passa a revisão de extensão nativa iOS.
 **Revisão independente designada:** Donny Wals (extensão nativa iOS, WKWebView e Live Activities), por hash desta versão.
@@ -296,7 +296,7 @@ Esta SPEC só pode avançar para revisão/aprovação quando: (a) IDs e subescop
 
 **ADR-056 — compatibilidade:** suporte declarado por versão e perfil versionado de cliente, com janela N/N-1 dentro do perfil publicado. Perfis concretos e janela de calendário permanecem OPEN até decisão de produto. Servidor rejeitando versão/feature incompatível deve fazê-lo antes de qualquer efeito e sem downgrade silencioso; a UI informa incompatibilidade e requisito de versão/perfil somente com dados fornecidos pela resposta. Não repetir mutação incompatível; falta de resposta conclusiva é desconhecido.
 
-**ADR-059 — offline:** únicas operações autorizadas: (1) abrir incidente SOS local e enfileirar; (2) check-in de sessão Guardian existente; (3) mensagem a canal já autorizado; (4) observação local de localização; (5) PTT apenas em rede local com grant de floor válido. Negar sempre localização precisa divulgada, mutação federada, criar/alterar grant, mudança de identidade, transmissão RF e transcrição remota. Exigir epoch comparável, frescor dentro do limite do perfil, ausência de revogação conhecida e anti-rollback verificável. `stale`, `unknown`, relógio incerto ou política indefinida negam. Frescor numérico desconhecido até medição.
+**ADR-059 — offline:** únicas operações autorizadas: (1) abrir incidente SOS local e enfileirar somente com F1/F2/F3 demonstrados — sem raiz de confiança a operação é negada e nada é enfileirado (ADR-064); (2) check-in de sessão Guardian existente; (3) mensagem a canal já autorizado; (4) observação local de localização; (5) PTT apenas em rede local com grant de floor válido. Negar sempre localização precisa divulgada, mutação federada, criar/alterar grant, mudança de identidade, transmissão RF e transcrição remota. Exigir epoch comparável, frescor dentro do limite do perfil, ausência de revogação conhecida e anti-rollback verificável. `stale`, `unknown`, relógio incerto ou política indefinida negam. Frescor numérico desconhecido até medição.
 
 **ADR-060 — confidencialidade:** expor `confidentiality` por canal e por perna; bridge, ASR e gravação que terminem a proteção são marcados `terminated`. Não rotular E2EE sem prova para canal/perna. Tela bloqueada não exibe posição precisa nem segredo.
 
@@ -333,7 +333,7 @@ Casos documentais planejados. ID formal: `NOT_ASSIGNED`. `Estado` em todos: `NOT
 | S016-061-F1 | ADR-061 | App encerrado pelo SO durante operação em voo | Retomada do app | Apenas estado persistido é reconstruído; nenhuma afirmação de trabalho no intervalo; nenhuma duplicação | F | NOT_EXECUTED |
 | S016-061-F2 | ADR-061 | Autoridade `stale`/`unknown` | Mutação forte | Bloqueio com estado explícito; funções independentes preservadas; nenhuma escrita aceita | F | NOT_EXECUTED |
 | S016-061-B1 | ADR-061 | Transação local com `outbox` commitado e publicação pendente | Consultar a operação antes do publish | Estado `pendente local` com prova de commit; `materialized` e efeito externo ausentes; leitor não publica nem promove classe de ACK | B | NOT_EXECUTED |
-| S016-062-P1 | ADR-062 | Política por classe existente para a coleta, com prazo ou gatilho não decidido | Coleta e gravação | Gravação aceita com `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo ou gatilho exibido como aprovado; minimização de registros de capacidade e transição mantida | P | NOT_EXECUTED |
+| S016-062-P1 | ADR-062 | Política por classe existente para a coleta, com prazo e gatilho da ADR-065 | Coleta e gravação | Gravação aceita com `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo ou gatilho exibido como aprovado; minimização de registros de capacidade e transição mantida | P | NOT_EXECUTED |
 | S016-062-N1 | ADR-062 | Classe sem política aprovada | Tentativa de persistir histórico ou dado correlacionável | Falha fechada com erro explícito; nenhum dado persistido; UI declara indisponibilidade | N | NOT_EXECUTED |
 | S016-062-F1 | ADR-062 | Política expirada; cópias incluem arquivo protegido, cache, backup e derivados de projeção | Gatilho de descarte | Descarte por cópia registrado; cópia sem confirmação pendente; nenhuma remoção global alegada | F | NOT_EXECUTED |
 | S016-062-B1 | ADR-062 | Hold com autoridade, escopo e revisão | Consulta comum ao dado retido | Dado retido sob prazo próprio; acesso comum não reativado | B | NOT_EXECUTED |

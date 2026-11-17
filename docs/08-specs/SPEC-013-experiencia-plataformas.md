@@ -1,6 +1,6 @@
 # SPEC-013 — Experiência e superfícies por engine de WebView e capacidade declarada
 
-**Versão:** DRAFT-0.6 · **Estado:** DRAFT / OPEN · **Autora:** Lea Verou · **Revisão independente designada:** James Bach (pendente desta versão/hash) · **Data:** 2026-11-17 · **Base de plataforma:** ADR-068 (cliente único web + Tauri 2)
+**Versão:** DRAFT-0.7 · **Estado:** DRAFT / OPEN · **Autora:** Lea Verou · **Revisão independente designada:** James Bach (pendente desta versão/hash) · **Data:** 2026-11-17 · **Base de plataforma:** ADR-068 (cliente único web + Tauri 2)
 
 > **Mudança de eixo nesta versão:** a unidade de especificação deixa de ser “plataforma nativa” (SwiftUI, WinUI 3, Qt Quick, Compose) e passa a ser **engine de WebView mais capacidade declarada** (WKWebView no macOS/iOS, WebView2 no Windows, WebKitGTK no Linux, Android WebView). Nenhuma tela conhece a plataforma; telas declaram e consomem capacidades. Ver “Mudanças desta versão — ADR-068”.
 
@@ -361,7 +361,7 @@ Casos documentais planejados de comportamento observável de UI. ID formal: `NOT
 | S013-061-N1 | ADR-061 | Sessão/incidente já em estado terminal | Replay de evento que reconstruiria projeção | Nenhuma notificação ou superfície é reaberta; terminal permanece terminal na tela | N | NOT_EXECUTED |
 | S013-061-F1 | ADR-061 | Autoridade `stale`/`unknown` | Ação de mutação forte apresentada na tela | Controle desabilitado com motivo e estado `unknown` exibido; nenhuma ação enviada; leitura continua disponível | F | NOT_EXECUTED |
 | S013-061-B1 | ADR-061 | Inbox separado da projeção; ACK máximo `persisted_local` | Exibição de mensagem | Estado exibido "aguardando materialização"; nenhum "materializado" ou "entregue" por inferência | B | NOT_EXECUTED |
-| S013-062-P1 | ADR-062 | Política por classe existente, com prazo não decidido | Abertura de histórico | Tela mostra `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo é exibido como aprovado nem como "retido por N"; a referência da política permanece identificada | P | NOT_EXECUTED |
+| S013-062-P1 | ADR-062 | Política por classe existente, com prazo e gatilho da ADR-065 | Abertura de histórico | Tela mostra `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo é exibido como aprovado nem como "retido por N"; a referência da política permanece identificada | P | NOT_EXECUTED |
 | S013-062-N1 | ADR-062 | Classe sem política aprovada | Tentativa de gravar e abrir histórico | UI declara indisponibilidade explícita ("histórico não disponível"); nenhum item aparece como salvo; degradação visível | N | NOT_EXECUTED |
 | S013-062-F1 | ADR-062 | Descarte em andamento por cópia; revogação local conhecida | Consulta ao item revogado | Estados por cópia exibidos; nenhuma mensagem de "removido de todos os lugares"; remoção remota não anunciada | F | NOT_EXECUTED |
 | S013-062-B1 | ADR-062 | Hold de auditoria ativo | Consulta comum ao item retido | Tela mostra dado retido para auditoria e acesso comum não reativado | B | NOT_EXECUTED |

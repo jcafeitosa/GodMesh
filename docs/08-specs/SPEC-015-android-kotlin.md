@@ -1,6 +1,6 @@
 # SPEC-015: clientes GodMesh por *engine* de WebView e por capacidade declarada
 
-**Versão:** DRAFT-0.5
+**Versão:** DRAFT-0.7
 **Data:** 2026-11-17
 **Estado:** DRAFT / OPEN; não aprovada, não implementada e não validada.
 **Autor documental:** Chet Haase (recorte Android WebView). **Revisor independente:** Alex Crichton, fronteira de comandos/eventos Tauri, offline e capacidade declarada.
@@ -249,7 +249,7 @@ DRAFT-0.5, OPEN. Esta versão substitui o recorte “por plataforma nativa” pe
 
 **ADR-056 — compatibilidade:** declarar suporte por versão e perfil versionado de cliente. A janela é N/N-1 dentro do perfil publicado; os perfis concretos, versões e janela de calendário continuam OPEN até decisão de produto. Sem versão/feature crítica comum, rejeitar antes de qualquer efeito, sem downgrade silencioso. A UI apresenta incompatibilidade e versão/perfil requeridos quando a resposta do servidor fornecer esses dados; não repete mutação nem tenta fallback incompatível. Resultado sem resposta conclusiva permanece desconhecido.
 
-**ADR-059 — offline:** únicas operações autorizadas: (1) abrir incidente SOS local e enfileirar; (2) check-in de sessão Guardian existente; (3) mensagem a canal já autorizado; (4) observação local de localização; (5) PTT apenas em rede local com grant de floor válido. Negar sempre localização precisa divulgada, mutação federada, criar/alterar grant, mudança de identidade, transmissão RF e transcrição remota. Exigir epoch comparável, frescor dentro do limite do perfil, nenhuma revogação conhecida e anti-rollback verificável. `stale`, `unknown`, relógio incerto ou política indefinida negam. Número de frescor desconhecido até medição.
+**ADR-059 — offline:** únicas operações autorizadas: (1) abrir incidente SOS local e enfileirar somente com F1/F2/F3 demonstrados — sem raiz de confiança a operação é negada e nada é enfileirado (ADR-064); (2) check-in de sessão Guardian existente; (3) mensagem a canal já autorizado; (4) observação local de localização; (5) PTT apenas em rede local com grant de floor válido. Negar sempre localização precisa divulgada, mutação federada, criar/alterar grant, mudança de identidade, transmissão RF e transcrição remota. Exigir epoch comparável, frescor dentro do limite do perfil, nenhuma revogação conhecida e anti-rollback verificável. `stale`, `unknown`, relógio incerto ou política indefinida negam. Número de frescor desconhecido até medição.
 
 **ADR-060 — confidencialidade:** expor `confidentiality` por canal e por perna; bridge, ASR e gravação que terminem a proteção são marcados `terminated`. Não rotular E2EE sem prova por canal/perna. Não exibir posição precisa ou segredo em tela bloqueada.
 
@@ -286,7 +286,7 @@ Casos documentais planejados. ID formal: `NOT_ASSIGNED`. `Estado` em todos: `NOT
 | S015-061-F1 | ADR-061 | Processo encerrado, force-stop ou reboot no meio da operação | Retomada do app | Reconstrução apenas do persistido autorizado; nenhuma alegação de trabalho ocorrido no intervalo; ausência de duplicação | F | NOT_EXECUTED |
 | S015-061-F2 | ADR-061 | Autoridade `stale`/`unknown` | Mutação forte | Bloqueio com estado explícito; função independente preservada; nenhuma escrita aceita | F | NOT_EXECUTED |
 | S015-061-B1 | ADR-061 | Transação local com `outbox` commitado e publicação pendente | Consultar a operação antes do publish | Estado `pendente local` com prova de commit; `materialized` e efeito externo ausentes; leitor não publica nem promove classe | B | NOT_EXECUTED |
-| S015-062-P1 | ADR-062 | Política por classe existente para a coleta, com prazo não decidido | Coleta e gravação | Gravação aceita com `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo exibido como aprovado; logs e evidência sem localização exata | P | NOT_EXECUTED |
+| S015-062-P1 | ADR-062 | Política por classe existente para a coleta, com prazo e gatilho da ADR-065 | Coleta e gravação | Gravação aceita com `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo exibido como aprovado; logs e evidência sem localização exata | P | NOT_EXECUTED |
 | S015-062-N1 | ADR-062 | Classe sem política aprovada | Tentativa de persistir histórico/log correlacionável | Falha fechada com erro explícito; nenhum registro persistido; degradação declarada na UI | N | NOT_EXECUTED |
 | S015-062-F1 | ADR-062 | Política expirada; cópias incluem storage, cache, logs e backup | Gatilho de descarte | Descarte por cópia registrado; cópia sem confirmação fica pendente; nenhuma remoção global alegada | F | NOT_EXECUTED |
 | S015-062-B1 | ADR-062 | Hold com autoridade e revisão | Consulta comum ao dado retido | Dado retido sob prazo próprio; acesso comum não reativado | B | NOT_EXECUTED |

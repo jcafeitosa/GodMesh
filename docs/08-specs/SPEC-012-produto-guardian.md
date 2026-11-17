@@ -1,6 +1,6 @@
 # SPEC-012 — Produto, contexto e Guardian
 
-**Versão:** DRAFT-0.10 · **Data:** 2026-11-17 · **Estado:** DRAFT/OPEN · **Autora documental:** Margaret Hamilton · **Revisão independente:** Ada Lovelace, revisão do delta desta versão solicitada; pendente. Não aprovada, implementada nem validada. Casos abaixo são planejados e `NOT_EXECUTED`; identificadores de teste formais `NOT_ASSIGNED`.
+**Versão:** DRAFT-0.12 · **Data:** 2026-11-17 · **Estado:** DRAFT/OPEN · **Autora documental:** Margaret Hamilton · **Revisão independente:** Ada Lovelace, revisão do delta desta versão solicitada; pendente. Não aprovada, implementada nem validada. Casos abaixo são planejados e `NOT_EXECUTED`; identificadores de teste formais `NOT_ASSIGNED`.
 
 
 ## Superfície nativa exigida (ADR-068)
@@ -205,7 +205,7 @@ Casos documentais planejados. ID formal: `NOT_ASSIGNED`. `Estado` observado em t
 | S012-061-B1 | ADR-061 | Duplicata do mesmo `event_id` de transição no outbox (retry do publicador) | Replay do outbox | Uma única transição gravada e uma única notificação; duplicata descartada pela chave idempotente e registrada; Beacon não é reativado nem desativado duas vezes | B | NOT_EXECUTED |
 | S012-061-F1 | ADR-061 | Crash entre commit da transição e publicação | Reinício do serviço | Outbox reprocessada; sessão permanece no estado terminal commitado; nenhum `active` ressuscitado | F | NOT_EXECUTED |
 | S012-061-F2 | ADR-061 | Autoridade de sessão `stale`/`unknown` | Tentativa de ativar ou alterar escopo da sessão | Mutação forte bloqueada com erro explícito; leitura permitida com estado de autoridade desconhecido declarado | F | NOT_EXECUTED |
-| S012-062-P1 | ADR-062 | Política com finalidade, classe e cópia declaradas para sessão, check-ins e observações, mas **prazo e gatilho não decididos** (OPEN) | Criação de sessão e registro de check-in | Esperado reformulado com parâmetro ausente: gravação aceita com `retention_policy_ref` presente; prazo e gatilho reportados como `param_not_configured`, por classe e cópia, sem expiração automática anunciada | P | NOT_EXECUTED |
+| S012-062-P1 | ADR-062 | Política com finalidade, classe e cópia declaradas para sessão, check-ins e observações, com prazo 7 dias após o fim da sessão e gatilho `session_end + 7d` (ADR-065) | Criação de sessão e registro de check-in | Esperado reformulado com parâmetro ausente: gravação aceita com `retention_policy_ref` presente; prazo e gatilho reportados como `param_not_configured`, por classe e cópia, sem expiração automática anunciada | P | NOT_EXECUTED |
 | S012-062-N1 | ADR-062 | Classe de dado da sessão sem política aprovada | Tentativa de persistir sessão ou histórico | Falha fechada com erro explícito; nenhuma linha persistida; UI declara degradação e não promete histórico | N | NOT_EXECUTED |
 | S012-062-F1 | ADR-062 | Sessão em terminal com cópias remotas não confirmadas | Revogação e pedido de descarte | Bloqueio de novas leituras registrado; cada cópia com estado próprio; nenhuma afirmação de purga externa ou revogação global | F | NOT_EXECUTED |
 | S012-062-B1 | ADR-062 | Hold de auditoria com autoridade, escopo e revisão | Consulta comum ao dado retido | Dado mantido além do prazo sob hold; acesso comum não reativado; revisão do hold registrada | B | NOT_EXECUTED |

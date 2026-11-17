@@ -5,7 +5,7 @@
 
 ## 1. Tabela de ACK normativa (ADR-058)
 
-Classes aprovadas em `decisoes.md:144`: conjunto fechado `transport_accepted`, `persisted_local`, `replicated_to_authority`, `materialized`, `delivered_to_device`, `acknowledged_human`; toda resposta de API deve carregar `ack_class`; é proibido usar "ACK" sem classe e proibido inferir classe superior por tempo, por sucesso de camada inferior ou por ausência de erro. **Estado atual: nenhum documento em `docs/07-contratos/` ou `docs/08-specs/` contém `ack_class` ainda** — a aplicação nos textos é o item 3 da ordem de execução em `docs/09-equipe/registro-gaps.md:113` (pendente). A tabela abaixo é o crosswalk proposto entre a classe ADR-058 e o vocabulário documental vigente.
+Classes aprovadas em `decisoes.md:144`: conjunto fechado `transport_accepted`, `persisted_local`, `replicated_to_authority`, `materialized`, `delivered_to_device`, `acknowledged_human`; toda resposta de API deve carregar `ack_class`; é proibido usar "ACK" sem classe e proibido inferir classe superior por tempo, por sucesso de camada inferior ou por ausência de erro. **Estado atual: `ack_class` foi incorporado às SPECs em 17/11/2026; presença textual verificada, implementação não** — a aplicação nos textos é o item 3 da ordem de execução em `docs/09-equipe/registro-gaps.md:113` (pendente). A tabela abaixo é o crosswalk proposto entre a classe ADR-058 e o vocabulário documental vigente.
 
 | Classe (ADR-058) | Emissor | Evidência exigida | Escopo (o que a classe atesta) | O que NÃO prova | Documento que define / registra |
 |---|---|---|---|---|---|

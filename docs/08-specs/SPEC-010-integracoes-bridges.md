@@ -1,6 +1,6 @@
 # SPEC-010 — Integrações e bridges
 
-**Versão:** DRAFT-0.6
+**Versão:** DRAFT-0.7
 **Estado:** DRAFT / OPEN — não aprovada, não implementada e não validada.
 **Autor documental:** Gregor Hohpe  
 **Revisor independente designado:** Erich Gamma (revisão pendente desta versão/hash).
@@ -263,7 +263,7 @@ Casos planejados, sem ID formal: `Estado` é sempre `NOT_EXECUTED` e o ID formal
 | C010-061-N2 | ADR-061 | Ingestão assíncrona em Inbox/ledger separado da projeção | Consolidar a recepção do payload | ACK máximo `persisted_local`; `materialized` não emitido; UI não exibe evento aplicado | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C010-061-B | ADR-061 | Duplicata do mesmo `event_id` no outbox de ingestão ou de envio à bridge | Executar replay do outbox | Um único evento normalizado e um único envio externo; duplicata descartada pela chave idempotente e registrada; nenhum comando repetido ao rádio, à bridge ou à notificação | B | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C010-061-F | ADR-061 | Crash entre commit e publicação, ou queda do serviço externo durante o envio | Reiniciar e reconciliar | Evento publicado uma única vez; estado `degraded` até nova evidência; autoridade `stale`/`unknown` bloqueia mutação forte; nenhum TX persistido após revogação | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
-| C010-062-P | ADR-062 | Política com finalidade, classe e cópia declaradas para payload normalizado e `ProjectionReport`, mas **prazo e gatilho não decididos** (`OPEN`) | Persistir evento e `ProjectionReport` | Esperado reformulado com parâmetro ausente: objetos gravados com a política identificada e `retention_policy_ref` presente; prazo e gatilho reportados como `param_not_configured`, sem expiração automática anunciada; conteúdo de mídia ausente por padrão | P | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
+| C010-062-P | ADR-062 | Política com finalidade, classe e cópia declaradas para payload normalizado e `ProjectionReport`, mas **prazo e gatilho da ADR-065s** (`OPEN`) | Persistir evento e `ProjectionReport` | Esperado reformulado com parâmetro ausente: objetos gravados com a política identificada e `retention_policy_ref` presente; prazo e gatilho reportados como `param_not_configured`, sem expiração automática anunciada; conteúdo de mídia ausente por padrão | P | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C010-062-N | ADR-062 | Nenhuma política para a classe de payload/dead letter daquela cópia | Persistir payload externo ou dead letter | Persistência negada com erro explícito; nenhum conteúdo em log, catálogo ou relatório de projeção; motivo informado | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C010-062-B | ADR-062 | `ProjectionReport` e trilha de auditoria com prazos distintos | Expurgar o relatório | Expurgo aplicado somente à classe/cópia autorizada; auditoria mantém prazo próprio; nenhuma disposição global declarada | B | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C010-062-F | ADR-062 | Descarte de cópia réplica/backup sem confirmação | Consultar e restaurar a cópia | Cópia permanece `unknown`/`pending`; restauração não devolve conteúdo antes da reconciliação; hold exige autoridade, escopo e revisão | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |

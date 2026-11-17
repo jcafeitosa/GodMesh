@@ -1,6 +1,6 @@
 # SPEC-014 — Cliente offline e fronteira de comandos Tauri
 
-**Versão:** DRAFT-0.6  
+**Versão:** DRAFT-0.7  
 **Estado:** DRAFT / OPEN — não aprovada; nenhuma implementação ou validação é afirmada.  
 **Autor documental:** Alex Crichton  
 **Revisor independente designado:** Donny Wals; revisão desta versão pendente.  
@@ -375,7 +375,7 @@ Casos documentais planejados. ID formal: `NOT_ASSIGNED`. `Estado` em todos: `NOT
 | S014-061-F1 | ADR-061 | Processo encerrado/crash entre commit local e envio | Reinício do cliente | Outbox reprocessada sem duplicar a operação (chave idempotente); operação incompleta não vira sucesso; nada alegado para o intervalo | F | NOT_EXECUTED |
 | S014-061-F2 | ADR-061 | Estado de autoridade `stale`/`unknown` | Tentativa de mutação forte | Bloqueio com estado explícito; leitura local autorizada continua; nenhuma escrita apresentada como aceita | F | NOT_EXECUTED |
 | S014-061-B1 | ADR-061 | Transação local aberta com `outbox` gravado e evento ainda não publicado | Consultar o estado da operação antes do publish | Estado lido como `pendente local` com prova de commit; `materialized` e efeito externo ausentes; nenhuma republicação do item pelo leitor nem promoção de classe | B | NOT_EXECUTED |
-| S014-062-P1 | ADR-062 | Política por classe existente para a gravação local, com prazo não decidido | Gravação de estado e fila | Gravação aceita com `retention_policy_ref` registrado e `retention=param_not_configured`; nenhum prazo é gravado como aprovado nem convertido em retenção indefinida; descarte por cópia permanece `unknown` | P | NOT_EXECUTED |
+| S014-062-P1 | ADR-062 | Política por classe existente para a gravação local, com prazo e gatilho da ADR-065 | Gravação de estado e fila | Gravação aceita com `retention_policy_ref` registrado e `retention=param_not_configured`; nenhum prazo é gravado como aprovado nem convertido em retenção indefinida; descarte por cópia permanece `unknown` | P | NOT_EXECUTED |
 | S014-062-N1 | ADR-062 | Classe sem política aprovada | Tentativa de gravação persistente | Falha fechada com erro explícito; nenhum dado gravado além do mínimo do efeito imediato; interface marca não durável | N | NOT_EXECUTED |
 | S014-062-F1 | ADR-062 | Política expirada; cópias locais incluem cache, fila, índice e backup do dispositivo | Gatilho de descarte | Descarte registrado por cópia; fila necessária preservada conforme política; nenhuma afirmação de revogação global | F | NOT_EXECUTED |
 | S014-062-B1 | ADR-062 | Hold local com autoridade e revisão | Consulta comum ao dado retido | Retenção estendida; acesso comum não reativado; estado por cópia visível | B | NOT_EXECUTED |

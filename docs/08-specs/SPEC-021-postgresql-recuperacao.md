@@ -1,6 +1,6 @@
 # SPEC-021 — Operação PostgreSQL e recuperação
 
-**Versão:** DRAFT-0.6 · **Data:** 2026-11-17  
+**Versão:** DRAFT-0.7 · **Data:** 2026-11-17  
 **Estado:** DRAFT / OPEN; não aprovada e não pronta para implementação.  
 **Autor:** Bruce Momjian.  
 **Revisão independente designada:** Michael Stonebraker; solicitada após congelamento do hash ao final deste rascunho.  
@@ -160,7 +160,7 @@ Casos concretos recebem IDs no índice de Ada quando atribuídos. Todos abaixo s
 ## 10. Mudanças desta versão — DRAFT-0.4
 
 - Casos por requisito e casos P desbloqueados (C3-1): nova subseção "Casos por requisito (P/N/B/F)" com uma linha por requisito candidato e quatro colunas de caso; casos P dependentes de parâmetro OPEN reescritos para comportamento `param_not_configured`; casos de borda acrescentados em ADR-058, 059 e 060. Nenhum caso foi executado.
-- Casos por decisão (resposta ao veto C3-1): nova seção "Casos por decisão (ADR-056…063)", com negativo e falha/recuperação por decisão aplicável; todos `NOT_EXECUTED`, ID formal `NOT_ASSIGNED`. Nenhum caso foi executado.
+- Casos por decisão (resposta ao veto C3-1): nova seção "Casos por decisão (ADR-056…068)", com negativo e falha/recuperação por decisão aplicável; todos `NOT_EXECUTED`, ID formal `NOT_ASSIGNED`. Nenhum caso foi executado.
 
 Mudanças herdadas de DRAFT-0.2:
 
@@ -177,7 +177,7 @@ Mudanças herdadas de DRAFT-0.2:
 - Decisões de usuário continuam necessárias para metas, risco, política, retenção e modalidades. Nenhuma decisão é presumida.
 - Revisão documental realizada; implementação PostgreSQL, operação, RPO/RTO observados, restore/migration/testes e adequação de produção não verificados. Casos NOT_EXECUTED; IDs de casos NOT_ASSIGNED até índice central; SPEC DRAFT/OPEN.
 
-## Casos por decisão (ADR-056…063)
+## Casos por decisão (ADR-056…068)
 
 Casos locais desta SPEC, complementares aos casos planejados da §8. `Estado` sempre `NOT_EXECUTED`, ID formal `NOT_ASSIGNED`; nada foi restaurado, promovido ou medido. `Tipo`: P positivo, N negativo, B borda, F falha/recuperação. Parâmetro OPEN produz bloqueio, negativa ou `unknown`, nunca valor presumido.
 
@@ -242,3 +242,10 @@ RNF-005, RNF-006 e RNF-010 são **candidatos** citados na pauta; o vínculo sem�
 | Operação/recuperação sem RF/RNF atribuído | n/a | n/a | n/a | n/a — motivo: requisitos operacionais ainda não mapeados; atribuição pendente em Ada/Margaret (§9). Cobertura documental não é declarada | Requisitos não listados acima não são declarados cobertos por esta SPEC. |
 
 Nenhum caso desta subseção foi executado, restaurado, promovido ou medido.
+
+| ID local | Decisão | Pré-condição | Estímulo | Esperado observável | Tipo | Estado |
+|---|---|---|---|---|---|---|
+| S021-065-P | ADR-065 | Classe com prazo, gatilho e jurisdição declarados | Aplicar a política | Gravação aceita; expiração descarta e registra | P | NOT_EXECUTED |
+| S021-065-N | ADR-065 | Cópia sem jurisdição declarada | Tentar gravar | `RETENTION_SCOPE_UNRESOLVED`; nada persistido | N | NOT_EXECUTED |
+| S021-066-P | ADR-066 | Classe não autorizada a replicar | Consultar região secundária | Conteúdo ausente; estado `not_replicated_by_policy` | P | NOT_EXECUTED |
+| S021-066-F | ADR-066 | Falha da região primária | Continuar serviço | Só classes autorizadas seguem; demais informam indisponibilidade | F | NOT_EXECUTED |

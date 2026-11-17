@@ -117,7 +117,7 @@ Conferência realizada: enumeração dos 60 IDs e existência dos links locais. 
 
 O usuário determinou fechar as pendências e criar todas as SPECs. `MANIFESTO-FONTES-SPECS.md` (fonte externa não versionada) registra os 33 arquivos de contribuição por hash e títulos observados; é captura verificável, não incorporação canônica nem aprovação. Alan integra os contratos e arquivos de SPEC; Ada mantém catálogo, cobertura e crítica. O fechamento exige vínculos por versão, aceite, teste planejado e parecer específico para os 60 requisitos, incluindo todas as plataformas. Ausências e decisões materiais permanecem abertas até evidência; a implementação depende do planejamento concluído e da aprovação integral.
 
-## Distribuição canônica das 21 SPECs
+## Distribuição canônica das 24 SPECs
 
 Captura de 16/11/2026 do mapa CONSOLIDACAO-CANONICA.md, mantido por Alan. Atribuição não comprova entrega, cobertura, revisão ou aprovação. Arquivo ausente é exibido sem link.
 
@@ -157,26 +157,26 @@ Captura **regenerada em 17/11/2026** a partir dos 24 arquivos presentes. O hash 
 | SPEC | SHA-256 (17/11/2026) |
 |---|---|
 | SPEC-001-arquitetura-federacao.md | `4753787b8b7c9118240545faa4ded6e424505f3b892b59a615ab5ce9f660a92b` |
-| SPEC-002-identidade-autorizacao.md | `6376def4308bb98169dc257b189bb82afb6c8cee0e6f7efe8d72f09453e0fddc` |
+| SPEC-002-identidade-autorizacao.md | `98ce3a947b44b2a103e8498105c752ffc1b41373e68cd078591c4a562b5e369d` |
 | SPEC-003-gmp-api.md | `a5e85551ff71f0da38ccfaa6e20a4f8ab30952a7aec18d30703501ffd9133c15` |
 | SPEC-004-eventos-sincronizacao.md | `ce350188aaf38da269804782b617eefc9b6398912fdcd8f1c14a1eb62d128b6f` |
 | SPEC-005-dados-persistencia.md | `29a456dd7f48e381f7a7fa894466aac7894064def45e6d993841a9cbcc64cfc1` |
-| SPEC-006-sos-assistencia.md | `2ebf945a397bce085b39f2e766fcfe4fe510ee15794136749566f04c29990ac3` |
-| SPEC-007-voz-ptt-midia.md | `ef06ca98b10e1676883750e057a79bd33ad9961e361fe73986b3bcbbd1db029b` |
-| SPEC-008-transcricao-asr.md | `6e195424984e8a076f20b0184daaa6ddb9d40958e30ade46aabe6adc1c8b4a70` |
-| SPEC-009-wifi.md | `4347fa14443e9eb7c7434df10d9e30d58f290cd3897d4eb1c0c6575949e5acbe` |
-| SPEC-010-integracoes-bridges.md | `ca5eb0bed0d2274c89c93f6bd4208dc414329b43decdbb8b0b1c2ebede211a0f` |
-| SPEC-011-localizacao-geoespacial.md | `4c0fd8cbc21a34198ce94cfc267e249b2e57474c1bcac48a076020f84d1ead4d` |
-| SPEC-012-produto-guardian.md | `271f2af78664de3f0f6fe65e8fed2e6974b9387530739b6eacb076bc43daa81d` |
-| SPEC-013-experiencia-plataformas.md | `3e3735d23d3799fce928eaed6c284dd380ace7077caadc6e086b5983ad366db7` |
-| SPEC-014-cliente-offline-ffi.md | `af4751bad0b71069217ef75f3651df264a66a7c7969342c56fa6787961459f3d` |
-| SPEC-015-android-kotlin.md | `bbb04ec21cb4e7db95769ef8d689bca4364cccfb67c77382df3a780b3ef84b8e` |
-| SPEC-016-ios-swift.md | `89153a9f1198740b97084d93ced1b7181187d6576815087c9a8e2872b9051d9c` |
-| SPEC-017-dispositivos-firmware.md | `c92d5ab117b2a1993ba65675afdfa21cc676af1154a6bec33849bd41deb46d3d` |
-| SPEC-018-operacao-observabilidade.md | `510276c5cc698f56fc899e7e3b6cb4701ae8f944faa57de7f8b8b018d16640a3` |
-| SPEC-019-implantacao-capacidade.md | `45964aa15526c5d474ed9331ab8659b7a243e2321fc10696f7456ac14e6322dc` |
+| SPEC-006-sos-assistencia.md | `8a6703aae83cad826e8a175dd88349ec1e30aacd0d296ac8f01656013a1073b5` |
+| SPEC-007-voz-ptt-midia.md | `c713fa4ad8a9580c0224658da0490706b3dcad0e103ba02442920ae490ad614e` |
+| SPEC-008-transcricao-asr.md | `2279bbbc7bd9843b5206203ee36cb312f9667f50ca9d430bd0708fa3847868a2` |
+| SPEC-009-wifi.md | `3c1ee65a9c61b3824e63c156c8ff196b12cb207faadc70b9d629b15c662398c9` |
+| SPEC-010-integracoes-bridges.md | `2e38e9aa61adb01cd3e9d7d755359cce70832acb98653d9df3072674fbf5d873` |
+| SPEC-011-localizacao-geoespacial.md | `3df556f6aab09d446ee2182f1b425a10b43e4b23a496bf9c3128bd21daf42aa1` |
+| SPEC-012-produto-guardian.md | `6d4b4584fcd17f40432b5a1ec9898930c1972d767a40bef4392d1058ae5bf1ea` |
+| SPEC-013-experiencia-plataformas.md | `2a0af707d04f40950be96e694da72f79efa23b71a7ac8f3d26e75685b6418478` |
+| SPEC-014-cliente-offline-ffi.md | `1548f5dcb2f99abcfac3a8cb1ee1aef0c4d2fa3eb9b3dbc8c97dba1d8f91f83c` |
+| SPEC-015-android-kotlin.md | `84368e81c64c273fb6dd6d71c22048f62ee6d529089f0f55cc8561630ed180da` |
+| SPEC-016-ios-swift.md | `9a6e39f0b8215ea6a12daa79df0f398cd53b8f9686aa9e78bc37425a16e0a0f9` |
+| SPEC-017-dispositivos-firmware.md | `982d5096af36ee2e73c0bf87871fbc1d17724666b9e746f3ba33b6efe9336658` |
+| SPEC-018-operacao-observabilidade.md | `be889e2a5405d270a28aa5b19123141b974b76511a80f87528c6e0f783e92b33` |
+| SPEC-019-implantacao-capacidade.md | `670b244ed0d0f78211aecae9b4e9fa30cdb5f664b43f878a40a7e4dd3f55e34d` |
 | SPEC-020-seguranca-retencao.md | `ed5f0943907e3908d56414f1a7ccc29ab0d951efe40aff8ff6ebf77d860f97b6` |
-| SPEC-021-postgresql-recuperacao.md | `9b4624065d2969d73ecc937f31681235947bcfb7b47af91e55f3c550bcbd2332` |
-| SPEC-022-produto-organizacoes.md | `e5c039bb7fabf0ac045c4e8f3294f22f915112ca55da141942eb5cd41d39e549` |
-| SPEC-023-capacidades-conectividade.md | `3a36c63860f4e75eb5ca707aaec20024beb907926ec8c4b5baebcc2ed67ba207` |
-| SPEC-024-crowdfind-beacon.md | `32b8c5285886e4daf6a3a8f4e6c48ba36fa24fc64837d149cdec2ab3378100e8` |
+| SPEC-021-postgresql-recuperacao.md | `8d4b173bdb473acb98198570031160f4f96625ba8bef25ac9258e24b59c4d7ce` |
+| SPEC-022-produto-organizacoes.md | `510961f2978f3ab7c563260f18da114affb305ce130e0665e2b88eb7f00b2713` |
+| SPEC-023-capacidades-conectividade.md | `deb00a0e6e02daf92810d98be5a4af74f36e939aae05ed04e36ffb4095b0a3b1` |
+| SPEC-024-crowdfind-beacon.md | `c49f6a830211898f562228113417cb6f670b5b34acc0b672b2aa38f67be73cfa` |

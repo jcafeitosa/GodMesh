@@ -1,6 +1,6 @@
 # Proposta documental — retenção e revogação de dados
 
-> **RR-001 · proposta técnica e de política, não aprovada para produção.** Complementa `seguranca.md`, `privacidade-crowdfind.md`, `wifi-compartilhamento-privacidade.md`, a política de localização, SOS e o Guardian. Não altera ADRs nem define obrigação legal. A jurisdição é Brasil (primária) e Colômbia (secundária), com prazos por classe definidos na ADR-065; nenhum prazo foi validado juridicamente. Nenhuma jurisdição adicional, prazo, retenção de backup, base legal, oferta ou SLO foi escolhida. Dados sem política efetiva não podem ser tratados como autorizados para persistência e replicação.
+> **RR-001 · política técnica aprovada pelo CTO em 17/11/2026 (ADR-065); pendente de confirmação jurídica por jurisdição.** Complementa `seguranca.md`, `privacidade-crowdfind.md`, `wifi-compartilhamento-privacidade.md`, a política de localização, SOS e o Guardian. Não altera ADRs nem define obrigação legal. A jurisdição é Brasil (primária) e Colômbia (secundária), com prazos por classe definidos na ADR-065; nenhum prazo foi validado juridicamente. Nenhuma jurisdição adicional, prazo, retenção de backup, base legal, oferta ou SLO foi escolhida. Dados sem política efetiva não podem ser tratados como autorizados para persistência e replicação.
 
 ## 1. Objetivo e separação de decisões
 
@@ -150,7 +150,7 @@ Pedidos a Alan para integração: (a) fazer `eventos-sincronizacao.md` definir e
 
 ## 10. Limites desta proposta
 
-Especificação documental apenas; nenhuma classe está efetiva por este documento. Não foram consultadas fontes jurídicas externas porque nenhuma jurisdição foi escolhida e não se emite aconselhamento jurídico. Não há valores de retenção aprovados, evidência de mecanismo de descarte, confirmação de destino/operador, resultado de teste, infraestrutura, contrato de atendimento humano ou comprovação de implementação. O bloqueio de prontidão deve permanecer explícito até Alan integrar contratos relacionados e o usuário decidir políticas/jurisdições.
+Especificação documental. Os **prazos por classe** estão fixados na seção ADR-065 abaixo; o que falta é confirmação jurídica por jurisdição (ADR-066: Brasil primária, Colômbia secundária). Não se emite aconselhamento jurídico. Não há valores de retenção aprovados, evidência de mecanismo de descarte, confirmação de destino/operador, resultado de teste, infraestrutura, contrato de atendimento humano ou comprovação de implementação. O bloqueio de prontidão deve permanecer explícito até Alan integrar contratos relacionados e o usuário decidir políticas/jurisdições.
 
 ## Política inicial de retenção por classe (ADR-065)
 

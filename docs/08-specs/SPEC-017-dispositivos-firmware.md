@@ -1,6 +1,6 @@
 # SPEC-017 — Dispositivos, firmware e energia
 
-**Versão:** DRAFT-0.4  
+**Versão:** DRAFT-0.5  
 **Estado:** DRAFT / OPEN — não aprovada  
 **Autor documental:** Jack Ganssle  
 **Revisor independente designado:** Vint Cerf  
@@ -177,7 +177,7 @@ Casos planejados desta versão. Nenhum foi executado; identificador formal de te
 | S017-061-F | ADR-061 transação/recuperação | Queda do processo entre commit e publicação do `outbox` | Reiniciar o serviço e republicar | Evento republicado de forma idempotente; nenhum comando duplicado ao terminal, nenhuma instalação nem tentativa repetida por replay | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S017-061-F2 | ADR-061 transação/recuperação | Restore com Inbox em voo e autoridade `stale`/`unknown` | Retomar operação e reenviar comando ao dispositivo | Replay reconstrói apenas projeção; mutação forte bloqueada; resultado incerto permanece `unknown` até reconciliação explícita | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S017-061-B | ADR-061 transação/recuperação | Ingestão já commitada com `outbox` e publicação ainda pendente | Ler o resultado da ingestão antes do publish | `ack_class` máximo `persisted_local` com prova de commit; `materialized` e efeito a jusante ausentes; leitor não publica nem promove classe | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
-| S017-062-P | ADR-062 retenção fail-closed | Classe de telemetria de dispositivo com política aprovada em `(finalidade, classe, cópia, jurisdição)` e prazo/gatilho não decididos | Gravar telemetria e consultar a retenção aplicada | Registro persiste com `retention_policy_ref` identificado e `retention=param_not_configured`; nenhum prazo ou gatilho é aplicado como aprovado e o descarte por cópia permanece `unknown` | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S017-062-P | ADR-062 retenção fail-closed | Classe de telemetria de dispositivo com política aprovada em `(finalidade, classe, cópia, jurisdição)` com prazo e gatilho da ADR-065 | Gravar telemetria e consultar a retenção aplicada | Registro persiste com `retention_policy_ref` identificado e `retention=param_not_configured`; nenhum prazo ou gatilho é aplicado como aprovado e o descarte por cópia permanece `unknown` | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S017-062-N | ADR-062 retenção fail-closed | Classe de dado pessoal de dispositivo sem política aprovada (O-017-06 OPEN) | Persistir evento ou histórico de posição | Escrita falha fechada com erro explícito na API/UI; apenas o mínimo para o efeito imediato autorizado, não gravado como histórico | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S017-062-B | ADR-062 retenção fail-closed | Política existente com prazo desconhecido | Encerrar o ciclo de vida do registro | Prazo desconhecido não equivale a retenção indefinida: o histórico não é gravado e o estado exibido é `unknown`, não "retido" | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S017-062-F | ADR-062 retenção fail-closed | Hold de auditoria ativo sobre eventos de dispositivo | Solicitar liberação do hold e novo acesso comum ao evento | Liberação exige autoridade, escopo e revisão registradas; hold não reativa acesso comum; revogação declarada por destino/cópia, nunca global | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |

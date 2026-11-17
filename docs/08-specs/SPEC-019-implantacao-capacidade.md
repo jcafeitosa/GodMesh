@@ -1,6 +1,6 @@
 # SPEC-019 — Implantação, modalidades e capacidade
 
-**Versão:** DRAFT-0.7, 2026-11-17. **Estado:** DRAFT/OPEN; não aprovada, implementada ou validada. **Autor documental:** Grady Booch. **Revisão independente:** Leslie Lamport revisou DRAFT-0.2 (versão anterior); revisão de DRAFT-0.4 pendente. Esta SPEC trata implantação, perfis de operação, carga, custo e elegibilidade de failover; contratos de autoridade, dados, recuperação e observabilidade pertencem aos respectivos domínios.
+**Versão:** DRAFT-0.9, 2026-11-17. **Estado:** DRAFT/OPEN; não aprovada, implementada ou validada. **Autor documental:** Grady Booch. **Revisão independente:** Leslie Lamport revisou DRAFT-0.2 (versão anterior); revisão de DRAFT-0.4 pendente. Esta SPEC trata implantação, perfis de operação, carga, custo e elegibilidade de failover; contratos de autoridade, dados, recuperação e observabilidade pertencem aos respectivos domínios.
 
 ## Residência e regiões (ADR-066)
 
@@ -139,7 +139,7 @@ Todos os casos são **NOT_EXECUTED**. Futura execução autorizada deve identifi
 
 O trabalho é documental e não fecha planejamento nem SPECs. Nenhum produto, SQL, infraestrutura, teste, implantação ou custo foi executado/verificado. Toda aprovação futura depende de decisões, integração e revisão independentes; o presente artefato não autoriza implementação.
 
-## Casos por decisão (ADR-056…063)
+## Casos por decisão (ADR-056…068)
 
 Casos planejados desta versão, nenhum executado; identificador formal de teste `NOT_ASSIGNED`. Rótulos de estado de rota são os desta SPEC (`unknown`, `ineligible`, `eligible`, `degraded`, `recovering`), declaradamente rótulos de planejamento e não enum de protocolo. Parâmetro OPEN (janela N/N-1, RPO/RTO, capacidade, mix, preço, autoridade de assinatura) resulta em **negar ou declarar `unknown`**, nunca em número presumido.
 
@@ -171,7 +171,7 @@ Casos planejados desta versão, nenhum executado; identificador formal de teste 
 | S019-061-F | ADR-061 transação/recuperação | Queda entre commit e publish de um efeito externo | Retomar publicação | Republicação idempotente; nenhuma chamada duplicada a bridge, rádio, pagamento ou notificação; resultado incerto permanece pendente | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S019-061-F2 | ADR-061 transação/recuperação | Partição com dois líderes e operação antiga em voo com resultado desconhecido | Reabrir ingestão e admitir mutação forte | Fencing nega o líder antigo; mutação forte bloqueada até reconciliação; universo de efetores não declarado completo sem prova de inclusão/exclusão | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S019-061-B | ADR-061 transação/recuperação | Mutação commitada com `outbox` e publicação pendente | Ler resultado e relatório de capacidade antes do publish | `ack_class` máximo coerente com o commit comprovado; materialização e efeito externo ausentes no relatório; leitor não publica nem promove classe | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
-| S019-062-P | ADR-062 retenção fail-closed | Classe de telemetria/custo com política aprovada em `(finalidade, classe, cópia, jurisdição)` e prazo/gatilho não decididos | Coletar sinal e consultar a retenção aplicada | Registro persiste com `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo ou gatilho aplicado como aprovado; estado de descarte por cópia permanece `unknown` | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
+| S019-062-P | ADR-062 retenção fail-closed | Classe de telemetria/custo com política aprovada em `(finalidade, classe, cópia, jurisdição)` com prazo e gatilho da ADR-065 | Coletar sinal e consultar a retenção aplicada | Registro persiste com `retention_policy_ref` e `retention=param_not_configured`; nenhum prazo ou gatilho aplicado como aprovado; estado de descarte por cópia permanece `unknown` | P | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S019-062-N | ADR-062 retenção fail-closed | Sinal, alerta ou telemetria sem política aplicável | Persistir histórico para medição de capacidade | Escrita falha fechada com erro explícito; apenas mínimo do efeito imediato; nenhum histórico criado; ausência visível ao operador | N | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S019-062-B | ADR-062 retenção fail-closed | Política de custo/retenção com prazo desconhecido | Consultar retenção dos dados de capacidade | Prazo `unknown`; nenhuma retenção indefinida implícita; dados não retidos além do efeito imediato; célula da matriz permanece lacuna, não medida | B | NOT_EXECUTED · ID formal NOT_ASSIGNED |
 | S019-062-F | ADR-062 retenção fail-closed | Hold com autoridade e escopo sobre cópia auditada | Prorrogar e depois liberar o hold | Extensão e liberação registram autoridade, escopo e revisão; hold não reativa acesso comum; revogação declarada por destino, nunca global | F | NOT_EXECUTED · ID formal NOT_ASSIGNED |
@@ -193,3 +193,10 @@ Uma linha por requisito do §Fontes/decisões. Células citam casos da tabela `C
 | RNF-005; RNF-006 | S019-R005-P | S019-059-N2 | S019-059-B | S019-061-F2 | P: readiness e admissão distinguem estados e não saturam serviço crítico. N: ação fora do grant não recebe efeito. B: frescor ausente não gera elegibilidade. F: fencing bloqueia autoridade antiga. Edição A de perfil de capacidade não aprovada. |
 | RNF-010 | S019-062-P | S019-062-N | S019-062-B | S019-057-F | P: condições de retorno pós-restore observáveis com prova por fronteira. N: sem política de retenção, sinal não é persistido. B: prazo desconhecido não vira retenção indefinida. F: cursor pré-restore é recusado; resultado `unknown` preservado. |
 | ADR-060 (perfil da oferta) | S019-060-P | S019-060-N | S019-060-B | S019-060-F | Terminador por perna declarado no perfil; ausência não vira E2EE e torna a rota `ineligible`/`unknown` para conteúdo sensível. |
+
+| ID local | Decisão | Pré-condição | Estímulo | Esperado observável | Tipo | Estado |
+|---|---|---|---|---|---|---|
+| S019-065-P | ADR-065 | Classe com prazo, gatilho e jurisdição declarados | Aplicar a política | Gravação aceita; expiração descarta e registra | P | NOT_EXECUTED |
+| S019-065-N | ADR-065 | Cópia sem jurisdição declarada | Tentar gravar | `RETENTION_SCOPE_UNRESOLVED`; nada persistido | N | NOT_EXECUTED |
+| S019-066-P | ADR-066 | Classe não autorizada a replicar | Consultar região secundária | Conteúdo ausente; estado `not_replicated_by_policy` | P | NOT_EXECUTED |
+| S019-066-F | ADR-066 | Falha da região primária | Continuar serviço | Só classes autorizadas seguem; demais informam indisponibilidade | F | NOT_EXECUTED |
