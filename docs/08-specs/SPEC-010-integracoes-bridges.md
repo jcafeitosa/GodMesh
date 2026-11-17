@@ -1,11 +1,15 @@
 # SPEC-010 — Integrações e bridges
 
-**Versão:** DRAFT-0.5
+**Versão:** DRAFT-0.6
 **Estado:** DRAFT / OPEN — não aprovada, não implementada e não validada.
 **Autor documental:** Gregor Hohpe  
 **Revisor independente designado:** Erich Gamma (revisão pendente desta versão/hash).
 **Data:** 2026-11-17  
 **Escopo:** UDNL, descoberta e adaptação de dados externos, bridges opcionais e seus limites de tradução.
+
+## Retenção por classe em bridges (ADR-065)
+
+Payload de bridge e telemetria seguem a classe declarada na ADR-065 (telemetria 30 dias brutos/13 meses agregados; conteúdo de mensagem 24 meses; áudio não retido por padrão). Bridge que termina proteção marca `confidentiality=terminated` e a classe de retenção do destino. Cópia sem classe ou jurisdição declarada falha fechada.
 
 ## Mudanças desta versão
 

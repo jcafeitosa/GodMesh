@@ -1,6 +1,6 @@
 # SPEC-009 — Wi-Fi AutoDiscover, AutoShare e AutoConnect
 
-**Versão:** DRAFT-0.4
+**Versão:** DRAFT-0.5
 **Estado:** DRAFT / OPEN
 **Autor:** Jouni Malinen  
 **Revisor independente designado:** Richard Bejtlich  
@@ -236,7 +236,7 @@ Casos planejados, sem ID formal: `Estado` é sempre `NOT_EXECUTED` e o ID formal
 | C009-061-N2 | ADR-061 | Recepção de evento do controlador em Inbox/ledger separado da projeção | Consolidar o evento | ACK máximo `persisted_local`; `materialized` não emitido; UI não exibe sessão projetada | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C009-061-B | ADR-061 | Duplicata do mesmo `event_id` de compartilhamento ou revogação no outbox | Executar replay do outbox | Uma única linha de auditoria de efeito por evento; duplicata descartada pela chave idempotente e registrada; nenhum comando repetido ao controlador | B | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C009-061-F | ADR-061 | Controlador offline ou crash entre commit e publicação | Reconectar e reconciliar | Estado `pending`/`unknown` até evidência; commit recuperado publicado uma única vez; nenhum efeito duplicado nem `revoked_applied` presumido | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
-| C009-062-P | ADR-062 | Política com finalidade, classe e cópia declaradas para a auditoria Wi-Fi, mas **prazo, jurisdição e gatilho não decididos** (`OPEN`) | Gravar evento de auditoria | Esperado reformulado com parâmetro ausente: evento gravado com a política identificada e sua versão; prazo, jurisdição e gatilho reportados como `param_not_configured`, sem expiração automática anunciada; nenhum campo sensível fora da classe autorizada | P | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
+| C009-062-P | ADR-062 | Política com finalidade, classe e cópia declaradas para a auditoria Wi-Fi, mas **prazo por classe conforme ADR-065, jurisdição BR/CO e gatilho não decididos** (`OPEN`) | Gravar evento de auditoria | Esperado reformulado com parâmetro ausente: evento gravado com a política identificada e sua versão; prazo por classe conforme ADR-065, jurisdição BR/CO e gatilho reportados como `param_not_configured`, sem expiração automática anunciada; nenhum campo sensível fora da classe autorizada | P | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C009-062-N | ADR-062 | Nenhuma política para a cópia de auditoria/telemetria | Gravar evento de segurança | Persistência negada com erro explícito; nenhum evento em buffer, exportação, índice ou painel; falha informada, nunca “retenção temporária” sem prazo | N | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C009-062-B | ADR-062 | Posição exata do AP e inventário privado em classes distintas, com política apenas para a classe coarse | Tentar gravar a posição exata | Campo vedado negado por falta de política própria; apenas a classe autorizada é gravada; degradação informada | B | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |
 | C009-062-F | ADR-062 | `legal hold` e descarte aplicados a cópias enumeradas; uma cópia não confirma descarte | Consultar e tentar restaurar cada cópia | Hold exige autoridade, escopo e revisão com liberação auditada; cópia sem confirmação fica `unknown`/`pending`; nenhuma remoção global declarada | F | NOT_EXECUTED; ID formal `NOT_ASSIGNED` |

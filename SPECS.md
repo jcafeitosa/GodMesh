@@ -123,30 +123,30 @@ Captura de 16/11/2026 do mapa CONSOLIDACAO-CANONICA.md, mantido por Alan. Atribu
 
 | Arquivo / ID | Autor exclusivo | Recorte / interface | Estado observado |
 |---|---|---|---|
-| [SPEC-001-arquitetura-federacao.md](docs/08-specs/SPEC-001-arquitetura-federacao.md) | Martin Fowler | núcleo, arquitetura, federação e compatibilidade; Erich | Arquivo presente; revisão não conferida |
-| [SPEC-002-identidade-autorizacao.md](docs/08-specs/SPEC-002-identidade-autorizacao.md) | Kim Cameron | identidade, PKI, grants e recuperação; Bruce | Arquivo presente; revisão não conferida |
-| [SPEC-003-gmp-api.md](docs/08-specs/SPEC-003-gmp-api.md) | Graydon Hoare | GMP, API, erros, versionamento; Erich | Arquivo presente; revisão não conferida |
-| [SPEC-004-eventos-sincronizacao.md](docs/08-specs/SPEC-004-eventos-sincronizacao.md) | Martin Kleppmann | outbox/inbox, replay, fence, B06/B12; Leslie | Arquivo presente; revisão não conferida |
-| [SPEC-005-dados-persistencia.md](docs/08-specs/SPEC-005-dados-persistencia.md) | Michael Stonebraker | dados, isolamento, cópias, retenção; Momjian | Arquivo presente; revisão não conferida |
-| [SPEC-006-sos-assistencia.md](docs/08-specs/SPEC-006-sos-assistencia.md) | Nancy Leveson | SOS, estados, ACK, segurança operacional; Edsger | Arquivo presente; revisão não conferida |
-| [SPEC-007-voz-ptt-midia.md](docs/08-specs/SPEC-007-voz-ptt-midia.md) | Radia Perlman | floor/PTT, mídia, RNF-007; Vint | Arquivo presente; revisão não conferida |
-| [SPEC-008-transcricao-asr.md](docs/08-specs/SPEC-008-transcricao-asr.md) | Daniel Povey | ASR consentido, revogação e retenção; Bruce | Arquivo presente; revisão não conferida |
-| [SPEC-009-wifi.md](docs/08-specs/SPEC-009-wifi.md) | Jouni Malinen | Wi-Fi, estados, auditabilidade; Richard | Arquivo presente; revisão não conferida |
-| [SPEC-010-integracoes-bridges.md](docs/08-specs/SPEC-010-integracoes-bridges.md) | Gregor Hohpe | UDNL, adaptadores, bridges; Erich | Arquivo presente; revisão não conferida |
-| [SPEC-011-localizacao-geoespacial.md](docs/08-specs/SPEC-011-localizacao-geoespacial.md) | Paul Ramsey | geoespacial, frescor e privacidade; Bruce | Arquivo presente; revisão não conferida |
-| [SPEC-012-produto-guardian.md](docs/08-specs/SPEC-012-produto-guardian.md) | Margaret Hamilton | RF-020/027/028 parciais; jornadas, contexto e Guardian; Ada | DRAFT-0.5; revisões focais Ada em DRAFT-0.1/0.2/0.3, rechecagem DRAFT-0.5 pendente |
-| [SPEC-013-experiencia-plataformas.md](docs/08-specs/SPEC-013-experiencia-plataformas.md) | Lea Verou | UX, acessibilidade, desktop Windows/Linux/macOS e web; James | Arquivo presente; revisão não conferida |
-| [SPEC-014-cliente-offline-ffi.md](docs/08-specs/SPEC-014-cliente-offline-ffi.md) | Alex Crichton | núcleo offline e fronteiras FFI; Donny/Chet | Arquivo presente; revisão não conferida |
-| [SPEC-015-android-kotlin.md](docs/08-specs/SPEC-015-android-kotlin.md) | Chet Haase | contrato Android/Kotlin, lifecycle, permissões, bindings e OPEN; Alex | Arquivo presente; revisão não conferida |
-| [SPEC-016-ios-swift.md](docs/08-specs/SPEC-016-ios-swift.md) | Donny Wals | iOS, Swift, lifecycle e permissões; Alex | Arquivo presente; revisão não conferida |
-| [SPEC-017-dispositivos-firmware.md](docs/08-specs/SPEC-017-dispositivos-firmware.md) | Jack Ganssle | dispositivo, firmware, watchdog e limites; Vint | Arquivo presente; revisão não conferida |
-| [SPEC-018-operacao-observabilidade.md](docs/08-specs/SPEC-018-operacao-observabilidade.md) | Brendan Gregg | SLO, sinais, INT-ADA-001, falhas e restauração; James | Arquivo presente; revisão não conferida |
-| [SPEC-019-implantacao-capacidade.md](docs/08-specs/SPEC-019-implantacao-capacidade.md) | Grady Booch | modalidades, carga, custo e failover; Leslie | Arquivo presente; revisão não conferida |
-| [SPEC-020-seguranca-retencao.md](docs/08-specs/SPEC-020-seguranca-retencao.md) | Bruce Schneier | políticas, cópias e ameaças; Dan/Raphael | Arquivo presente; revisão não conferida |
-| [SPEC-021-postgresql-recuperacao.md](docs/08-specs/SPEC-021-postgresql-recuperacao.md) | Bruce Momjian | backup/restore, rollback e migração PostgreSQL; Michael | Arquivo presente; revisão não conferida |
-| [SPEC-022-produto-organizacoes.md](docs/08-specs/SPEC-022-produto-organizacoes.md) | Margaret Hamilton | conta, organizações, convites, papéis, encerramento; Ada | DRAFT-0.3; revisão de Ada pendente |
-| [SPEC-023-capacidades-conectividade.md](docs/08-specs/SPEC-023-capacidades-conectividade.md) | Gregor Hohpe | capacidades, evidência de conectividade, satélite, prioridade; Vint | DRAFT-0.3; revisão de Vint pendente |
-| [SPEC-024-crowdfind-beacon.md](docs/08-specs/SPEC-024-crowdfind-beacon.md) | Jack Ganssle | CrowdFind, Beacon rotativo, resolução e antirrastreamento; Bruce | DRAFT-0.3; revisão de Bruce pendente |
+| [SPEC-001-arquitetura-federacao.md](docs/08-specs/SPEC-001-arquitetura-federacao.md) | Martin Fowler | núcleo, arquitetura, federação e compatibilidade; Erich |  DRAFT-0.6; revisão independente desta versão pendente |
+| [SPEC-002-identidade-autorizacao.md](docs/08-specs/SPEC-002-identidade-autorizacao.md) | Kim Cameron | identidade, PKI, grants e recuperação; Bruce |  DRAFT-0.7; revisão independente desta versão pendente |
+| [SPEC-003-gmp-api.md](docs/08-specs/SPEC-003-gmp-api.md) | Graydon Hoare | GMP, API, erros, versionamento; Erich |  DRAFT-0.5; revisão independente desta versão pendente |
+| [SPEC-004-eventos-sincronizacao.md](docs/08-specs/SPEC-004-eventos-sincronizacao.md) | Martin Kleppmann | outbox/inbox, replay, fence, B06/B12; Leslie |  DRAFT-0.6; revisão independente desta versão pendente |
+| [SPEC-005-dados-persistencia.md](docs/08-specs/SPEC-005-dados-persistencia.md) | Michael Stonebraker | dados, isolamento, cópias, retenção; Momjian |  DRAFT-0.7; revisão independente desta versão pendente |
+| [SPEC-006-sos-assistencia.md](docs/08-specs/SPEC-006-sos-assistencia.md) | Nancy Leveson | SOS, estados, ACK, segurança operacional; Edsger |  DRAFT-0.9; revisão independente desta versão pendente |
+| [SPEC-007-voz-ptt-midia.md](docs/08-specs/SPEC-007-voz-ptt-midia.md) | Radia Perlman | floor/PTT, mídia, RNF-007; Vint |  DRAFT-0.7; revisão independente desta versão pendente |
+| [SPEC-008-transcricao-asr.md](docs/08-specs/SPEC-008-transcricao-asr.md) | Daniel Povey | ASR consentido, revogação e retenção; Bruce |  DRAFT-0.6; revisão independente desta versão pendente |
+| [SPEC-009-wifi.md](docs/08-specs/SPEC-009-wifi.md) | Jouni Malinen | Wi-Fi, estados, auditabilidade; Richard |  DRAFT-0.5; revisão independente desta versão pendente |
+| [SPEC-010-integracoes-bridges.md](docs/08-specs/SPEC-010-integracoes-bridges.md) | Gregor Hohpe | UDNL, adaptadores, bridges; Erich |  DRAFT-0.6; revisão independente desta versão pendente |
+| [SPEC-011-localizacao-geoespacial.md](docs/08-specs/SPEC-011-localizacao-geoespacial.md) | Paul Ramsey | geoespacial, frescor e privacidade; Bruce |  DRAFT-0.5; revisão independente desta versão pendente |
+| [SPEC-012-produto-guardian.md](docs/08-specs/SPEC-012-produto-guardian.md) | Margaret Hamilton | RF-020/027/028 parciais; jornadas, contexto e Guardian; Ada |  DRAFT-0.10; revisão independente desta versão pendente |
+| [SPEC-013-experiencia-plataformas.md](docs/08-specs/SPEC-013-experiencia-plataformas.md) | Lea Verou | UX, acessibilidade, desktop Windows/Linux/macOS e web; James |  DRAFT-0.6; revisão independente desta versão pendente |
+| [SPEC-014-cliente-offline-ffi.md](docs/08-specs/SPEC-014-cliente-offline-ffi.md) | Alex Crichton | núcleo offline e fronteiras FFI; Donny/Chet |  DRAFT-0.6; revisão independente desta versão pendente |
+| [SPEC-015-android-kotlin.md](docs/08-specs/SPEC-015-android-kotlin.md) | Chet Haase | contrato Android/Kotlin, lifecycle, permissões, bindings e OPEN; Alex |  DRAFT-0.5; revisão independente desta versão pendente |
+| [SPEC-016-ios-swift.md](docs/08-specs/SPEC-016-ios-swift.md) | Donny Wals | iOS, Swift, lifecycle e permissões; Alex |  DRAFT-0.6; revisão independente desta versão pendente |
+| [SPEC-017-dispositivos-firmware.md](docs/08-specs/SPEC-017-dispositivos-firmware.md) | Jack Ganssle | dispositivo, firmware, watchdog e limites; Vint |  DRAFT-0.4; revisão independente desta versão pendente |
+| [SPEC-018-operacao-observabilidade.md](docs/08-specs/SPEC-018-operacao-observabilidade.md) | Brendan Gregg | SLO, sinais, INT-ADA-001, falhas e restauração; James |  DRAFT-0.5; revisão independente desta versão pendente |
+| [SPEC-019-implantacao-capacidade.md](docs/08-specs/SPEC-019-implantacao-capacidade.md) | Grady Booch | modalidades, carga, custo e failover; Leslie |  DRAFT-0.7; revisão independente desta versão pendente |
+| [SPEC-020-seguranca-retencao.md](docs/08-specs/SPEC-020-seguranca-retencao.md) | Bruce Schneier | políticas, cópias e ameaças; Dan/Raphael |  DRAFT-0.5; revisão independente desta versão pendente |
+| [SPEC-021-postgresql-recuperacao.md](docs/08-specs/SPEC-021-postgresql-recuperacao.md) | Bruce Momjian | backup/restore, rollback e migração PostgreSQL; Michael |  DRAFT-0.6; revisão independente desta versão pendente |
+| [SPEC-022-produto-organizacoes.md](docs/08-specs/SPEC-022-produto-organizacoes.md) | Margaret Hamilton | conta, organizações, convites, papéis, encerramento; Ada |  DRAFT-0.5; revisão independente desta versão pendente |
+| [SPEC-023-capacidades-conectividade.md](docs/08-specs/SPEC-023-capacidades-conectividade.md) | Gregor Hohpe | capacidades, evidência de conectividade, satélite, prioridade; Vint |  DRAFT-0.3; revisão independente desta versão pendente |
+| [SPEC-024-crowdfind-beacon.md](docs/08-specs/SPEC-024-crowdfind-beacon.md) | Jack Ganssle | CrowdFind, Beacon rotativo, resolução e antirrastreamento; Bruce |  DRAFT-0.5; revisão independente desta versão pendente |
 
 Cobertura semântica dos 60 requisitos permanece pendente de leitura das peças entregues. Não somar IDs como percentual de conclusão.
 
@@ -161,22 +161,22 @@ Captura **regenerada em 17/11/2026** a partir dos 24 arquivos presentes. O hash 
 | SPEC-003-gmp-api.md | `a5e85551ff71f0da38ccfaa6e20a4f8ab30952a7aec18d30703501ffd9133c15` |
 | SPEC-004-eventos-sincronizacao.md | `ce350188aaf38da269804782b617eefc9b6398912fdcd8f1c14a1eb62d128b6f` |
 | SPEC-005-dados-persistencia.md | `29a456dd7f48e381f7a7fa894466aac7894064def45e6d993841a9cbcc64cfc1` |
-| SPEC-006-sos-assistencia.md | `f34cc07fd5a894eccb250cea5a1d17182ad02b60cda88c2ecd3a760e6b9808aa` |
-| SPEC-007-voz-ptt-midia.md | `5b95529ef16a971e6ea9bf6819bfc1b7ebeef40f699ee0ad2382838ccb727ca6` |
-| SPEC-008-transcricao-asr.md | `da8523469b06b625116d227465a860eb2b32e4baf71e6c06d01cf26b0fa59e9a` |
-| SPEC-009-wifi.md | `309854e745931b91fef50966333dd79dc39c64805a929f923b0c875e77846161` |
-| SPEC-010-integracoes-bridges.md | `eb5cab37ac771ec133d9c25925041de661949fec322fd53b916e39cf4d659cf0` |
+| SPEC-006-sos-assistencia.md | `2ebf945a397bce085b39f2e766fcfe4fe510ee15794136749566f04c29990ac3` |
+| SPEC-007-voz-ptt-midia.md | `ef06ca98b10e1676883750e057a79bd33ad9961e361fe73986b3bcbbd1db029b` |
+| SPEC-008-transcricao-asr.md | `6e195424984e8a076f20b0184daaa6ddb9d40958e30ade46aabe6adc1c8b4a70` |
+| SPEC-009-wifi.md | `4347fa14443e9eb7c7434df10d9e30d58f290cd3897d4eb1c0c6575949e5acbe` |
+| SPEC-010-integracoes-bridges.md | `ca5eb0bed0d2274c89c93f6bd4208dc414329b43decdbb8b0b1c2ebede211a0f` |
 | SPEC-011-localizacao-geoespacial.md | `4c0fd8cbc21a34198ce94cfc267e249b2e57474c1bcac48a076020f84d1ead4d` |
-| SPEC-012-produto-guardian.md | `95cd9f744141e4b8c512d49faec008a16e4023ab0fa402e5e52e10490a9d1023` |
+| SPEC-012-produto-guardian.md | `271f2af78664de3f0f6fe65e8fed2e6974b9387530739b6eacb076bc43daa81d` |
 | SPEC-013-experiencia-plataformas.md | `3e3735d23d3799fce928eaed6c284dd380ace7077caadc6e086b5983ad366db7` |
 | SPEC-014-cliente-offline-ffi.md | `af4751bad0b71069217ef75f3651df264a66a7c7969342c56fa6787961459f3d` |
 | SPEC-015-android-kotlin.md | `bbb04ec21cb4e7db95769ef8d689bca4364cccfb67c77382df3a780b3ef84b8e` |
 | SPEC-016-ios-swift.md | `89153a9f1198740b97084d93ced1b7181187d6576815087c9a8e2872b9051d9c` |
 | SPEC-017-dispositivos-firmware.md | `c92d5ab117b2a1993ba65675afdfa21cc676af1154a6bec33849bd41deb46d3d` |
 | SPEC-018-operacao-observabilidade.md | `510276c5cc698f56fc899e7e3b6cb4701ae8f944faa57de7f8b8b018d16640a3` |
-| SPEC-019-implantacao-capacidade.md | `0ee563cf007cad7a2127d30db5d06f4a6f526ea3d89315b6dca09c5826ac969b` |
+| SPEC-019-implantacao-capacidade.md | `45964aa15526c5d474ed9331ab8659b7a243e2321fc10696f7456ac14e6322dc` |
 | SPEC-020-seguranca-retencao.md | `ed5f0943907e3908d56414f1a7ccc29ab0d951efe40aff8ff6ebf77d860f97b6` |
-| SPEC-021-postgresql-recuperacao.md | `f717b77aecc7e33177b9af9ec77a0eac608f58b26bbc5bdd03871545cc11b19f` |
-| SPEC-022-produto-organizacoes.md | `cb39512fdc8e6cf5f043c026ea96c1d53f460291c1a3664c85deed88882b4c87` |
+| SPEC-021-postgresql-recuperacao.md | `9b4624065d2969d73ecc937f31681235947bcfb7b47af91e55f3c550bcbd2332` |
+| SPEC-022-produto-organizacoes.md | `e5c039bb7fabf0ac045c4e8f3294f22f915112ca55da141942eb5cd41d39e549` |
 | SPEC-023-capacidades-conectividade.md | `3a36c63860f4e75eb5ca707aaec20024beb907926ec8c4b5baebcc2ed67ba207` |
 | SPEC-024-crowdfind-beacon.md | `32b8c5285886e4daf6a3a8f4e6c48ba36fa24fc64837d149cdec2ab3378100e8` |

@@ -1,6 +1,10 @@
 # SPEC-019 — Implantação, modalidades e capacidade
 
-**Versão:** DRAFT-0.6, 2026-11-17. **Estado:** DRAFT/OPEN; não aprovada, implementada ou validada. **Autor documental:** Grady Booch. **Revisão independente:** Leslie Lamport revisou DRAFT-0.2 (versão anterior); revisão de DRAFT-0.4 pendente. Esta SPEC trata implantação, perfis de operação, carga, custo e elegibilidade de failover; contratos de autoridade, dados, recuperação e observabilidade pertencem aos respectivos domínios.
+**Versão:** DRAFT-0.7, 2026-11-17. **Estado:** DRAFT/OPEN; não aprovada, implementada ou validada. **Autor documental:** Grady Booch. **Revisão independente:** Leslie Lamport revisou DRAFT-0.2 (versão anterior); revisão de DRAFT-0.4 pendente. Esta SPEC trata implantação, perfis de operação, carga, custo e elegibilidade de failover; contratos de autoridade, dados, recuperação e observabilidade pertencem aos respectivos domínios.
+
+## Residência e regiões (ADR-066)
+
+Região primária Brasil (São Paulo) e secundária Colômbia (Bogotá). Replicam apenas as classes declaradas na ADR-065; conteúdo E2EE, áudio, posição, ASR e auditoria sensível não cruzam região sem autorização. Backup, telemetria e logs seguem a mesma regra por cópia.
 
 ## Mudanças desta versão
 

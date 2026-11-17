@@ -1,10 +1,14 @@
 # SPEC-008 — Transcrição ASR autorizada por canal
 
-**Versão:** DRAFT-0.5 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
+**Versão:** DRAFT-0.6 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
 **Autor documental:** Daniel Povey · **Revisor designado:** Bruce Schneier  
 O parecer existente refere-se ao DRAFT-0.1. Revisão independente do DRAFT-0.2 pendente. Execução: `NOT_EXECUTED`. Metas quantitativas: **OPEN — a medir**.
 
 **Requisitos diretamente cobertos:** RF-025; RNF-011. Cobertura destes requisitos é parcial enquanto as decisões abaixo permanecerem abertas. Esta SPEC não declara requisito aprovado por ela, implementação ou validação.
+
+## Retenção da transcrição (ADR-065)
+
+Transcrição derivada: **12 meses**, por cópia declarada, gatilho `expiry`, jurisdição BR/CO; revisão jurídica pendente. Tenant pode reduzir. Áudio de origem não é retido por padrão (ADR-065).
 
 ## Mudanças desta versão
 

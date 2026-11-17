@@ -1,6 +1,6 @@
 # SPEC-007 — Voz PTT e mídia nativa
 
-**Versão:** DRAFT-0.6 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
+**Versão:** DRAFT-0.7 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
 **Autora documental:** Radia Perlman · **Revisor designado:** Vint Cerf  
 O parecer existente refere-se ao DRAFT-0.1. Revisão independente do DRAFT-0.3 pendente. Execução: `NOT_EXECUTED`. Metas quantitativas: **OPEN — a medir**.
 
@@ -157,11 +157,11 @@ Planejar ensaios futuros com topologia, plataforma/transporte/versão, populaç�
 | Plataforma | Aplicabilidade nesta SPEC | Limites/validação requerida |
 |---|---|---|
 | Servidor Linux | Controle, media edge/router conforme modalidade | Deployment/capacidade, fencing e observabilidade não verificados |
-| macOS arm64/x86_64 | Cliente PTT nativo; transporte/versionamento a selecionar | SwiftUI é interface planejada; APIs/background e interoperabilidade não verificados |
-| iOS | Cliente PTT nativo, conforme permissões e lifecycle | Versões/entitlements/background e comportamento durante suspensão requerem SPEC iOS e prova oficial/futura |
+| macOS arm64/x86_64 | Cliente web+Tauri com plugin nativo de áudio (ADR-068); transporte/versionamento a selecionar | WebView WKWebView; áudio em segundo plano depende do plugin; não verificado |
+| iOS | Cliente web+Tauri com plugin nativo de áudio e sessão de áudio de background (ADR-068) | WKWebView; entitlements de background exigem prova oficial futura |
 | Windows desktop | Cliente de voz se incluído no produto/rota suportada | Tecnologia de UI/transportes e capacidades não decididas/validadas |
 | Linux desktop | Cliente de voz se incluído no produto/rota suportada | Stack cliente, permissões e mídia não decididas/validadas |
-| Android | Cliente PTT nativo, conforme permissões e lifecycle | Versões/entitlements/background e suspensão requerem SPEC Android e prova oficial/futura |
+| Android | Cliente web+Tauri com plugin nativo de áudio e serviço em primeiro plano (ADR-068) | Android WebView; tipo de serviço e suspensão exigem prova oficial/futura |
 | Web | Cliente PTT; arquitetura aponta WebRTC/Opus | Compatibilidade, signaling, navegador/SO, permissões, ICE/STUN/TURN e interoperabilidade não comprovados |
 
 Todas as plataformas listadas mantêm aplicabilidade ao contrato de controle/autorização quando oferecem voz. N/A de capacidade ou serviço deve ser decidido por produto/perfil; não se exclui plataforma implicitamente.

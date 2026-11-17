@@ -1,6 +1,6 @@
 # SPEC-012 — Produto, contexto e Guardian
 
-**Versão:** DRAFT-0.9 · **Data:** 2026-11-17 · **Estado:** DRAFT/OPEN · **Autora documental:** Margaret Hamilton · **Revisão independente:** Ada Lovelace, revisão do delta desta versão solicitada; pendente. Não aprovada, implementada nem validada. Casos abaixo são planejados e `NOT_EXECUTED`; identificadores de teste formais `NOT_ASSIGNED`.
+**Versão:** DRAFT-0.10 · **Data:** 2026-11-17 · **Estado:** DRAFT/OPEN · **Autora documental:** Margaret Hamilton · **Revisão independente:** Ada Lovelace, revisão do delta desta versão solicitada; pendente. Não aprovada, implementada nem validada. Casos abaixo são planejados e `NOT_EXECUTED`; identificadores de teste formais `NOT_ASSIGNED`.
 
 
 ## Superfície nativa exigida (ADR-068)
@@ -68,7 +68,7 @@ Revogar, encerrar, verificar atraso e compreender permissões devem ser acessív
 
 ## 6. Aplicabilidade
 
-Servidor em contêiner Linux aplica contratos e autorização para as modalidades aprovadas; não apresenta UI de pessoa como obrigação de servidor. macOS universal arm64/x86_64 e iOS SwiftUI, Windows, Linux desktop e Android mantêm jornadas no escopo; disponibilidade de sensores, execução em segundo plano, notificação e acessibilidade deve ser documentada por plataforma, com fallback e sem alegação de compatibilidade testada. Web: aplicabilidade de cada jornada e sensor a decidir com Lea e a visão vigente; não se exclui globalmente nem se afirma plataforma aprovada pela ADR-055. Dispositivo sem sensor pode continuar funções independentes sem inventar evidência.
+Servidor em contêiner Linux aplica contratos e autorização para as modalidades aprovadas; não apresenta UI de pessoa como obrigação de servidor. cliente web+Tauri (ADR-068), macOS universal arm64/x86_64 e iOS SwiftUI, Windows, Linux desktop e Android mantêm jornadas no escopo; disponibilidade de sensores, execução em segundo plano, notificação e acessibilidade deve ser documentada por plataforma, com fallback e sem alegação de compatibilidade testada. Web: aplicabilidade de cada jornada e sensor a decidir com Lea e a visão vigente; não se exclui globalmente nem se afirma plataforma aprovada pela ADR-055. Dispositivo sem sensor pode continuar funções independentes sem inventar evidência.
 
 ## 7. Critérios e casos planejados
 
@@ -163,7 +163,7 @@ Estas são expectativas de produto, sujeitas à resolução de conflito pelo con
 
 ## Mudanças desta versão — ADR-059
 
-A política offline segue ADR-059. As únicas operações permitidas por grant offline são: (1) abrir incidente SOS local e enfileirar; (2) check-in de sessão Guardian existente; (3) enviar mensagem a canal já autorizado; (4) registrar observação local de localização; (5) PTT somente em rede local com grant de floor válido. São sempre negados: divulgação de localização precisa, mutação federada, criação/alteração de grant, mudança de identidade, transmissão RF e transcrição remota.
+A política offline segue ADR-059. As únicas operações permitidas por grant offline são: (1) abrir incidente SOS local e enfileirar **somente com F1/F2/F3 demonstrados (ADR-064); sem raiz de confiança a operação é negada e nada é enfileirado**; (2) check-in de sessão Guardian existente; (3) enviar mensagem a canal já autorizado; (4) registrar observação local de localização; (5) PTT somente em rede local com grant de floor válido. São sempre negados: divulgação de localização precisa, mutação federada, criação/alteração de grant, mudança de identidade, transmissão RF e transcrição remota.
 
 Cada operação exige epoch comparável, frescor do perfil dentro do limite aplicável, ausência de revogação conhecida e estado anti-rollback verificável. `stale`, `unknown`, relógio incerto ou política indefinida negam. O limite numérico de frescor permanece desconhecido até medição; esta SPEC não cria número. A UI distingue ACK por classe e nunca promove classe inferior; `unknown` é mostrado como desconhecido, conforme ADR-058.
 

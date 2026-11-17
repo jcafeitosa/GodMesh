@@ -1,11 +1,15 @@
 # SPEC-021 — Operação PostgreSQL e recuperação
 
-**Versão:** DRAFT-0.4 · **Data:** 2026-11-17  
+**Versão:** DRAFT-0.6 · **Data:** 2026-11-17  
 **Estado:** DRAFT / OPEN; não aprovada e não pronta para implementação.  
 **Autor:** Bruce Momjian.  
 **Revisão independente designada:** Michael Stonebraker; solicitada após congelamento do hash ao final deste rascunho.  
 **Requisitos:** cobertura operacional transversal ainda precisa de vínculo semântico confirmado por Ada. RNF-005, RNF-006 e RNF-010 são candidatos de operação/qualidade citados na pauta, não cobertura integral confirmada por esta SPEC. B09/B10 são frentes de planejamento, não IDs de requisito.  
 **Escopo:** contrato documental para operação PostgreSQL, cópias de backup, restore, promoção, recuperação de persistência/sync e compatibilidade/rollback de schema. Não escolhe tecnologia de backup, política, parâmetros quantitativos nem arquitetura de disponibilidade.
+
+## Residência e regiões (ADR-066)
+
+Região primária Brasil (São Paulo) e secundária Colômbia (Bogotá). Replicam apenas as classes declaradas na ADR-065; conteúdo E2EE, áudio, posição, ASR e auditoria sensível não cruzam região sem autorização. Backup, telemetria e logs seguem a mesma regra por cópia.
 
 ## 1. Fontes e rastreabilidade
 
@@ -146,7 +150,7 @@ Casos concretos recebem IDs no índice de Ada quando atribuídos. Todos abaixo s
 | Requisitos RF/RNF cobertos e cenários por produto | Mapear requisitos operacionais a partir da matriz, sem inferir por semelhança | Ada/Margaret/Brendan; matriz central | Linhas atribuídas e lacunas identificadas com revisor |
 | Modalidades/fontes e consistência das cópias | Definir após inventário aprovado; não escolher ferramenta nem confundir réplicas com backup | Brendan/Michael/Momjian | Para cada modalidade: escopo, fonte, consistência, verificação, autorização, limitação e método |
 | RPO/RTO, janela, classe e risco | Metas por classe/cópia após cenário e custo versus sem garantia até estudo; sem números nesta versão | Produto/usuário; Brendan/Michael/Momjian | Metas aprovadas, relógio, denominador, fonte de verdade e resultado parcial/unknown definidos |
-| Retenção, revogação, criptografia e cópias derivadas | Política por classe/cópia versus regra geral; não escolher prazos | Usuário, Schneier, Kim, Lawrence, Michael | Política/jurisdição aprovadas e aplicada ao backup, réplica, cursor, log, cache e exportação |
+| Retenção, revogação, criptografia e cópias derivadas | Política por classe/cópia versus regra geral; não escolher prazos além dos fixados na ADR-065 | Usuário, Schneier, Kim, Lawrence, Michael | Política/jurisdição aprovadas e aplicada ao backup, réplica, cursor, log, cache e exportação |
 | Autoridade, fencing e promoção | Promoção manual condicionada a prova versus destino isolado até contrato completo | Leslie/Martin/Graydon/Michael | Autoridade única, corte, epoch, writers antigos, partição e recuperação definidos |
 | Inbox/projeção/checkpoint | Commit atômico se mesma transação; ledger+projetor idempotente se recurso separado | Michael/Martin/Graydon; Momjian revisão operacional | Escolha por serviço/efeito, proprietário e cenários de crash/retry/restore aprovados |
 | Migration/backfill/crosswalk e rollback | Preservar envelope e mapear por fonte autoritativa; envelope derivado só com identidade/prova própria | Michael/Fowler/Martin/Leslie | Campos assinados/canonicalização, compatibilidade, corte, quarentena, rollback e retenção definidos |

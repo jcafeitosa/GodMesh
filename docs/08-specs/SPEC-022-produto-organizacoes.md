@@ -1,7 +1,7 @@
 # SPEC-022 — Produto: conta, organizações e governança
 
 **Identificador:** SPEC-022
-**Versão:** DRAFT-0.4
+**Versão:** DRAFT-0.5
 **Data:** 2026-11-17
 **Estado:** DRAFT / OPEN. Não revisada, não aprovada, não autoriza implementação.
 **Autora documental:** Margaret Hamilton (pod P5 — Emergência, produto e jornadas)
@@ -61,7 +61,7 @@ Vínculos a requisito continuam "A conciliar" em `SPECS.md`; esta seção regist
 
 ### 2.4 Plataformas
 
-A semântica é comum. Superfícies previstas: servidor Linux/GodMesh Node, macOS (arm64/x86_64), Windows, Linux desktop, iOS, Android e web, se oferecida (`visao.md` §Plataformas aprovadas; ADR-055). Cada plataforma precisa demonstrar autenticação, armazenamento protegido, relógio e ciclo de vida de sessão antes de afirmar suporte; nenhuma linha implica API ou versão homologada. Papéis administrativos podem existir em qualquer cliente; operações de servidor não têm superfície própria no cliente, mas os clientes dependentes continuam aplicáveis.
+A semântica é comum. Superfícies previstas: servidor Linux/GodMesh Node, macOS (arm64/x86_64), Windows, Linux desktop, iOS, Android e web, se oferecida (`visao.md` §Plataformas aprovadas; ADR-068). Cada plataforma precisa demonstrar autenticação, armazenamento protegido, relógio e ciclo de vida de sessão antes de afirmar suporte; nenhuma linha implica API ou versão homologada. Papéis administrativos podem existir em qualquer cliente; operações de servidor não têm superfície própria no cliente, mas os clientes dependentes continuam aplicáveis.
 
 ### 2.5 Exclusões justificadas
 

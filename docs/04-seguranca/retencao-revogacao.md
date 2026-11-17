@@ -1,6 +1,6 @@
 # Proposta documental — retenção e revogação de dados
 
-> **RR-001 · proposta técnica e de política, não aprovada para produção.** Complementa `seguranca.md`, `privacidade-crowdfind.md`, `wifi-compartilhamento-privacidade.md`, a política de localização, SOS e o Guardian. Não altera ADRs nem define obrigação legal. Nenhuma jurisdição, prazo, retenção de backup, base legal, oferta ou SLO foi escolhida. Dados sem política efetiva não podem ser tratados como autorizados para persistência e replicação.
+> **RR-001 · proposta técnica e de política, não aprovada para produção.** Complementa `seguranca.md`, `privacidade-crowdfind.md`, `wifi-compartilhamento-privacidade.md`, a política de localização, SOS e o Guardian. Não altera ADRs nem define obrigação legal. A jurisdição é Brasil (primária) e Colômbia (secundária), com prazos por classe definidos na ADR-065; nenhum prazo foi validado juridicamente. Nenhuma jurisdição adicional, prazo, retenção de backup, base legal, oferta ou SLO foi escolhida. Dados sem política efetiva não podem ser tratados como autorizados para persistência e replicação.
 
 ## 1. Objetivo e separação de decisões
 
