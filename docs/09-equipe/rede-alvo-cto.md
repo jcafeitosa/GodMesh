@@ -140,3 +140,69 @@ flowchart TB
 ## 12. Custo honesto
 
 Rede "perfeita" custa: duas regiões reais desde o início, mais superfície de observabilidade, testes de partição, e disciplina de não usar consenso onde não precisa. O que não custa é a ordem: identidade → ingresso assinado → transporte → sync escopado → mídia → borda.
+
+## 13. Distribuição de configuração para nós que não são nossos
+
+Nós próprios (mantidos por nós) e nós de terceiros/autogeridos não podem ter a mesma relação de confiança. A separação é por **namespace de configuração** e por **quem assina**.
+
+### 13.1 Quatro namespaces, quatro autoridades
+
+| Namespace | Conteúdo | Autoridade | Vai para nó de terceiro? |
+|---|---|---|---|
+| `federation` | raízes de confiança, chaves do control plane, versões mínimas, lista de revogação, janelas de compatibilidade | nossos `control-voter` (quórum) | **Sim** — é o que permite interoperar |
+| `regional` | seeds/endpoints, perfis de capacidade, janelas de manutenção da célula | autoridade da região | Sim, para nós daquela região |
+| `tenant` | retenção, canais, políticas por organização | o tenant (cliente) | Sim, somente do próprio tenant |
+| `local` | caminhos, hardware, chaves privadas, limites de máquina | operador local | **Nunca** — não é replicado por desenho |
+
+Regra dura: **namespace `global`/`federation` é somente leitura no nó remoto.** Operador local não sobrescreve; se precisar divergir, o nó marca `degraded`, declara o motivo e **recusa as operações afetadas** — nunca finge conformidade.
+
+### 13.2 Como o manifesto chega
+
+**Pull, não push.** Nó atrás de NAT ou em rede isolada precisa poder buscar quando tem rede; push exigiria alcançá-lo.
+
+```
+nó: GET /v1/federation/config?known_version=N&cluster=C
+control plane:
+  - devolve bundle assinado (ou 304 se nada mudou)
+  - bundle = {version, epoch, cluster, applies_at, entries[], hash, signatures[]}
+  - entradas: chave, valor, namespace, effective_after, min_version
+nó:
+  1. verifica assinatura contra chaves do control plane pinadas no ingresso
+  2. verifica quórum quando o namespace exige (federation/governança)
+  3. verifica anti-rollback: bundle.version >= piso local (ADR-063)
+  4. verifica compatibilidade: min_version do software
+  5. aplica atomicamente as entradas com effective_after <= agora
+  6. registra auditoria: hash, versão, assinantes, resultado
+```
+
+**Assinatura e quórum.** Mudança que altera confiança (adicionar nó, trocar raiz, mudar piso de proteção) exige quórum ímpar de `control-voter`. Configuração operacional não sensível pode ter assinatura única com auditoria. O bundle declara quantas assinaturas são exigidas; o nó não aceita menos.
+
+**Anti-rollback e replay.** `version` é monotônica; bundle com versão anterior ao piso local é recusado. `applies_at`/`effective_after` evitam que metade da frota aplique antes da outra.
+
+### 13.3 O que nunca cruza a fronteira
+
+- Chaves privadas de nó, de tenant ou de operador.
+- Dados de tenant de outro cliente (replicação por escopo e jurisdição, ADR-065/066).
+- Segredos operacionais nossos: credenciais de bridge, DSNs, topologia de rede interna, custo/capacidade bruta.
+- Telemetria de frota de terceiro para o nosso lado sem contrato — o nó de terceiro é dono da própria telemetria.
+
+### 13.4 Offline, divergência e revogação
+
+| Situação | Comportamento |
+|---|---|
+| Control plane inalcançável dentro da validade | opera com a última config válida; data plane continua |
+| Além da validade/frescor | mutações sensíveis **negadas** (`stale`), operações locais autorizadas seguem |
+| Bundle de outro cluster | recusado (`cluster` no payload) |
+| Operador local muda namespace global | recusado no aceite; nó entra `degraded` com motivo nomeado |
+| Revogação de nó | entra na próxima busca; nó revogado não renova lease e não recebe eventos |
+| Rollback de release | exige exceção autorizada, limitada e auditada, com rebaixamento registrado do piso |
+
+### 13.5 Implantação em fatias
+
+1. `GET /v1/federation/config` com bundle assinado e verificação de quórum.
+2. Tabela `federation_config(version, epoch, namespace, key, value, effective_after, signatures, hash, applied_at)` e `config_accept_log`.
+3. Verificação de assinatura/quórum no nó receptor + anti-rollback.
+4. Aplicação atômica por `effective_after` e estado `degraded` em divergência.
+5. Só então: rollout canário por cluster e `applies_at` para janelas.
+
+**Estado atual:** nada disso existe. Hoje a configuração é ambiente (`DATABASE_URL`, `GODMESH_GRANTS`, `BIND_ADDR`) e migração de esquema com checksum. Este §13 é o desenho-alvo da próxima fatia de controle, não implementação.
