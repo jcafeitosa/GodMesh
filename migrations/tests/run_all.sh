@@ -7,6 +7,7 @@
 #   migrations/0003_outbox_publisher.sql
 #   migrations/0004_grant_revocation.sql
 #   migrations/0005_sync_inbox.sql
+#   migrations/0006_incident_listing.sql
 # depois roda todos os `*_invariants.sql` e falha (exit != 0) se algum bloco
 # `NOTICE: OK` esperado não aparecer.
 #
@@ -72,6 +73,7 @@ aplicar "$raiz/migrations/0002_incident_tenancy.sql"
 aplicar "$raiz/migrations/0003_outbox_publisher.sql"
 aplicar "$raiz/migrations/0004_grant_revocation.sql"
 aplicar "$raiz/migrations/0005_sync_inbox.sql"
+aplicar "$raiz/migrations/0006_incident_listing.sql"
 
 if [ -n "$sabotagem" ]; then
     [ -f "$sabotagem" ] || { echo "erro: sabotagem inexistente: $sabotagem" >&2; exit 2; }
@@ -120,6 +122,11 @@ esperado_0005=(
     "OK 5: partição, epoch e origem são dimensões do namespace (4)"
     "OK 6: prefixo persiste a avançar no mesmo namespace (3 -> 4)"
 )
+esperado_0006=(
+    "OK 1: list_seq atribuída pelo banco cresce na inserção"
+    "OK 2: list_seq não aceita escrita explícita"
+    "OK 3: índice sos_incident_listagem (tenant_id, list_seq DESC) presente"
+)
 
 saida="$(mktemp)"
 falhas=0
@@ -156,6 +163,7 @@ verificar "$tests/0002_invariants.sql" "${esperado_0002[@]}"
 verificar "$tests/0003_invariants.sql" "${esperado_0003[@]}"
 verificar "$tests/0004_invariants.sql" "${esperado_0004[@]}"
 verificar "$tests/0005_invariants.sql" "${esperado_0005[@]}"
+verificar "$tests/0006_invariants.sql" "${esperado_0006[@]}"
 
 rm -f "$saida"
 

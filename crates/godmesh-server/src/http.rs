@@ -23,13 +23,18 @@ use crate::events::{create_event, list_events, EventAck, EventPage, EventPayload
 use crate::inbox::{
     read_state, receive_batch, InboxBatchPayload, InboxBatchResponse, InboxState, InboxStateQuery,
 };
+use crate::incidents::{list_incidents, IncidentListQuery, IncidentPage};
 use crate::lifecycle::{load_incident, transition, AcknowledgePayload, IncidentView, Transition};
+use crate::metrics::{Gauges, Metrics};
+use crate::observability::{observe, RequestContext, RequestLog, StderrRequestLog};
 
 /// Estado compartilhado.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub authorization: Arc<Authorization>,
+    pub metrics: Metrics,
+    pub log: Arc<dyn RequestLog>,
 }
 
 /// Rotas do servidor com a composição de produção (relógio do sistema,
@@ -43,14 +48,30 @@ pub fn router(pool: PgPool, grants: GrantRegistry) -> Router {
     router_with(pool, authorization)
 }
 
+/// Rotas do servidor com destino de log injetado. Existe para o teste provar o
+/// que foi (e o que não foi) registrado; produção usa [`router`].
+pub fn router_with_log(
+    pool: PgPool,
+    authorization: Authorization,
+    log: Arc<dyn RequestLog>,
+) -> Router {
+    build_router(pool, authorization, log)
+}
+
 /// Rotas do servidor com autorização injetada (relógio e fonte de revogação).
 ///
 /// Cada grupo de rotas declara o escopo que exige na própria construção do
 /// router: rota nova nasce com escopo explícito, em vez de herdá-lo por omissão.
 pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
+    build_router(pool, authorization, Arc::new(StderrRequestLog))
+}
+
+fn build_router(pool: PgPool, authorization: Authorization, log: Arc<dyn RequestLog>) -> Router {
     let state = AppState {
         pool,
         authorization: Arc::new(authorization),
+        metrics: Metrics::new(),
+        log,
     };
 
     let incident_write = Router::new()
@@ -65,6 +86,7 @@ pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
         ));
 
     let incident_read = Router::new()
+        .route("/v1/incidents", get(get_incidents))
         .route("/v1/incidents/{id}", get(get_incident))
         .route_layer(middleware::from_fn_with_state(
             ScopeGate(Scope::IncidentRead),
@@ -102,6 +124,15 @@ pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
             require_scope,
         ));
 
+    // Métricas operacionais: escopo próprio (`admin:metrics`). Ver a nota de
+    // composição em `build_router` sobre por que não é só loopback.
+    let metrics_read = Router::new()
+        .route("/metrics", get(get_metrics))
+        .route_layer(middleware::from_fn_with_state(
+            ScopeGate(Scope::AdminMetrics),
+            require_scope,
+        ));
+
     // O portão de autenticação é aplicado por último: ele roda antes dos portões
     // de escopo, que leem o `VerifiedGrant` já injetado na extensão.
     let protected = incident_write
@@ -110,11 +141,15 @@ pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
         .merge(event_read)
         .merge(sync_write)
         .merge(sync_read)
+        .merge(metrics_read)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
+    // O observador é a camada mais externa: sem isso, 401/403/404 e rota não
+    // casada ficariam fora da contagem — exatamente o que se quer enxergar.
     Router::new()
         .route("/healthz", axum::routing::get(healthz))
         .merge(protected)
+        .layer(middleware::from_fn_with_state(state.clone(), observe))
         .with_state(state)
 }
 
@@ -158,6 +193,10 @@ async fn require_grant(State(state): State<AppState>, mut request: Request, next
     // autentica sem julgar escopo. `require_scope` aplica o escopo da rota.
     match state.authorization.authenticate(token).await {
         Ok(grant) => {
+            // O log de requisição só recebe `token_id` e tenant, nunca o token.
+            if let Some(context) = request.extensions().get::<Arc<RequestContext>>() {
+                context.set_identity(&grant.token_id, &grant.subject.tenant_id);
+            }
             request.extensions_mut().insert(grant);
             next.run(request).await
         }
@@ -197,6 +236,60 @@ async fn post_incident(
         Ok(outcome) => Ok((created_status(outcome.created), Json(outcome.response))),
         Err(e) => Err(ApiErrorResponse::from(e)),
     }
+}
+
+/// Lista os incidentes do tenant autenticado, paginado por cursor.
+///
+/// `limit` ausente, `0` ou acima de 100 → 422 `invalid_request`; `state`
+/// desconhecido → 422; cursor de outro tenant/filtro → 400 `cursor_incomparable`;
+/// cursor ilegível → 400 `cursor_invalid`.
+async fn get_incidents(
+    State(state): State<AppState>,
+    Extension(grant): Extension<VerifiedGrant>,
+    query: Result<Query<IncidentListQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<IncidentPage>, ApiErrorResponse> {
+    let Query(query) = query.map_err(|rejection| {
+        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
+    })?;
+    list_incidents(&state.pool, &grant, query)
+        .await
+        .map(Json)
+        .map_err(ApiErrorResponse::from)
+}
+
+/// Métricas no formato de texto do Prometheus.
+///
+/// Escopo `admin:metrics` em vez de "só loopback" porque a proteção precisa ser
+/// verificável e independente da topologia: o processo pode escutar em `0.0.0.0`
+/// atrás de proxy, onde todo cliente parece loopback, e um `/metrics` aberto
+/// publicaria volume de tráfego e backlog de outbox para qualquer um que alcance
+/// a porta. Escopo é negado por padrão (falha fechada) e testado no fio.
+///
+/// Gauge de outbox desconhecido (banco fora) **não** vira zero: a série não sai
+/// e `godmesh_metrics_scrape_dependency_up` marca 0.
+async fn get_metrics(State(state): State<AppState>) -> Response {
+    let outbox_pending: Option<i64> = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox_entry WHERE confirmed_at IS NULL",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .ok();
+
+    let gauges = Gauges {
+        pool_size: state.pool.size(),
+        pool_idle: state.pool.num_idle(),
+        outbox_pending,
+    };
+    let body = state.metrics.render(&gauges);
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+        )],
+        body,
+    )
+        .into_response()
 }
 
 /// Leitura do incidente do tenant autenticado.

@@ -53,17 +53,22 @@ pub enum Scope {
     SyncWrite,
     #[serde(rename = "sync:read")]
     SyncRead,
+    /// Métricas operacionais agregadas de `GET /metrics`. Não é escopo de tenant:
+    /// é credencial de operação, e o endpoint não devolve dado de tenant.
+    #[serde(rename = "admin:metrics")]
+    AdminMetrics,
 }
 
 impl Scope {
     /// Conjunto completo, usado apenas por composição de teste (`from_entries`).
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::IncidentWrite,
         Self::IncidentRead,
         Self::EventWrite,
         Self::EventRead,
         Self::SyncWrite,
         Self::SyncRead,
+        Self::AdminMetrics,
     ];
 
     /// Nome estável do escopo no contrato JSON e nos corpos de erro.
@@ -76,6 +81,7 @@ impl Scope {
             Self::EventRead => "event:read",
             Self::SyncWrite => "sync:write",
             Self::SyncRead => "sync:read",
+            Self::AdminMetrics => "admin:metrics",
         }
     }
 }

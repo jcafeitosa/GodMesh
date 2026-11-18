@@ -511,7 +511,7 @@ pub(crate) async fn contiguous_prefix(
 /// Cursor de outra partição/epoch/tenant/filtro é **incomparável** (400); de outro
 /// principal ou sem partição é **inválido** (400). Causas distintas, códigos
 /// distintos: nenhuma delas é "cursor vazio".
-fn cursor_error(error: CursorError) -> ApiError {
+pub(crate) fn cursor_error(error: CursorError) -> ApiError {
     match error {
         CursorError::PartitionMismatch => {
             ApiError::CursorIncomparable("cursor é de outra partição".to_owned())
@@ -537,7 +537,7 @@ fn cursor_error(error: CursorError) -> ApiError {
     }
 }
 
-fn cursor_token_error(error: CursorTokenError) -> ApiError {
+pub(crate) fn cursor_token_error(error: CursorTokenError) -> ApiError {
     let detail = match error {
         CursorTokenError::Malformed => "cursor ilegível".to_owned(),
         CursorTokenError::UnsupportedVersion(v) => {
