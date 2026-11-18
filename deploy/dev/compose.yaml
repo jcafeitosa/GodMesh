@@ -1,0 +1,36 @@
+# Ambiente de desenvolvimento — OrbStack.
+# Backend, frontend e apps rodam LOCAIS; apenas dependências de infraestrutura
+# rodam em contêiner aqui. Produção usa a imagem de deploy/prod.
+#
+# PostGIS: as imagens postgis/postgis 17/18 são amd64-only (verificado em 17/11/2026).
+# Enquanto não houver imagem multi-arch homologada, o dev usa postgres:18-alpine sem
+# PostGIS e o geoespacial fica bloqueado (pendência registrada).
+name: godmesh-dev
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: godmesh-pg
+    environment:
+      POSTGRES_USER: godmesh
+      POSTGRES_PASSWORD: godmesh_dev_only
+      POSTGRES_DB: godmesh
+    ports:
+      - "55432:5432"
+    volumes:
+      - godmesh-pgdata:/var/lib/postgresql
+      - ../../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U godmesh -d godmesh"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    command:
+      - postgres
+      - -c
+      - timezone=UTC
+      - -c
+      - log_min_duration_statement=200
+
+volumes:
+  godmesh-pgdata:
