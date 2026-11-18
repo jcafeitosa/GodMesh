@@ -1,10 +1,16 @@
 //! Binário do servidor HTTP do GodMesh.
 //!
-//! Configuração vem do ambiente, sem default silencioso para o banco:
-//! - `DATABASE_URL` (obrigatório)
-//! - `BIND_ADDR` (opcional, default `127.0.0.1:8080`)
+//! Configuração vem do ambiente, sem default silencioso:
+//! - `DATABASE_URL` (obrigatório, sempre)
+//! - `BIND_ADDR` (obrigatório, exceto em `GODMESH_ENV=dev|development`, onde o
+//!   default é `127.0.0.1:8080`)
+//! - `GODMESH_ENV` (opcional; ausente é tratado como `production`)
 //!
 //! Ausência de configuração é erro explícito com mensagem e código de saída != 0.
+//! Um default de loopback em produção deixava o serviço inalcançável de fora do
+//! contêiner sem nenhum erro; por isso o ambiente controla se o default existe.
+//!
+//! Nenhum exemplo de configuração neste arquivo traz senha: o binário é publicado.
 
 #![forbid(unsafe_code)]
 
@@ -12,8 +18,13 @@ use std::process::ExitCode;
 
 use sqlx::postgres::PgPoolOptions;
 
-/// Endereço padrão: só loopback. Expor a interface exige configuração deliberada.
+/// Endereço padrão aceito **apenas** em ambiente de desenvolvimento: só loopback.
+/// Expor a interface exige configuração deliberada.
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
+
+/// Valores de `GODMESH_ENV` que autorizam o default de loopback. Qualquer outro
+/// valor — inclusive ausente — é tratado como produção (falha fechada).
+const DEV_ENV_VALUES: [&str; 2] = ["dev", "development"];
 
 /// Configuração lida do ambiente.
 struct Config {
@@ -25,16 +36,19 @@ impl Config {
     /// Lê o ambiente e devolve erro legível quando algo obrigatório falta.
     ///
     /// # Errors
-    /// `DATABASE_URL` ausente ou vazio; `BIND_ADDR` presente mas inválido.
+    /// `DATABASE_URL` ausente ou vazia; `BIND_ADDR` ausente fora de
+    /// `GODMESH_ENV=dev|development`.
     fn from_env() -> Result<Self, String> {
         let database_url = match std::env::var("DATABASE_URL") {
             Ok(v) if !v.trim().is_empty() => v,
             Ok(_) => {
-                return Err("DATABASE_URL está definida mas vazia; informe a URL do Postgres".to_owned());
+                return Err(
+                    "DATABASE_URL está definida mas vazia; informe a URL do Postgres".to_owned(),
+                );
             }
             Err(std::env::VarError::NotPresent) => {
                 return Err(
-                    "DATABASE_URL não definida; exemplo: DATABASE_URL=postgres://godmesh:godmesh_dev_only@localhost:55432/godmesh"
+                    "DATABASE_URL não definida; informe a URL do Postgres em DATABASE_URL (exemplo de formato: postgres://usuario:senha@host:porta/banco)"
                         .to_owned(),
                 );
             }
@@ -43,15 +57,95 @@ impl Config {
             }
         };
 
-        let bind_addr = match std::env::var("BIND_ADDR") {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => DEFAULT_BIND_ADDR.to_owned(),
-        };
+        let bind_addr = resolve_bind_addr(
+            std::env::var("BIND_ADDR").ok().as_deref(),
+            std::env::var("GODMESH_ENV").ok().as_deref(),
+        )?;
 
         Ok(Self {
             database_url,
             bind_addr,
         })
+    }
+}
+
+/// Decide o endereço de escuta a partir do ambiente.
+///
+/// Fora de `dev`/`development`, `BIND_ADDR` é obrigatório: um default de loopback
+/// em produção faz o contêiner subir "saudável" e inalcançável.
+///
+/// # Errors
+/// Devolve mensagem citando `BIND_ADDR` quando ela falta e o ambiente não é dev.
+fn resolve_bind_addr(bind_addr: Option<&str>, env: Option<&str>) -> Result<String, String> {
+    if let Some(v) = bind_addr.map(str::trim).filter(|v| !v.is_empty()) {
+        return Ok(v.to_owned());
+    }
+
+    let env_normalizado = env.map(str::trim).map(str::to_ascii_lowercase);
+    if env_normalizado
+        .as_deref()
+        .is_some_and(|e| DEV_ENV_VALUES.contains(&e))
+    {
+        return Ok(DEFAULT_BIND_ADDR.to_owned());
+    }
+
+    Err(format!(
+        "BIND_ADDR não definida; com GODMESH_ENV={} o endereço de escuta é obrigatório \
+         (exemplo: BIND_ADDR=0.0.0.0:8080); o default {DEFAULT_BIND_ADDR} só vale em GODMESH_ENV=dev",
+        env.unwrap_or("<ausente> = production")
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_BIND_ADDR, resolve_bind_addr};
+
+    #[test]
+    fn bind_addr_ausente_em_producao_falha_citando_a_variavel() {
+        let erro = resolve_bind_addr(None, Some("production")).expect_err("deve falhar");
+        assert!(
+            erro.contains("BIND_ADDR"),
+            "mensagem precisa citar BIND_ADDR: {erro}"
+        );
+    }
+
+    #[test]
+    fn bind_addr_ausente_sem_godmesh_env_e_tratada_como_producao() {
+        assert!(resolve_bind_addr(None, None).is_err());
+    }
+
+    #[test]
+    fn bind_addr_vazia_em_producao_falha() {
+        assert!(resolve_bind_addr(Some("   "), Some("production")).is_err());
+    }
+
+    #[test]
+    fn bind_addr_desconhecida_falha_fechada() {
+        assert!(resolve_bind_addr(None, Some("staging")).is_err());
+    }
+
+    #[test]
+    fn bind_addr_default_loopback_so_em_dev() {
+        assert_eq!(
+            resolve_bind_addr(None, Some("dev")).unwrap(),
+            DEFAULT_BIND_ADDR
+        );
+        assert_eq!(
+            resolve_bind_addr(None, Some("development")).unwrap(),
+            DEFAULT_BIND_ADDR
+        );
+        assert_eq!(
+            resolve_bind_addr(None, Some("DEV")).unwrap(),
+            DEFAULT_BIND_ADDR
+        );
+    }
+
+    #[test]
+    fn bind_addr_explicita_vale_em_qualquer_ambiente() {
+        assert_eq!(
+            resolve_bind_addr(Some("0.0.0.0:8080"), Some("production")).unwrap(),
+            "0.0.0.0:8080"
+        );
     }
 }
 
@@ -64,7 +158,10 @@ fn main() -> ExitCode {
         }
     };
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("godmesh-server: falha ao criar runtime tokio: {e}");
@@ -91,7 +188,12 @@ async fn run(config: Config) -> Result<(), String> {
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
-        .map_err(|e| format!("não foi possível escutar em BIND_ADDR={}: {e}", config.bind_addr))?;
+        .map_err(|e| {
+            format!(
+                "não foi possível escutar em BIND_ADDR={}: {e}",
+                config.bind_addr
+            )
+        })?;
 
     let local = listener
         .local_addr()

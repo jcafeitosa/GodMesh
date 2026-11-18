@@ -5,6 +5,7 @@
 !crates/
 !migrations/
 !deploy/prod/Dockerfile
+!deploy/prod/healthcheck.sh
 target/
 **/target/
 .git/

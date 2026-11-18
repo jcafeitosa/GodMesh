@@ -29,7 +29,11 @@ WORKDIR /src
 
 ENV CARGO_TERM_COLOR=never \
     CARGO_INCREMENTAL=0 \
-    CARGO_NET_RETRY=3
+    CARGO_NET_RETRY=3 \
+    CARGO_PROFILE_RELEASE_STRIP=symbols
+
+# `strip = symbols` via cargo (rustc -Cstrip) em vez de `binutils`: o runtime não
+# leva `strip`, e o builder não precisa depender de ferramenta externa.
 
 # Manifestos primeiro: mantém a resolução de dependências em camada própria.
 COPY Cargo.toml Cargo.lock ./
@@ -58,18 +62,36 @@ COPY --from=builder /src/target/release/godmesh-server /usr/local/bin/godmesh-se
 COPY --chown=root:root migrations /migrations
 RUN chmod -R a-w /migrations
 
+# Healthcheck em script próprio (inspecionável e testável fora da imagem).
+COPY deploy/prod/healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod 0555 /usr/local/bin/healthcheck.sh
+
+# BIND_ADDR: o binário exige a variável em produção (GODMESH_ENV=production).
+# `0.0.0.0` é o que faz o serviço alcançável de fora do contêiner; o default de
+# loopback do binário só vale em GODMESH_ENV=dev.
+#
+# GODMESH_MIGRATIONS_DIR: reservado; o binário atual NÃO lê esta variável (não
+# aplica migração). A imagem só carrega os .sql.
 ENV GODMESH_ENV=production \
+    BIND_ADDR=0.0.0.0:8080 \
     GODMESH_MIGRATIONS_DIR=/migrations \
     RUST_BACKTRACE=0
 
 USER 10001:10001
 
+# EXPOSE é METADADO: não publica porta, não altera o firewall e não substitui
+# `-p 8080:8080`. Quem publica é o operador, na execução.
 EXPOSE 8080
 
-# Healthcheck sem dependência extra: a imagem de runtime não traz curl/wget/nc.
-# `bash` + /dev/tcp fazem o GET em /healthz; a porta vem de BIND_ADDR quando
-# definido (o servidor escuta em loopback por padrão).
+# Healthcheck: GET /healthz no bind efetivo + alcance TCP do Postgres.
+# Ver deploy/prod/healthcheck.sh para os limites (o /healthz atual não consulta o pool).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD /bin/bash -c 'port="${BIND_ADDR:-127.0.0.1:8080}"; port="${port##*:}"; exec 3<>/dev/tcp/127.0.0.1/$port || exit 1; printf "GET /healthz HTTP/1.0\r\n\r\n" >&3; grep -q "transport_accepted" <&3'
+    CMD ["/usr/local/bin/healthcheck.sh"]
 
+# Runtime recomendado (documentado, não aplicado pela imagem):
+#   docker run --read-only --cap-drop=ALL --security-opt no-new-privileges \
+#              --user 10001:10001 -p 8080:8080 -e DATABASE_URL=... godmesh-server:TAG
+# `--read-only` torna o rootfs imutável, inclusive /migrations (o `chmod a-w` só
+# vale por DAC e é contornável por root); `--user 0:0` + `--read-only` é o teste
+# registrado em docs/09-equipe/evidencias/2026-11-18-gate-d-container.md.
 ENTRYPOINT ["/usr/local/bin/godmesh-server"]
