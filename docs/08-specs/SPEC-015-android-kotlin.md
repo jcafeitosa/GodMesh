@@ -22,20 +22,20 @@ Engines em escopo, sem versão fixada aqui: **WKWebView** (macOS e iOS), **WebVi
 | Fonte | Localizador e uso | SHA-256 / estado |
 |---|---|---|
 | `docs/00-produto/requisitos.md` | RF-028–034, RF-037, RF-042–043; RNF-016 | `327e259927dd99e3912aaf59e2d59e5b33afb636cf733b177a7a9c30c0b6ef82` |
-| `docs/01-arquitetura/arquitetura-referencia.md` | plataformas e regras de prevalência; precedência normativa | `555bad39b874b7ba5c8c4cdb87ff5d7f20194afb7fc338a9a93029b829d7cb89` (hash registrado na versão anterior; não reconferido nesta rodada) |
+| `docs/01-arquitetura/arquitetura-referencia.md` | plataformas e regras de prevalência; precedência normativa | `555bad39b874b7ba5c8c4cdb87ff5d7f20194afb7fc338a9a93029b829d7cb89` |
 | `docs/06-planejamento/decisoes.md` | ADR-047, 052, 053, 056–066, **ADR-068** (vigente), ADR-055 (SUPERADA, histórico) | `3351c5e5507b05fbd5acf0345cd4ac5581f4ac7949fe3866e6546b3b38ef0e93` |
-| `docs/06-planejamento/pendencias.md` | dependências de compatibilidade, políticas, energia e critérios | `45cd24d7a5a0a91d95e8affe73500a8a8025a2848716fd491003c7c8bae444c8` (hash registrado na versão anterior) |
-| `docs/06-planejamento/matriz-rastreabilidade.md` | cobertura, aceite e estado dos RF/RNF | `5b68c1a7ea8675bb27153dbaabd6cc50a367a6f0b6a2fe44483bdabe68397ea3` (hash registrado na versão anterior) |
+| `docs/06-planejamento/pendencias.md` | dependências de compatibilidade, políticas, energia e critérios | `47a48d243cf5f55eefb4f0d865036af74d6a9ed8869e67e14af1d6b8a0e962f2` |
+| `docs/06-planejamento/matriz-rastreabilidade.md` | cobertura, aceite e estado dos RF/RNF | `cec9102e21a4da0de9afe79f79dbb352e894884e68b39ec9ae07fd74e099f4ae` |
 | `docs/01-arquitetura/aplicativo-operacao-normal.md` | estados, offline, permissões e prioridades | `019fa7c5556039bf94769f4b958fae1f633800a8fce82915c5a117c8451e5081` |
-| `docs/01-arquitetura/cliente-mobile-sensores-conectividade.md` | DICE, capacidade, permissões, sensores e rotas | `4595020eb457cc71e6923c1988d35fb69bf35fd8099e23fb44b677ed40b7a63e` (hash registrado na versão anterior) |
+| `docs/01-arquitetura/cliente-mobile-sensores-conectividade.md` | DICE, capacidade, permissões, sensores e rotas | `4595020eb457cc71e6923c1988d35fb69bf35fd8099e23fb44b677ed40b7a63e` |
 | `docs/01-arquitetura/live-presence.md` | LIVE-ARC-001 v1.0, 2026-11-15; subescopo de projeção por atividade | `1d3c38919656b049fd607c0ef1558c0c0a7e61dc5d7ee2f24446fa68af5e48d5` |
-| `docs/03-integracoes/wifi-android-ios-roteadores.md` | RF-037, pedido de associação delegado ao SO | `39227fcc92d512b34563cccbc18331787db0d466de6938d9f1d2668332af31f1` (hash registrado na versão anterior) |
-| `docs/05-operacao/testes-app-live-presence.md` | casos planejados, sem resultados | `712f759ae0c5abcfeb481b33e71af74b159c85b0afc1ccee99a54d97f9c8d716` (hash registrado na versão anterior) |
-| `docs/05-operacao/testes-mobile-guardian.md` | cenários móveis Guardian e degradação | `2ded815192ae71e27e6f1fa7c8a8baf9eb02b8692c116b51b0f7731088448f14` (hash registrado na versão anterior) |
+| `docs/03-integracoes/wifi-android-ios-roteadores.md` | RF-037, pedido de associação delegado ao SO | `39227fcc92d512b34563cccbc18331787db0d466de6938d9f1d2668332af31f1` |
+| `docs/05-operacao/testes-app-live-presence.md` | casos planejados, sem resultados | `712f759ae0c5abcfeb481b33e71af74b159c85b0afc1ccee99a54d97f9c8d716` |
+| `docs/05-operacao/testes-mobile-guardian.md` | cenários móveis Guardian e degradação | `2ded815192ae71e27e6f1fa7c8a8baf9eb02b8692c116b51b0f7731088448f14` |
 | `docs/09-equipe/registro-gaps.md` | gaps abertos e ação do CTO | `0d5c7f0237f6234c3cd336892a63d50f34e5de6878f0194a89156fa6a594b631` |
-| `docs/08-specs/SPEC-013-experiencia-plataformas.md` | UX, acessibilidade e jornadas | `05a54268d0eb7f92e335360f5a92468d0612e6179e98a95b06e89f68dece87b9` (versão anterior à ADR-068; precisa de nova versão) |
-| `docs/08-specs/SPEC-014-cliente-offline-ffi.md` | estado local e fronteira hoje descrita como FFI | `57804a79093b9b1e54e71c509ea88681f1d04c45a6bed587cfdc82f5574ff9ed` (versão anterior à ADR-068; ainda nomeia FFI Rust–Swift) |
-| `docs/08-specs/SPEC-016-ios-swift.md` | contratos de offline, lifecycle e comandos/eventos Tauri do cliente | ver cabeçalho daquela SPEC (DRAFT-0.6) |
+| `docs/08-specs/SPEC-013-experiencia-plataformas.md` | UX, acessibilidade e jornadas | `2a0af707d04f40950be96e694da72f79efa23b71a7ac8f3d26e75685b6418478` (DRAFT-0.7; revisão da ADR-068 pendente) |
+| `docs/08-specs/SPEC-014-cliente-offline-ffi.md` | estado local e fronteira de comandos/eventos Tauri | `d37160a32ddd04d74417b4d15000bb2dc0b3acff2bc1acbc33dffa1efe30fbbb` (DRAFT-0.9; revisão da ADR-068 pendente) |
+| `docs/08-specs/SPEC-016-ios-swift.md` | contratos de offline, lifecycle e comandos/eventos Tauri do cliente | `0378d4b790c465676875055221b75cea01c6d8f21b4b9dc31a8da4eac4b341b1` (DRAFT-0.9; extensão iOS em revisão) |
 | Contribuição de Chet | `SPECS-EM-ANDAMENTO/contribuicao-chet-haase.md`, rascunho autoral lido | `c3b7cddcffe4076e68795fcb034200befebe63b539f22972a5f2226843443cfe` |
 | Contribuição de Alex | `SPECS-EM-ANDAMENTO/contribuicao-alex-crichton.md`, interface offline/fronteira de núcleo | `29c9d11ac89c132da5033776b34dfbf36e653d5033d281adc24cedc7dc298ed2` |
 | Parecer de Chet | `SPECS-EM-ANDAMENTO/revisao-chet-alex-crichton.md` | parecer documental, sem aprovação |
@@ -224,9 +224,9 @@ Para validação futura, registrar engine e versão, SO e versão, build, plugin
 
 ## 11. Estado e limites
 
-DRAFT-0.5, OPEN. Esta versão substitui o recorte “por plataforma nativa” pelo recorte “por *engine* de WebView e por capacidade declarada”, conforme ADR-068, e mantém sem decisão os itens da tabela OPEN. A revisão de Alex é solicitada; sua existência futura não aprovará automaticamente a SPEC. A integração de Alan, a revisão de rastreabilidade de Ada e a aprovação humana são gates posteriores. Nenhum código, build, teste de produto, banco, serviço, plugin, extensão nativa ou aparelho foi executado. A implementação continua não verificada.
+DRAFT-0.7, OPEN. O rastro de mudança ainda registra a adaptação de DRAFT-0.4 para DRAFT-0.5; não há neste arquivo histórico suficiente para reconstruir separadamente as mudanças de DRAFT-0.6 e DRAFT-0.7. Esta versão substitui o recorte “por plataforma nativa” pelo recorte “por *engine* de WebView e por capacidade declarada”, conforme ADR-068, e mantém sem decisão os itens da tabela OPEN. A revisão de Alex é solicitada; sua existência futura não aprovará automaticamente a SPEC. A integração de Alan, a revisão de rastreabilidade de Ada e a aprovação humana são gates posteriores. Nenhum código, build, teste de produto, banco, serviço, plugin, extensão nativa ou aparelho foi executado. A implementação continua não verificada.
 
-## Mudanças desta versão — ADR-068 (DRAFT-0.4 → DRAFT-0.5)
+## Histórico de mudança — ADR-068 (DRAFT-0.4 → DRAFT-0.5)
 
 **Decisão aplicada:** ADR-068, aprovada pelo usuário em 17/11/2026, com a ADR-055 marcada **SUPERADA**. Cliente único web (React 19 + Astryx + Tailwind, ADR-067) empacotado com **Tauri 2** em macOS, Windows, Linux, iOS e Android; núcleo Rust no processo como backend Tauri; plugins nativos como única superfície nativa.
 

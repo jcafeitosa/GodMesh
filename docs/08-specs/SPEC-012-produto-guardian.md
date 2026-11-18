@@ -1,6 +1,6 @@
 # SPEC-012 — Produto, contexto e Guardian
 
-**Versão:** DRAFT-0.12 · **Data:** 2026-11-17 · **Estado:** DRAFT/OPEN · **Autora documental:** Margaret Hamilton · **Revisão independente:** Ada Lovelace, revisão do delta desta versão solicitada; pendente. Não aprovada, implementada nem validada. Casos abaixo são planejados e `NOT_EXECUTED`; identificadores de teste formais `NOT_ASSIGNED`.
+**Versão:** DRAFT-0.12 · **Data:** 2026-11-17 · **Estado:** DRAFT/OPEN · **Autora documental:** Margaret Hamilton · **Revisão independente:** Ada Lovelace revisou DRAFT-0.3 (focal); DRAFT-0.12 aguarda revisão. Não aprovada, implementada nem validada. Casos abaixo são planejados e `NOT_EXECUTED`; identificadores de teste formais `NOT_ASSIGNED`.
 
 
 ## Superfície nativa exigida (ADR-068)
@@ -25,7 +25,7 @@ Teste negativo: iniciar sessão sem permissão de background → sessão criada 
 
 `00-produto/visao.md:3–20,34–45`; `00-produto/requisitos.md:3,26,56–57`; `02-dominio/contexto-operacional.md:3–22,37–38`; `02-dominio/guardian-acompanhamento.md:3–34,47–51`; `07-contratos/guardian-crowdfind.md:1–15,40–46` (contrato documental, não API comprovada); `06-planejamento/decisoes.md` ADR-004, 010, 023, 030, 039, 042, 047 e 055; `06-planejamento/matriz-rastreabilidade.md` linhas individuais e conciliações; `06-planejamento/pendencias.md` §Direções de produto transmitidas. A prevalência normativa segue `README.md` e arquitetura de referência. Direções recentes foram comunicadas por Ada; a coordenação registra não ter acessado a resposta original.
 
-Baseline de autoria: `Shared/GodMesh/Planejamento-Integral-2026-11-16/SPECS-EM-ANDAMENTO/contribuicao-margaret-hamilton.md`, SHA-256 `be5222e988d2bb220c9065c17b752e371d924aa12bd2660f90842bed863fcc21`. Confronto de interface: `SPECS-EM-ANDAMENTO/contribuicao-nancy-leveson.md` §Interfaces RF-028 e RNF-016, que preserva atraso distinto de SOS; revisão independente de DRAFT-0.1 e rechecagem de DRAFT-0.2 recebidas em `SPECS-EM-ANDAMENTO/REVISAO-SPEC-012-ADA.md`; rechecagem focal DRAFT-0.3 recebida em `SPECS-EM-ANDAMENTO/REVISAO-SPEC-012-ADA.md`; DRAFT-0.5 tinha revisão pendente à época; esta versão DRAFT-0.6 também aguarda revisão independente.
+Baseline de autoria: `Shared/GodMesh/Planejamento-Integral-2026-11-16/SPECS-EM-ANDAMENTO/contribuicao-margaret-hamilton.md`, SHA-256 `be5222e988d2bb220c9065c17b752e371d924aa12bd2660f90842bed863fcc21`. Confronto de interface: `SPECS-EM-ANDAMENTO/contribuicao-nancy-leveson.md` §Interfaces RF-028 e RNF-016, que preserva atraso distinto de SOS; revisão independente de DRAFT-0.1 e rechecagem de DRAFT-0.2 recebidas em `SPECS-EM-ANDAMENTO/REVISAO-SPEC-012-ADA.md`; rechecagem focal DRAFT-0.3 recebida em `SPECS-EM-ANDAMENTO/REVISAO-SPEC-012-ADA.md`; DRAFT-0.5/DRAFT-0.6 eram estados históricos; DRAFT-0.12 foi expandida depois e ainda aguarda revisão independente.
 
 | Requisito | Subescopo nesta versão | Limite |
 |---|---|---|
@@ -159,7 +159,7 @@ Estas são expectativas de produto, sujeitas à resolução de conflito pelo con
 
 **Casos planejados incrementais:** (a) revogar ou cancelar enquanto `consent_pending`, com tentativa subsequente de leitura; (b) cancelar/expirar enquanto `scheduled`, seguido de evento `active` atrasado; (c) reenviar o mesmo `event_id` e verificar que nenhum efeito adicional concede acesso nem reativa Beacon; (d) replay antigo após terminal preserva terminalidade; (e) para cada oferta, percorrer jornada aprovada e contrastar autorização válida com ausência de autorização/capacidade. Predicados específicos, autoridade, fixtures e IDs centrais continuam NOT_ASSIGNED; resultados NOT_EXECUTED.
 
-**Estado de revisão e cobertura.** Ada rechecagem DRAFT-0.3 confirma textualmente duas correções e preserva A2/A3 parciais; detalhes recebidos foram incorporados como propostas rastreáveis. A revisão citada de DRAFT-0.5 é de versão anterior; revisão independente do DRAFT-0.6 solicitada por hash ao revisor designado permanece pendente. RF-027 tem direção e casos propostos, com taxonomia/precedência multi-device ainda OPEN. RF-028 cobre parcialmente sessão, convites, atraso, estados terminais e Beacon; retenção, sync, política offline, estado de pausa e autoridade/ordem exigem integração. RF-020 parcial conforme limitações acima. Nenhum requisito declara implementação ou validação.
+**Estado de revisão e cobertura.** Ada rechecagem DRAFT-0.3 confirma textualmente duas correções e preserva A2/A3 parciais; detalhes recebidos foram incorporados como propostas rastreáveis. As revisões citadas cobrem apenas DRAFT-0.1/0.2/0.3; a versão atual DRAFT-0.12 aguarda revisão independente por hash. RF-027 tem direção e casos propostos, com taxonomia/precedência multi-device ainda OPEN. RF-028 cobre parcialmente sessão, convites, atraso, estados terminais e Beacon; retenção, sync, política offline, estado de pausa e autoridade/ordem exigem integração. RF-020 parcial conforme limitações acima. Nenhum requisito declara implementação ou validação.
 
 ## Mudanças desta versão — ADR-059
 
@@ -170,7 +170,7 @@ Cada operação exige epoch comparável, frescor do perfil dentro do limite apli
 - **casos por requisito e casos P desbloqueados (C3-1):** nova subseção final `### Casos por requisito (P/N/B/F)`, com uma linha por requisito declarado (RF-020, RF-027, RF-028) e as quatro colunas preenchidas ou `n/a` justificado, mais linha própria para requisitos apenas de interface; casos P cujo esperado dependia de valor não decidido — janela N/N-1 do perfil, limite de frescor do grant offline e prazo/gatilho da política de retenção — reescritos para o comportamento com parâmetro ausente (`param_not_configured` → negar ou informar desconhecido), preservando cada caso e seu ID. Caso de borda `S012-061-B1` (ADR-061) acrescentado. Nenhum número ou prazo é criado.
 - **casos por decisão (resposta ao veto C3-1):** seção final `Casos por decisão (ADR-056…063)` com casos locais por decisão aplicável, cada um com pré-condição, estímulo, esperado observável e tipo P/N/B/F; todos `NOT_EXECUTED`, ID formal `NOT_ASSIGNED`.
 
-As revisões citadas nas seções anteriores pertencem a versões anteriores. A revisão independente do DRAFT-0.6 está pendente; referências anteriores não são parecer desta versão. Revisão desta versão pendente conforme G3-03; SPEC-018 permanece fora do escopo desta edição autorizada.
+As revisões citadas nas seções anteriores pertencem a versões anteriores. A revisão independente do DRAFT-0.12 está pendente; referências anteriores não são parecer desta versão. Revisão desta versão pendente conforme G3-03; SPEC-018 permanece fora do escopo desta edição autorizada.
 
 
 ## Casos por decisão (ADR-056…063)

@@ -4,6 +4,7 @@ members = [
     "crates/godmesh-protocol",
     "crates/godmesh-identity",
     "crates/godmesh-sync",
+    "crates/godmesh-policy",
 ]
 
 [workspace.package]

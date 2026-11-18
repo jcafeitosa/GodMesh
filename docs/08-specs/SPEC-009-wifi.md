@@ -1,6 +1,6 @@
 # SPEC-009 — Wi-Fi AutoDiscover, AutoShare e AutoConnect
 
-**Versão:** DRAFT-0.9
+**Versão:** DRAFT-0.10
 **Estado:** DRAFT / OPEN
 **Autor:** Jouni Malinen  
 **Revisor independente designado:** Richard Bejtlich  
@@ -14,6 +14,8 @@ No cliente web+Tauri, inventário e associação Wi-Fi passam por **plugin nativ
 
 ## Mudanças desta versão
 
+- DRAFT-0.10 — 2026-11-17: concilia a matriz de aplicabilidade com ADR-068; Tauri/React é o cliente comum e recursos Wi-Fi locais exigem plugin nativo tipado; associação/inventário em web puro são indisponíveis.
+- DRAFT-0.9 — 2026-11-17: atualiza aplicabilidade dos clientes conforme ADR-068 (React/Tauri para desktop, web, iOS e Android; plugin nativo Tauri onde APIs web não bastam); registra ADR-064 para operações offline condicionais; incorpora crosswalk de casos por requisito e decisões ADR-056–063. Mantém DRAFT/OPEN; não aprova API ou política Wi-Fi.
 - DRAFT-0.4 — casos por requisito e casos P desbloqueados (C3-1): nova subseção `### Casos por requisito (P/N/B/F)` ao final, com uma linha por requisito declarado (RF-035 a RF-041, RNF-013, RNF-014) e as quatro colunas preenchidas ou `n/a` justificado; casos P cujo esperado dependia de valor não decidido — janela N/N-1 de `WIFI-API-001` e prazo/gatilho da política de retenção de auditoria — reescritos para o comportamento com parâmetro ausente (`param_not_configured` → negar ou informar desconhecido), preservando cada caso e seu ID; caso de borda `C009-061-B` (ADR-061) acrescentado. Nenhum número, prazo ou enum é criado; nada é aprovado ou executado.
 - DRAFT-0.3 — casos por decisão (resposta ao veto C3-1): nova seção “Casos por decisão (ADR-056…063)” com uma linha por decisão aplicável, ao menos um caso negativo e um de falha/recuperação por decisão, esperado observável e todo caso `NOT_EXECUTED` com ID formal `NOT_ASSIGNED`; parâmetro `OPEN` resulta em negar/informar desconhecido. Nada é aprovado, alterado em decisão ou executado.
 - ADR-060: cada perna que termine proteção declara `confidentiality=terminated`; TLS/DTLS/SRTP não são E2EE.
@@ -52,22 +54,22 @@ A arquitetura de referência e ADRs prevalecem, conforme `docs/README.md`, regra
 - `docs/02-dominio/wifi-registro-acessos.md`, papéis e leitura de auditoria.
 - `docs/04-seguranca/wifi-compartilhamento-privacidade.md`, §§2–6, retenção e revogação por classe.
 - `docs/07-contratos/wifi-autodiscover-autoshare-api.md`, WIFI-API-001 v1.0, 2026-11-15, proposta não implementada.
-- `docs/05-operacao/testes-wifi.md`; `docs/06-planejamento/decisoes.md`; `docs/06-planejamento/pendencias.md`.
+- `docs/05-operacao/testes-wifi.md`; `docs/06-planejamento/decisoes.md` (ADRs-056–068, incluindo ADR-064 e ADR-068, que supera ADR-055); `docs/06-planejamento/pendencias.md`.
 
 Contribuição de autoria lida: `SPECS-EM-ANDAMENTO/contribuicao-jouni-malinen.md`, SHA-256 `da081830214f2fa2f1e184b8d9c1ac6374190fa897bb133968d462de2a975532`, captura verificada em 2026-11-16. Pareceres: `contribuicao-richard-bejtlich.md`, SHA-256 `9ec8d93457c8a6802438667c089ee08dcf34e70e141953889f7a5e314bfc0945`; Richard revisou §§12–14 e considera os achados defensivos substancialmente descritos, mas parciais por parâmetros/owners/políticas OPEN. `contribuicao-dan-kaminsky.md`, SHA-256 `eabc96a2689bb60ec74949f8b1114a195cb1a247ddf1280b6832615ee946f609`; Dan recomenda revalidar autorização/escopo antes de revelar recibo de retry pós-revogação. Essas revisões não aprovam a SPEC.
 
 ## 3. Produtos, plataformas e limites de aplicação
 
-A SPEC se aplica a clientes e serviços que implementem seus fluxos, sem alegar suporte idêntico em todas as plataformas. Servidor Linux processa APIs, políticas, catálogo e eventos segundo autoridade/escopo. Clientes móveis usam somente capacidades publicadas pelo respectivo SO. Controlador/AP só participa por integração autenticada e homologada. macOS desktop, Windows, Linux desktop e web podem administrar, consultar ou operar contratos remotos conforme permissões e decisões de produto; descoberta/associação direta depende de capacidades confirmadas da plataforma e não é presumida.
+Conforme ADR-068 (17/11/2026), os clientes usam React 19 com Astryx/shadcn/Tailwind, empacotados em Tauri 2 para macOS, Windows, Linux, iOS e Android; a decisão supera ADR-055 e remove interfaces SwiftUI/WinUI/Qt/Compose como alvo. Esta SPEC não redefine essa escolha. APIs web não enumeram redes nem associam SSID. No cliente Tauri, inventário/associação exigem plugin nativo com contrato tipado; sem plugin a capacidade é indisponível, nunca simulada. O servidor Linux continua responsável por APIs/política/catálogo/eventos. Controlador/AP só participa por integração autenticada e homologada. Android usa fluxo de sugestão sujeito ao SO. iOS não enumera redes e só usa configuração autorizada pelo usuário. macOS/Windows/Linux desktop requerem plugin e matriz por engine/versão ainda OPEN. Web puro limita-se a APIs remotas; associação/inventário local ficam indisponíveis.
 
 | Ambiente | Aplicabilidade documentada | Limite/OPEN |
 |---|---|---|
 | Servidor Linux | API, política, registro, mapa, eventos e integrações de controladores autorizados | implantação, região, capacidades de cada controlador e autoridade precisam ser definidas |
-| macOS arm64/x86_64 | Cliente de desktop pode consultar e administrar por serviço; Core WLAN é referenciado para gerenciamento Wi-Fi | modo de associação, permissões e suporte concreto precisam de fonte oficial/versionada e decisão de produto |
-| iOS | Solicitar configuração/join via Network Extension quando autorizado; obter apenas observações permitidas | sem API pública geral para listar APs próximos ou senhas/redes de terceiros; consentimento do usuário; callback não prova Internet |
-| Android | Solicitar rede/sugestão e observar callbacks/capacidades permitidos pelo SO | SO decide sobre sugestões; scans e background limitados por versão/permissões; callback não prova Internet |
-| Windows e Linux desktop | Interfaces remotas e funções administrativas podem ser aplicáveis | API local, permissão, backend e compatibilidade ainda não especificados por versão |
-| Web | Consulta a serviços autorizados e superfícies administrativas conforme produto | navegador não é fonte de autoridade nem fornece operação Wi-Fi geral; N/A para associação direta enquanto capacidade não for comprovada |
+| macOS arm64/x86_64 | Cliente Tauri/React; plugin nativo tipado quando usar recurso local | Core WLAN é referência de API macOS, mas integração/plugin e versão suportada permanecem OPEN |
+| iOS | Cliente Tauri/React; configuração Wi-Fi apenas com autorização do usuário; sem enumeração | API/capacidade exata do plugin e permissões por versão devem ser conferidas; associação não prova Internet |
+| Android | Cliente Tauri/React; plugin nativo usa sugestão/solicitação sujeita à decisão do SO | versão/permissões/limites de scan e background precisam de matriz; callback não prova Internet |
+| Windows e Linux desktop | Cliente Tauri/React; plugin nativo exigido para acesso Wi-Fi local | API, engine WebView, permissão e compatibilidade por versão ainda OPEN |
+| Web puro | Consulta remota autorizada | Inventário/associação local indisponíveis sem plugin; nenhuma capacidade é simulada |
 
 Fontes oficiais consultadas em 2026-11-16: Apple, [Wi-Fi configuration](https://developer.apple.com/documentation/networkextension/wi-fi-configuration) e [NEHotspotConfigurationManager](https://developer.apple.com/documentation/networkextension/nehotspotconfigurationmanager); Android, [WifiNetworkSpecifier](https://developer.android.com/reference/android/net/wifi/WifiNetworkSpecifier) e [WifiManager](https://developer.android.com/reference/android/net/wifi/WifiManager). A documentação Apple diz que configuração/join exige autorização do usuário e diferencia iOS Network Extension de Core WLAN para macOS. Android descreve `WifiNetworkSpecifier` como solicitação de rede e `WifiNetworkSuggestion` como sugestão sujeita à decisão do SO. Essas APIs não comprovam, por si, autenticação no controlador ou acesso geral à Internet. Sem documentação de fabricante, suporte de roteador é OPEN.
 

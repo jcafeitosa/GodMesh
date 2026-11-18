@@ -1,8 +1,8 @@
 # SPEC-007 — Voz PTT e mídia nativa
 
-**Versão:** DRAFT-0.8 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
+**Versão:** DRAFT-0.9 · **Estado:** DRAFT/OPEN · **Data:** 2026-11-17  
 **Autora documental:** Radia Perlman · **Revisor designado:** Vint Cerf  
-O parecer existente refere-se ao DRAFT-0.1. Revisão independente do DRAFT-0.3 pendente. Execução: `NOT_EXECUTED`. Metas quantitativas: **OPEN — a medir**.
+Pareceres de Vint existentes referem-se aos DRAFT-0.1 e DRAFT-0.2; revisão independente desta versão pendente. Execução: `NOT_EXECUTED`. Metas quantitativas: **OPEN — a medir**.
 
 **Requisitos cobertos nesta versão:** RF-005 (voz nativa, PTT, grupos, prioridade e canais); RNF-007 (mídia não transportada pelo event bus; medições planejadas de jitter, perda, reconexão e floor control).  
 **Cobertura:** parcial. A SPEC não pretende especificar toda a voz, transporte, bridges, ASR, SOS, QoS ou experiência de plataforma. Casos de teste ainda `NOT_ASSIGNED`; execução `NOT_EXECUTED`.
@@ -28,6 +28,10 @@ Nenhuma tela chama API de áudio do navegador para PTT: `getUserMedia` só é ac
 - O que não muda: floor/lease (ADR-058/007-A…C), `confidentiality` (ADR-060), mídia fora do event bus (RNF-007), retenção de áudio (ADR-065, não retido por padrão).
 
 ## Mudanças desta versão
+
+### DRAFT-0.9 — distinção de TX offline e estado stale/unknown
+
+Reescreve §4.4 e §6.3 para separar indisponibilidade de rota de autoridade `stale/unknown`: TX isolado só pode ocorrer se uma autorização assinada ainda válida explicitar esse escopo e operação; `stale/unknown` segue negando, sem inferência pelo tempo. Frescor, duração, propagação de revogação e operação local efetivamente autorizada continuam OPEN-007-C. Alinha o caso de borda/negativo C007-059-P/N/F/B: enquanto frescor não estiver configurado, negar ou adiar TX offline. Nenhum tempo ou permissão nova foi decidido.
 
 ### DRAFT-0.5 — casos por requisito e casos P desbloqueados (C3-1)
 
@@ -100,7 +104,7 @@ Dados conceituais citados pelas fontes: canal/sessão, identidade e ACL, classe/
 1. Em canal half-duplex, pode haver no máximo um grant TX válido por domínio de arbitragem. Grant identifica canal/escopo, titular, `grant_id`, epoch e validade; o formato e a autoridade que define validade seguem OPEN.
 2. O media edge valida grant, titular, canal/escopo, epoch e validade antes de aceitar TX. Controle não delega essa checagem ao cliente.
 3. Mudança de autoridade exige fencing. Se não houver prova de invalidação do grant anterior no controlador e no ponto de mídia, preempção deve ser negada ou adiada. Fencing distribuído e seus efetores não estão definidos por esta SPEC.
-4. Perda de controle impede TX externo novo e não pode criar segundo transmissor. Grant offline só autoriza ações previamente delimitadas pela política, sob grant ainda válido; não afasta negativas quando autoridade está `stale/unknown` nem presume propagação instantânea de revogação (`pendencias.md:128`). O comportamento temporal de frames já em trânsito e de edge isolado depende da decisão de lease/frescor abaixo.
+4. Perda de controle impede TX externo novo, exceto operação offline previamente autorizada por grant assinado, ainda válido e explicitamente delimitado para aquele TX/canal; essa condição permanece sujeita a OPEN-007-C. Indisponibilidade de rota, por si só, não torna válido um grant. Se autoridade estiver `stale/unknown`, se escopo TX local não estiver explícito, ou se validade/frescor não puder ser demonstrada, TX é negado ou adiado; nenhum estado é promovido por tempo decorrido (`pendencias.md:126,128`). Não presumir propagação instantânea de revogação. O tratamento de frames já em trânsito e a cessação temporal no edge isolado permanecem OPEN.
 5. Release/revoke torna o grant inutilizável conforme política e remove a autorização efetiva no edge. Recibo de transporte do release (`transport_accepted`) e confirmação de cessação são sinais distintos; protocolo/ordem ainda OPEN.
 6. Reconexão não ressuscita grant expirado, revogado ou epoch antigo. Criar sessão/stream atual ou revalidar sessão conforme política e exigir autorização vigente antes de novo TX.
 7. O controle e a voz podem degradar separadamente. Eventos e SOS não dependem do codec; estado do codec não cria autoridade de floor.
@@ -138,8 +142,8 @@ Transições normativas que a implementação futura deve preservar: pedido some
 ### 6.3 Release, expiração, revogação e partição
 
 **Estímulo:** release normal; expiração; revoke; isolamento separado de cliente, controlador e media edge; failover durante grant; mensagens atrasadas/reordenadas.  
-**Esperado:** estado antigo não autoriza novo TX; autoridade não alcançável não cria concessão conflitante; edge nega grant stale conforme regra vigente. Ao reconectar, sessão e grant revalidam.  
-**OPEN:** limite temporal de cessação, autoridade local permitida, frescor offline e tratamento de áudio já em trânsito. Não afirmar corte instantâneo sem critério aprovado.
+**Esperado:** estado antigo não autoriza novo TX; autoridade não alcançável não cria concessão conflitante; edge nega grant stale conforme regra vigente. TX offline somente se grant ainda válido e explicitamente delimitado para esse escopo e a autoridade não estiver stale/unknown; se frescor, permissão ou epoch não puderem ser demonstrados, negar/adiar. Ao reconectar, sessão e grant revalidam.  
+**OPEN:** duração/validade/frescor, revogação propagada durante partição, autoridade local permitida e tratamento/cessação de áudio já em trânsito. Não afirmar corte instantâneo sem critério aprovado.
 
 ### 6.4 Separação bus/mídia — RNF-007
 

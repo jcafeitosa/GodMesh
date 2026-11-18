@@ -7,6 +7,10 @@ name = "godmesh-identity"
 version = "0.1.0"
 
 [[package]]
+name = "godmesh-policy"
+version = "0.1.0"
+
+[[package]]
 name = "godmesh-protocol"
 version = "0.1.0"
 

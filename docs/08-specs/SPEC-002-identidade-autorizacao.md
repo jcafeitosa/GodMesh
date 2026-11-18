@@ -1,14 +1,15 @@
 # SPEC-002 — Identidade e autorização
 
-**Versão:** DRAFT-0.9  
+**Versão:** DRAFT-0.10
 **Estado:** DRAFT / OPEN. Não aprovada para implementação.  
 **Autora:** Kim Cameron (pod P2 — Identidade)  
 **Revisão independente designada:** Bruce Schneier. Revisão da contribuição anterior não equivale a revisão desta versão canônica.  
 **Data:** 2026-11-17
-**Revisor:** Bruce Schneier (independente; revisão desta versão pendente). Revisão desta DRAFT-0.6 **pendente**; nenhum parecer existente cobre este texto.
+**Revisor:** Bruce Schneier (independente; revisão de DRAFT-0.10 pendente). Pareceres existentes cobrem apenas hashes e versões anteriores; não aprovam este texto.
 
 ## Mudanças desta versão
 
+- §11.1 acrescenta matriz documental por operação × SO para armazenar credenciais e usar chaves, com fonte/API e diferenças explícitas. Distingue Keychain/Secure Enclave, Credential Management/DPAPI/CNG KSP e Secret Service/kernel key retention; não escolhe provider, hardware, política de import/export ou versão mínima. Derivado de pesquisa Kim §20, hash `5c205e4c66dffe1d0189cad43ac9de01def72376120fb7d7768d0464cd6cc614`, e fontes primárias consultadas em 2026-11-16.
 - Casos por requisito (P/N/B/F): nova subseção final com uma linha por requisito declarado na §2 (RF-001, RF-015, RF-016, RF-021, RF-022, RNF-002, RNF-003, RNF-015, RNF-017), quatro colunas de caso e `n/a` justificado; tudo `NOT_EXECUTED` / `NOT_ASSIGNED`.
 - `S002-057-P1` e `S002-059-P1` passam a declarar esperado com `param_not_configured` quando dependem de fonte/limite de frescor não decididos; o positivo original é preservado no mesmo ID para quando o parâmetro for aprovado. Nenhum valor numérico é criado.
 
@@ -285,6 +286,21 @@ A capacidade de sustentar F1 ou F2 da §6.3 — contador monotônico protegido p
 
 Sem APIs e versões mínimas escolhidas, compatibilidade real permanece não verificada. Não se declara N/A global para nenhuma plataforma do escopo do produto; operações exclusivas de servidor ficam sem superfície direta no cliente, mas seus clientes dependentes continuam aplicáveis.
 
+### 11.1 Armazenamento de credenciais e uso de chaves
+
+Esta matriz delimita capabilities documentadas; não seleciona provider, não prova disponibilidade em build/dispositivo e não estabelece compatibilidade GodMesh. A aplicação distingue segredo/credencial persistido de chave privada operada por provider.
+
+| Operação | macOS arm64/x86_64 | Windows desktop | Linux desktop | Contrato da SPEC / estado |
+|---|---|---|---|---|
+| Persistir credencial/segredo do usuário | Keychain Services; `kSecUseDataProtectionKeychain` seleciona comportamento da data-protection keychain. Acesso depende de ACL/atributos e estado de bloqueio. | Credential Management (`CredWrite`/`CredRead`) para generic credentials por usuário/logon; DPAPI protege blobs no escopo documentado de usuário ou máquina. `CRYPTPROTECT_LOCAL_MACHINE` amplia leitores ao conjunto de usuários locais. | Secret Service API descreve serviço de sessão; coleção pode exigir desbloqueio e atributos de busca não são necessariamente secretos. API consultada está marcada Draft 0.2. | Nenhum modelo é intercambiável ou escolhido. Provider, escopo, metadados e sessão continuam OPEN. |
+| Gerar/assinar com chave privada | Secure Enclave oferece operação de chave não exportável apenas em hardware compatível; documentação Apple limita-o a P-256 e geração dentro do enclave, sem importar chave pré-existente. Keychain sem enclave não implica hardware-backed. | CNG separa crypto provider e KSP; software KSP é opção distinta do Microsoft Platform Crypto Provider (TPM). Credential Manager e DPAPI não são, por si, operação de assinatura por chave não exportável. | Kernel Key Retention Service atende retenção/uso por consumidores de kernel; não equivale a vault de assinatura de aplicação. TPM pode existir, mas requer descoberta e configuração. | App solicita operação tipada; backend anuncia capability observada por operação, sem inferir presença pelo nome do SO. Algoritmo e hardware mínimo OPEN. |
+| Negar por indisponibilidade/bloqueio | Chave pode depender de desbloqueio, ACL e hardware; app/helper/processo efetor afeta aplicação e UX. | Token sem credential set, sessão/perfil ausente, política ou provider indisponível podem falhar; suporte nominal não garante TPM. | Sem sessão Secret Service/headless, serviço ausente ou coleção bloqueada falha; keyring depende de permissões e tipo. | Falhar fechado para operação protegida; não trocar silenciosamente por arquivo claro, usuário/máquina diferente ou chave software. UX e lifecycle dependem Fowler/Grady/Lea; FFI Alex. |
+| Rotacionar/revogar/restaurar | Excluir/limitar item não prova disposição de backup/cópias; Secure Enclave é device-bound. | Revogar/excluir key KSP difere de ciphertext DPAPI persistente e credencial do Windows Vault. | Revogar/expirar chave do kernel ou item Secret Service não prova remoção de backup/exportação ou memória previamente obtida. | Registrar dimensão/escopo e evidência por cópia; restore isolado até reconciliação de identidade, epoch e revogação. Cópia/retention segue SPEC-020/SPEC-021, decisões OPEN. |
+
+Fontes oficiais consultadas em 2026-11-16 e consolidadas na contribuição Kim §20 (SHA-256 `5c205e4c66dffe1d0189cad43ac9de01def72376120fb7d7768d0464cd6cc614`): Apple Keychain Services/Data Protection Keychain, Secure Enclave e ACL; Microsoft Credential Management, `CredWriteW`, DPAPI, CNG KSP; freedesktop Secret Service API 0.2 Draft (2026-10-19); Linux Kernel Key Retention Service (`latest`, sem release pinado); TCG TPM 2.0. A SPEC-014 §17 relata consultas adicionais, mas ainda contém fronteiras e versões como OPEN. Fontes não atestam runtime, entitlement, hardware ou build GodMesh.
+
+O contrato comum deve distinguir `credential_secret_storage`, `private_key_operation` e `hardware_backed`, além de expor locked/denied/unavailable/unsupported como resultados lógicos; nomes finais de API/erro e versionamento não aprovados. Import/export, backup, presence/UI, disponibilidade em background, TPM/Secure Enclave obrigatório, attestation e fallback são decisões OPEN. Não assumir paridade entre arm64/x86_64, distribuições Linux, serviços desktop/headless ou edições/builds Windows.
+
 ## 12. Critérios de aceite e casos planejados
 
 Os cenários abaixo são planejados e não executados. São condições para futura validação; não constituem plano executável completo nem casos com IDs atribuídos.
@@ -339,7 +355,7 @@ A recomendação documental favorece grants limitados somente para ações locai
 
 ## 14. Contribuições e revisões
 
-Esta SPEC consolida a contribuição de Kim (SHA-256 `2fb19617fb3a90735621d9912a950baae3b9ff8d112ab693b737300757741479`) e as fontes independentes disponíveis em 16/11/2026. Bruce Schneier revisou a contribuição de Kim e identificou seis pontos parciais em `contribuicao-bruce-schneier.md` (SHA-256 `8a18dac0c45c4ad365112619399cfdf1f14c4c28dfb2932e98b00ec971923488`), §14 (sessão/revogação, epoch/frescor, transferência/fence, provas, restore e auditoria). Kim respondeu em contribuição §§12–19, mas os critérios permanecem OPEN até integração e decisões. Erich Gamma revisou a conciliação F-1/G-2 em contribuição §17 de Kim e confirmou consistência textual dos recortes, sem conflito confirmado; schemas/sessões e múltiplos tenants permanecem OPEN. Pareceres são de versões/hash específicos, não aprovação desta SPEC canônica.
+Esta SPEC consolida a contribuição de Kim, incluindo §20, SHA-256 `5c205e4c66dffe1d0189cad43ac9de01def72376120fb7d7768d0464cd6cc614`, e fontes independentes disponíveis em 16–17/11/2026. Bruce Schneier revisou versões anteriores da contribuição e identificou pontos parciais em `contribuicao-bruce-schneier.md`; seus pareceres abrangem somente os hashes expressamente registrados. Erich Gamma revisou a conciliação F-1/G-2 na contribuição de Kim e confirmou consistência textual dos recortes, sem conflito confirmado; schemas/sessões e múltiplos tenants permanecem OPEN. Nenhum desses pareceres aprova esta SPEC canônica.
 
 Bruce Schneier revisou a DRAFT-0.1 (SHA-256 `3876cb5e41b34ee1de731e6d46c2c88e334fc69528333bc02d219d5c3979f8ab`), §21 da contribuição dele, e a DRAFT-0.2 (SHA-256 `ef612bbfcba1d3318bb43e1c06fe1770350a2c7611e16bf995e29dbd7e214b56`), §23. A DRAFT-0.3 esclarece que relatórios de destino discriminam dimensão por cópia e que lookup interno protegido de membership pode ocorrer sem revelar externamente tenant/recurso. Transferência, provas, auditoria e integrações seguem parciais/OPEN; nenhum parâmetro, política, schema ou prova operacional foi fechado.
 
@@ -354,7 +370,7 @@ A proposta de transferência de Alan, SHA-256 `fe4d9b8820fcaf724e487f96cbb0f53c7
 - **OPEN:** parâmetros de validade/frescor/TTL; qual fonte de frescor (F1/F2/F3) é aceita por classe de operação e por plataforma, com que capacidade comprovada; formato, prova e autoridade da alta marca por vínculo; mecanismos/algoritmos; política de provas/contestação; fronteira/fence/inventário; retenção/jurisdição; session lifecycle; schemas/wire; suporte por SO; papéis/auditoria; autorizações RF, localização, E2EE e ASR.
 - **Não demonstrado:** implementação, schema de banco, endpoints operacionais, compatibilidade de SDK, suporte de hardware, fencing, integração de provedores, qualidade criptográfica ou conformidade legal.
 - **Não executado:** testes de produto, builds, ataques, banco, serviços ou infraestrutura. Casos desta SPEC são planejados e NOT_EXECUTED.
-- **Revisão:** versão canônica DRAFT-0.5. Pareceres sobre versões anteriores não aprovam esta versão; novo confronto pelo hash atual permanece necessário. A correção do veto C4 sobre ADR-059 foi feita por Kim Cameron (pod P2) e ainda **não** foi revisada independentemente; nada neste arquivo deve ser lido como aprovação.
+- **Revisão:** versão canônica DRAFT-0.10. Pareceres sobre versões anteriores não aprovam esta versão; novo confronto pelo hash atual permanece necessário. A correção do veto C4 sobre ADR-059 foi feita por Kim Cameron (pod P2) e ainda **não** foi revisada independentemente; nada neste arquivo deve ser lido como aprovação.
 
 Não liberar implementação até o planejamento estar encerrado e todas as SPECs aprovadas, conforme `06-planejamento/pendencias.md` e o protocolo de consolidação da rodada.
 
