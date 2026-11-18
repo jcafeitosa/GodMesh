@@ -2,6 +2,8 @@
 //!
 //! Configuração vem do ambiente, sem default silencioso:
 //! - `DATABASE_URL` (obrigatório, sempre)
+//! - `GODMESH_GRANTS` (obrigatório): registro de grants verificados em JSON;
+//!   sem ele nenhuma credencial resolve e todo `/v1/incidents` responderia 401
 //! - `BIND_ADDR` (obrigatório, exceto em `GODMESH_ENV=dev|development`, onde o
 //!   default é `127.0.0.1:8080`)
 //! - `GODMESH_ENV` (opcional; ausente é tratado como `production`)
@@ -16,6 +18,7 @@
 
 use std::process::ExitCode;
 
+use godmesh_server::auth::GrantRegistry;
 use sqlx::postgres::PgPoolOptions;
 
 /// Endereço padrão aceito **apenas** em ambiente de desenvolvimento: só loopback.
@@ -29,6 +32,7 @@ const DEV_ENV_VALUES: [&str; 2] = ["dev", "development"];
 /// Configuração lida do ambiente.
 struct Config {
     database_url: String,
+    grants: GrantRegistry,
     bind_addr: String,
 }
 
@@ -36,8 +40,9 @@ impl Config {
     /// Lê o ambiente e devolve erro legível quando algo obrigatório falta.
     ///
     /// # Errors
-    /// `DATABASE_URL` ausente ou vazia; `BIND_ADDR` ausente fora de
-    /// `GODMESH_ENV=dev|development`.
+    /// `DATABASE_URL` ausente/vazia; `GODMESH_GRANTS` ausente, vazia ou inválida;
+    /// `BIND_ADDR` ausente fora de `GODMESH_ENV=dev|development` ou inválido.
+    /// Nenhuma mensagem inclui token.
     fn from_env() -> Result<Self, String> {
         let database_url = match std::env::var("DATABASE_URL") {
             Ok(v) if !v.trim().is_empty() => v,
@@ -62,8 +67,12 @@ impl Config {
             std::env::var("GODMESH_ENV").ok().as_deref(),
         )?;
 
+        let grants = GrantRegistry::from_env()
+            .map_err(|e| format!("registro de grants indisponível: {e}"))?;
+
         Ok(Self {
             database_url,
+            grants,
             bind_addr,
         })
     }
@@ -198,9 +207,12 @@ async fn run(config: Config) -> Result<(), String> {
     let local = listener
         .local_addr()
         .map_err(|e| format!("listener sem endereço local: {e}"))?;
-    println!("godmesh-server: escutando em http://{local}");
+    println!(
+        "godmesh-server: escutando em http://{local} ({} grant(s) configurado(s))",
+        config.grants.len()
+    );
 
-    axum::serve(listener, godmesh_server::http::router(pool))
+    axum::serve(listener, godmesh_server::http::router(pool, config.grants))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| format!("servidor encerrou com erro: {e}"))?;

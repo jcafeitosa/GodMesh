@@ -7,23 +7,36 @@
 //!
 //! Exige as migrações 0001 e 0002 aplicadas.
 
-use godmesh_identity::grant::{FreshnessSource, OfflineOp, RevocationState};
+use godmesh_identity::grant::{FreshnessSource, GrantPredicate, OfflineOp, RevocationState};
 use godmesh_server::api::{create_incident, ApiError, IncidentPayload};
+use godmesh_server::auth::{Subject, VerifiedGrant};
 use sqlx::PgPool;
 
 const TENANT_CO: &str = "tenant-co-negative";
 
+/// Corpo do pedido: só o identificador. A tenancy vem do grant verificado.
 fn payload(incident_id: &str) -> IncidentPayload {
     IncidentPayload {
         incident_id: incident_id.to_owned(),
-        tenant_id: TENANT_CO.to_owned(),
-        principal: "principal-42".to_owned(),
-        operation: OfflineOp::OpenSosIncident,
-        freshness: FreshnessSource::F3VerifiedOnline,
-        revocation: RevocationState::Absent,
-        epoch_comparable: true,
-        action_enumerated: true,
-        retention_class_known: true,
+    }
+}
+
+/// Grant de teste do tenant CO: sujeito e predicado completos, para que a recusa
+/// medida seja a de **retenção** e não a de autorização.
+fn co_grant() -> VerifiedGrant {
+    VerifiedGrant {
+        subject: Subject {
+            tenant_id: TENANT_CO.to_owned(),
+            principal: "principal-42".to_owned(),
+        },
+        predicate: GrantPredicate {
+            operation: OfflineOp::OpenSosIncident,
+            epoch_comparable: true,
+            revocation: RevocationState::Absent,
+            freshness: FreshnessSource::F3VerifiedOnline,
+            retention_class_known: true,
+            action_enumerated: true,
+        },
     }
 }
 
@@ -76,7 +89,7 @@ async fn colombian_tenant_without_policy_is_refused_with_retention_policy_missin
         .expect("jurisdição CO do tenant de teste");
 
     drop_co_authorized_copy(&pool).await;
-    let refused = create_incident(&pool, payload(&fresh_id("co-no-policy"))).await;
+    let refused = create_incident(&pool, &co_grant(), payload(&fresh_id("co-no-policy"))).await;
     restore_co_authorized_copy(&pool).await;
 
     assert!(
@@ -85,6 +98,6 @@ async fn colombian_tenant_without_policy_is_refused_with_retention_policy_missin
     );
 
     // Controle positivo depois da reposição: a política voltou a autorizar.
-    let accepted = create_incident(&pool, payload(&fresh_id("co-restored"))).await;
+    let accepted = create_incident(&pool, &co_grant(), payload(&fresh_id("co-restored"))).await;
     assert!(accepted.is_ok(), "semente de CO precisa voltar a autorizar: {accepted:?}");
 }

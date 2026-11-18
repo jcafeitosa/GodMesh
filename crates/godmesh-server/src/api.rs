@@ -1,27 +1,28 @@
 //! Caso de uso do incidente, independente do transporte.
 //!
 //! Separado do HTTP de propósito: o contrato é testável sem subir servidor.
+//!
+//! Fronteira de confiança desta fatia: o corpo do pedido traz **só** o
+//! identificador do incidente. Tenancy (`tenant_id`), autoria (`principal`) e
+//! todos os campos do `GrantPredicate` vêm do grant verificado — nunca do corpo.
 
 use godmesh_emergency::incident::{HumanProof, Incident, IncidentError, IncidentState};
-use godmesh_identity::grant::{
-    FreshnessSource, GrantDecision, GrantPredicate, OfflineOp, RevocationState,
-};
+use godmesh_identity::grant::GrantDecision;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
+use crate::auth::{CredentialError, VerifiedGrant};
+
 /// Corpo do pedido de incidente.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `deny_unknown_fields` é deliberado: um corpo que tente declarar `tenant_id`,
+/// `principal` ou qualquer cláusula do grant é recusado antes do efeito, em vez
+/// de ser aceito por conveniência. Não há campo de tenancy a divergir porque não
+/// existe campo de tenancy no corpo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IncidentPayload {
     pub incident_id: String,
-    pub tenant_id: String,
-    pub principal: String,
-    pub operation: OfflineOp,
-    pub freshness: FreshnessSource,
-    pub revocation: RevocationState,
-    pub epoch_comparable: bool,
-    pub action_enumerated: bool,
-    #[serde(default)]
-    pub retention_class_known: bool,
 }
 
 /// Resposta do endpoint. `ack_class` é a única alegação permitida.
@@ -47,6 +48,12 @@ pub struct CreateOutcome {
 /// Erros de API.
 #[derive(Debug)]
 pub enum ApiError {
+    /// Nenhuma credencial apresentada (ou desconhecida): nada foi lido nem gravado.
+    Unauthenticated,
+    /// Credencial reconhecida, mas sem sujeito utilizável.
+    InvalidCredential(CredentialError),
+    /// Pedido recusado na fronteira (corpo inválido ou tentativa de declarar tenancy).
+    InvalidRequest(String),
     GrantDenied(GrantDecision),
     /// Classe sem política efetiva para a jurisdição do tenant (ADR-062).
     RetentionPolicyMissing,
@@ -92,40 +99,51 @@ const fn parse_state(name: &str) -> Option<IncidentState> {
 /// Nome da constraint que protege o `incident_id` global (migração 0002).
 const INCIDENT_ID_UNIQUE: &str = "sos_incident_id_key";
 
-/// Cria o incidente: valida grant, resolve a política da jurisdição do tenant
-/// dentro da mesma transação da escrita e grava a trilha de ACK.
+/// Cria o incidente: exige grant verificado, resolve a política da jurisdição do
+/// tenant autenticado dentro da mesma transação da escrita e grava a trilha de ACK.
+///
+/// Duas autoridades compõem esta fatia: o **grant** decide quem fala e com quais
+/// cláusulas (`tenant_id`/`principal`/predicado); o **tenant** decide em qual
+/// jurisdição a persistência é permitida (`tenant_region`). Nenhuma das duas lê
+/// tenancy do corpo do pedido.
 ///
 /// A política é lida com lock compartilhado na mesma transação do `INSERT`; a FK
 /// `sos_incident_retention_class_fkey` fecha o caso de a política desaparecer
-/// depois da leitura: o incidente não fica órfão.
+/// depois da leitura: o incidente não fica órfão. O replay é idempotente por
+/// `(tenant_id, id)`, e colisão de `id` entre tenants é conflito, não segundo
+/// incidente.
 ///
 /// # Errors
-/// `GrantDenied` quando o predicado nega; `RetentionScopeUnresolved` sem jurisdição
-/// declarada para o tenant; `RetentionPolicyMissing` sem política e cópia primária
-/// para a jurisdição; `IncidentIdConflict` quando o `incident_id` pertence a outro
-/// tenant; `Invariant` quando o contrato recusa a transição; `Storage` para falha
-/// de banco.
+/// `InvalidCredential` quando o sujeito verificado está incompleto;
+/// `InvalidRequest` quando o corpo não identifica o incidente; `GrantDenied`
+/// quando o predicado não devolve `Allow`; `RetentionScopeUnresolved` sem
+/// jurisdição declarada para o tenant; `RetentionPolicyMissing` sem política e
+/// cópia primária para a jurisdição; `IncidentIdConflict` quando o `incident_id`
+/// pertence a outro tenant; `Invariant` quando o contrato recusa a transição;
+/// `Storage` para falha de banco.
 pub async fn create_incident(
     pool: &PgPool,
+    grant: &VerifiedGrant,
     payload: IncidentPayload,
 ) -> Result<CreateOutcome, ApiError> {
-    let predicate = GrantPredicate {
-        operation: payload.operation,
-        epoch_comparable: payload.epoch_comparable,
-        revocation: payload.revocation,
-        freshness: payload.freshness,
-        retention_class_known: payload.retention_class_known,
-        action_enumerated: payload.action_enumerated,
-    };
-    if let denied @ (GrantDecision::DenyNeverOffline
-    | GrantDecision::DenyNotEnumerated
-    | GrantDecision::DenyDeniedNoTrustedTime
-    | GrantDecision::DenyEpochIncomparable
-    | GrantDecision::DenyRevocationUnknown
-    | GrantDecision::DenyRetentionPolicyMissing) = predicate.evaluate()
-    {
-        return Err(ApiError::GrantDenied(denied));
+    // Tenancy vem do sujeito autenticado; sujeito incompleto não passa daqui.
+    grant.validate().map_err(ApiError::InvalidCredential)?;
+    if payload.incident_id.trim().is_empty() {
+        return Err(ApiError::InvalidRequest(
+            "incident_id vazio não identifica incidente".to_owned(),
+        ));
     }
+
+    // Exaustividade: `Allow` é o único caminho de aceitação; qualquer outra
+    // variante (inclusive uma futura) cai no braço padrão e nega.
+    match grant.predicate.evaluate() {
+        GrantDecision::Allow => {}
+        denied => return Err(ApiError::GrantDenied(denied)),
+    }
+
+    // Autorização e tenancy saem do grant verificado, nunca do corpo do pedido.
+    let tenant_id = &grant.subject.tenant_id;
+    let principal = &grant.subject.principal;
 
     // A classe de ACK vem do domínio, não de string local: `persist` é a transição
     // que autoriza alegar `persisted_local` (ADR-058).
@@ -135,25 +153,17 @@ pub async fn create_incident(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| ApiError::Invariant(IncidentError::MissingTimestamp))?
         .as_secs();
-    let mut incident = Incident::triggered(
-        &payload.incident_id,
-        &payload.tenant_id,
-        &payload.principal,
-    );
+    let mut incident = Incident::triggered(&payload.incident_id, tenant_id, principal);
     incident
-        .persist(
-            &format!("inbox:{}", payload.tenant_id),
-            incident.retention_class(),
-            at_unix,
-        )
+        .persist(&format!("inbox:{tenant_id}"), incident.retention_class(), at_unix)
         .map_err(ApiError::Invariant)?;
 
     let mut tx = pool.begin().await.map_err(ApiError::Storage)?;
 
-    // Jurisdição do tenant vem do banco, nunca do pedido (ADR-066).
+    // Jurisdição do tenant autenticado vem do banco, nunca do pedido (ADR-066).
     let jurisdiction: Option<String> =
         sqlx::query_scalar("SELECT jurisdiction FROM tenant_region WHERE tenant_id = $1 FOR SHARE")
-            .bind(&payload.tenant_id)
+            .bind(tenant_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(ApiError::Storage)?;
@@ -191,8 +201,8 @@ pub async fn create_incident(
          ON CONFLICT (tenant_id, id) DO NOTHING",
     )
     .bind(&payload.incident_id)
-    .bind(&payload.tenant_id)
-    .bind(&payload.principal)
+    .bind(tenant_id)
+    .bind(principal)
     .bind(state_name(incident.state()))
     .bind(&policy_class)
     .bind(&policy_jurisdiction)
@@ -222,8 +232,8 @@ pub async fn create_incident(
         CreateOutcome {
             response: response_for(
                 &payload.incident_id,
-                &payload.tenant_id,
-                &payload.principal,
+                tenant_id,
+                principal,
                 incident.state(),
             )?,
             created: true,
@@ -234,7 +244,7 @@ pub async fn create_incident(
         let stored: String = sqlx::query_scalar(
             "SELECT state FROM sos_incident WHERE tenant_id = $1 AND id = $2",
         )
-        .bind(&payload.tenant_id)
+        .bind(tenant_id)
         .bind(&payload.incident_id)
         .fetch_one(&mut *tx)
         .await
@@ -245,12 +255,7 @@ pub async fn create_incident(
             ))));
         };
         CreateOutcome {
-            response: response_for(
-                &payload.incident_id,
-                &payload.tenant_id,
-                &payload.principal,
-                state,
-            )?,
+            response: response_for(&payload.incident_id, tenant_id, principal, state)?,
             created: false,
         }
     };
