@@ -91,9 +91,14 @@ where
         counter.store(observed.count(), Ordering::SeqCst);
     };
 
-    let served = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await;
+    // `ConnectInfo` habilita a cota por IP do portão de abuso: sem o par,
+    // requisições não autenticadas não têm chave por origem no processo.
+    let served = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await;
     let drained = drained.load(Ordering::SeqCst);
     pool.close().await;
     served.map_err(|e| format!("servidor encerrou com erro: {e}"))?;

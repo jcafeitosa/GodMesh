@@ -1,5 +1,13 @@
 # Histórico da documentação
 
+## SEC1 integrada à malha: cotas, payload e admissão por classe sobre federação — 18/11/2026
+- `6b21211` (cotas/admissão) foi reaplicado sobre o main **depois** da federação M1+M2 e do roteador dividido por domínio: `AppState` agora carrega `federation: Option<Arc<PeerLinks>>` **e** `admission: Arc<Admission>`, e `build_router` recebe os dois anexos.
+- Novo construtor do binário: `http::router_with_federation_and_admission(pool, grants, federation, admission)`. Os cinco construtores públicos existentes (`router`, `router_with`, `router_with_log`, `router_with_federation`, `router_with_admission`) mantiveram a assinatura que os testes e o `--migrate-only` já usam.
+- Ordem dos portões escrita no código e no doc do módulo: `observe → http_gate → require_grant → grant_gate → portão de escopo → handler`. O portão de cotas roda **antes** do de escopo: grant válido sem escopo também paga cota antes do 403.
+- Rotas de federação têm classe declarada por rota: `POST /v1/federation/join-requests` (pública, sem credencial) entra em `sync`; leitura de pedidos/pares e **aprovação/rejeição** ficam em `incident` — a decisão administrativa precisa continuar alcançável sob pressão para estancar o abuso. Não existe classe `admin` na taxonomia aprovada.
+- Boot valida `GODMESH_*` de cotas junto com identidade de nó e listener QUIC: `GODMESH_MAX_BODY_BYTES=0` → **exit 78** antes de escutar, sem default silencioso.
+- Varredura: **329** testes passando (306 do main + 22 da SEC1 + 1 novo), 0 falha em **três rodadas** com listas de nomes idênticas; `clippy --workspace --all-targets` limpo; `migrations/tests/run_all.sh` com 44 invariantes; fumaça do binário com a malha ligada e limiar de pressão em 0: `event`/`sync`/`metrics` 503, SOS 201, `/v1/federation/*` 200, corpo de 70 kB 413. Invariante §4-2 colado na evidência. Evidência: `docs/09-equipe/evidencias/2026-11-18-integracao-sec1.md`.
+
 ## Federação reconciliada: M1 + M2 em um crate — 18/11/2026
 - `godmesh-federation` passa a ter **uma** definição de `NodeIdentity`, `SignedManifest` e `PeerRecord` — a de M1 (`gmn_` + `sha256(pubkey)`, forma assinada TLV, registro em `federation_peer`), já usada pela migração `0008` e pelas rotas de ingresso. O transporte de M2 (QUIC/mTLS, handshake, heartbeat, diagnóstico de enlace) foi adaptado a esses tipos; `registry.rs` de M2 foi absorvido por `peer.rs`.
 - `SignedManifest` ganhou o campo assinado `alpn` (extensão de M1, `serde(default)`) e o envelope de fio `to_frame`/`from_frame` com teto de 8 KiB. `trust_state` **saiu** do manifesto: nó não declara a própria autorização; quem decide é o registro (ADR-071 emenda §1/§5, ADR-072 §2 invariantes 6/8).

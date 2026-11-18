@@ -29,6 +29,15 @@
 //! - `GODMESH_ENV` (opcional; ausente é tratado como `production`)
 //! - `GODMESH_OUTBOX` (opcional; `off` desliga o publicador, default `on`)
 //! - `GODMESH_OUTBOX_INTERVAL_MS` (opcional; default 1000 ms)
+//! - Portão de abuso (cotas/tetos/admissão — ver `godmesh_server::admission`):
+//!   todos opcionais, com default declarado e validado na subida; valor
+//!   inválido derruba o processo com EX_CONFIG em vez de servir com default
+//!   silencioso: `GODMESH_MAX_BODY_BYTES`, `GODMESH_MAX_EVENT_BODY_BYTES`,
+//!   `GODMESH_MAX_INBOX_BODY_BYTES`, `GODMESH_REQUEST_TIMEOUT_MS`,
+//!   `GODMESH_ADMISSION_PRESSURE_THRESHOLD`, `GODMESH_LIMIT_REQUESTS_PER_SEC`,
+//!   `GODMESH_LIMIT_REQUEST_BURST`, `GODMESH_LIMIT_EVENTS_PER_SEC`,
+//!   `GODMESH_LIMIT_EVENT_BURST`, `GODMESH_LIMIT_IP_RPS`, `GODMESH_LIMIT_IP_BURST`
+//!   e os overrides por escopo `GODMESH_LIMIT_<ESCOPO>_<RPS|RBUCKET|EPS|EBUCKET>`.
 //!
 //! O publicador do outbox (ADR-061) roda como tarefa tokio ao lado do HTTP e
 //! entrega no sink de teste `outbox_sink` (migração 0003). Ele só publica; a
@@ -52,7 +61,8 @@ use godmesh_federation::link::LinkState;
 use godmesh_federation::node::{FederationConfig, FederationNode};
 use godmesh_federation::peer::PeerRegistry;
 use godmesh_federation::NodeIdentity;
-use godmesh_server::auth::{Authorization, GrantRegistry};
+use godmesh_server::admission::AdmissionConfig;
+use godmesh_server::auth::GrantRegistry;
 use godmesh_server::publisher::{OutboxConfig, Publisher};
 use godmesh_server::{federation, migrate, runtime};
 use godmesh_sync::pg_outbox::{PgOutbox, PgSink};
@@ -138,6 +148,9 @@ enum Mode {
         /// Em `Box` porque o runtime de federação é a maior parte do enum e
         /// `MigrateOnly` não carrega nada.
         federation: Box<FederationRuntime>,
+        /// Em `Box` para o enum não crescer por um campo de config (clippy
+        /// `large_enum_variant`); o conteúdo é idêntico.
+        admission: Box<AdmissionConfig>,
     },
 }
 
@@ -181,11 +194,17 @@ impl Config {
                 let outbox =
                     OutboxConfig::from_env().map_err(|e| format!("configuração do outbox: {e}"))?;
                 let federation = federation_runtime_from_env()?;
+                // O portão de abuso valida o ambiente na subida: tetos
+                // inválidos derrubam o processo (EX_CONFIG) em vez de virar
+                // default silencioso servindo tráfego.
+                let admission = AdmissionConfig::from_env()
+                    .map_err(|e| format!("configuração de cotas/admissão: {e}"))?;
                 Mode::Serve {
                     grants,
                     bind_addr,
                     outbox,
                     federation: Box::new(federation),
+                    admission: Box::new(admission),
                 }
             }
         };
@@ -364,6 +383,7 @@ async fn run(config: Config) -> Result<(), String> {
         bind_addr,
         outbox,
         federation,
+        admission,
     } = config.mode
     else {
         pool.close().await;
@@ -472,14 +492,16 @@ async fn run(config: Config) -> Result<(), String> {
     };
 
     let mut encerrar = shutdown_rx;
-    let app = match &runtime_federation {
-        Some(node) => godmesh_server::http::router_with_federation(
-            pool.clone(),
-            Authorization::new(grants, pool.clone()),
-            node.links(),
-        ),
-        None => godmesh_server::http::router(pool.clone(), grants),
-    };
+    // Os dois anexos de produção, juntos: o runtime de malha (dá o estado real
+    // do enlace) e as cotas validadas no boot. Sem `GODMESH_FEDERATION_BIND` o
+    // diagnóstico responde `unknown` — não "saúde" por omissão.
+    let federation_links = runtime_federation.as_ref().map(|node| node.links());
+    let app = godmesh_server::http::router_with_federation_and_admission(
+        pool.clone(),
+        grants,
+        federation_links,
+        *admission,
+    );
     let served = runtime::serve(listener, app, pool.clone(), async move {
         let _ = encerrar.changed().await;
     })

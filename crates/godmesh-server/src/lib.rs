@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin;
+pub mod admission;
 pub mod api;
 pub mod auth;
 pub mod events;

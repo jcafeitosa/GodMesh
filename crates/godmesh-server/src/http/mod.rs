@@ -5,10 +5,16 @@
 //! O handler só recebe o grant pela extensão preenchida pelo middleware, logo
 //! não existe caminho de código que chame o caso de uso sem credencial.
 //!
-//! O roteador é dividido por domínio (`incidents`, `events`, `sync`, `admin`);
-//! cada módulo declara as rotas e o escopo que exige. Este módulo mantém só a
-//! composição, os portões de autenticação/escopo, `healthz`, `/metrics` e o
-//! formato de erro.
+//! O roteador é dividido por domínio (`incidents`, `events`, `sync`, `admin`,
+//! `federation`); cada módulo declara as rotas e o escopo que exige. Este módulo
+//! mantém só a composição, os portões (abuso, autenticação, escopo), `healthz`,
+//! `/metrics` e o formato de erro.
+//!
+//! Ordem de execução em uma rota `/v1`, de fora para dentro:
+//! `observe → http_gate → require_grant → grant_gate → portão de escopo →
+//! handler`. Mudar essa ordem muda o que é contado e o que é recusado antes de
+//! qualquer efeito; está escrita em `build_router` e é o que os testes de
+//! `tests/limits.rs` verificam.
 
 use std::sync::Arc;
 
@@ -22,6 +28,7 @@ use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
 use crate::api::ApiError;
+use crate::admission::{Admission, AdmissionConfig};
 use crate::auth::{bearer_token, Authorization, GrantRegistry, Scope, VerifiedGrant};
 use crate::federation::JoinWindow;
 use crate::metrics::{Gauges, Metrics};
@@ -31,6 +38,7 @@ use godmesh_federation::link::PeerLinks;
 mod admin;
 mod events;
 mod federation;
+mod gate;
 mod incidents;
 mod sync;
 
@@ -48,6 +56,10 @@ pub struct AppState {
     /// de malha não está anexado: o diagnóstico responde `unknown`, que é o piso
     /// honesto, em vez de fingir saúde.
     pub federation: Option<Arc<PeerLinks>>,
+    /// Portão de abuso: cotas, tetos de payload e admissão por classe. Vive em
+    /// `Arc` porque o estado é clonado por requisição; os buckets são **por
+    /// processo** (ver docs de `crate::admission`).
+    pub admission: Arc<Admission>,
 }
 
 /// Rotas do servidor com a composição de produção (relógio do sistema,
@@ -61,6 +73,25 @@ pub fn router(pool: PgPool, grants: GrantRegistry) -> Router {
     router_with(pool, authorization)
 }
 
+/// Rotas do servidor com configuração de cotas explícita — é o construtor que
+/// os testes de portão usam para baixar cotas sem tocar no ambiente global.
+/// O binário usa [`router_with_federation_and_admission`], que além das cotas
+/// anexa o runtime de malha.
+pub fn router_with_admission(
+    pool: PgPool,
+    grants: GrantRegistry,
+    admission: AdmissionConfig,
+) -> Router {
+    let authorization = Authorization::new(grants, pool.clone());
+    build_router(
+        pool,
+        authorization,
+        Arc::new(StderrRequestLog),
+        None,
+        admission,
+    )
+}
+
 /// Rotas do servidor com destino de log injetado. Existe para o teste provar o
 /// que foi (e o que não foi) registrado; produção usa [`router`].
 pub fn router_with_log(
@@ -68,19 +99,40 @@ pub fn router_with_log(
     authorization: Authorization,
     log: Arc<dyn RequestLog>,
 ) -> Router {
-    build_router(pool, authorization, log, None)
+    build_router(
+        pool,
+        authorization,
+        log,
+        None,
+        AdmissionConfig::default(),
+    )
 }
 
 /// Rotas do servidor com autorização injetada (relógio e fonte de revogação).
 ///
 /// Cada grupo de rotas declara o escopo que exige na própria construção do
 /// router: rota nova nasce com escopo explícito, em vez de herdá-lo por omissão.
+/// Os construtores públicos abaixo usam [`AdmissionConfig::default`] (tetos
+/// altos, documentados): os valores de ambiente só valem na subida do binário,
+/// via [`router_with_federation_and_admission`] (ou [`router_with_admission`],
+/// sem malha), que é onde a config inválida derruba o processo com EX_CONFIG —
+/// ler ambiente silenciosamente dentro de um teste seria um acoplamento
+/// invisível.
 pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
-    build_router(pool, authorization, Arc::new(StderrRequestLog), None)
+    build_router(
+        pool,
+        authorization,
+        Arc::new(StderrRequestLog),
+        None,
+        AdmissionConfig::default(),
+    )
 }
 
 /// Rotas com o runtime de federação anexado: habilita o diagnóstico de enlace
 /// com estado real. Sem isto, `/v1/federation/**` responde `unknown`.
+///
+/// As cotas ficam no [`AdmissionConfig::default`]; existe também a variante com
+/// cotas explícitas, [`router_with_federation_and_admission`].
 pub fn router_with_federation(
     pool: PgPool,
     authorization: Authorization,
@@ -91,6 +143,31 @@ pub fn router_with_federation(
         authorization,
         Arc::new(StderrRequestLog),
         Some(links),
+        AdmissionConfig::default(),
+    )
+}
+
+/// Rotas com os dois anexos de produção: o runtime de malha (diagnóstico de
+/// enlace) e as cotas validadas no boot. É **o** construtor do binário.
+///
+/// `federation` é `Option` porque a malha é desligável por ambiente
+/// (`GODMESH_FEDERATION_BIND`): desligada, o diagnóstico responde `unknown` e
+/// nenhuma rota muda de comportamento. A cota nunca é opcional — sem config
+/// explícita vale [`AdmissionConfig::default`], e o binário é que valida o
+/// ambiente antes de chegar aqui.
+pub fn router_with_federation_and_admission(
+    pool: PgPool,
+    grants: GrantRegistry,
+    federation: Option<Arc<PeerLinks>>,
+    admission: AdmissionConfig,
+) -> Router {
+    let authorization = Authorization::new(grants, pool.clone());
+    build_router(
+        pool,
+        authorization,
+        Arc::new(StderrRequestLog),
+        federation,
+        admission,
     )
 }
 
@@ -99,6 +176,7 @@ fn build_router(
     authorization: Authorization,
     log: Arc<dyn RequestLog>,
     federation: Option<Arc<PeerLinks>>,
+    admission: AdmissionConfig,
 ) -> Router {
     let state = AppState {
         pool,
@@ -107,6 +185,7 @@ fn build_router(
         log,
         join_window: JoinWindow::from_env(),
         federation,
+        admission: Arc::new(Admission::new(admission)),
     };
 
     // Métricas operacionais: escopo próprio (`admin:metrics`). Ver a nota em
@@ -118,18 +197,26 @@ fn build_router(
             require_scope,
         ));
 
-    // O portão de autenticação é aplicado por último: ele roda antes dos portões
-    // de escopo, que leem o `VerifiedGrant` já injetado na extensão.
+    // O portão de autenticação é aplicado por último (camada mais externa do
+    // grupo protegido): ele roda antes do portão de cotas, que lê o
+    // `VerifiedGrant` já injetado na extensão, e antes do portão de escopo.
+    // ordem de execução por rota: `require_grant → grant_gate → escopo → handler`.
     let protected = incidents::routes()
         .merge(events::routes())
         .merge(sync::routes())
         .merge(admin::routes())
         .merge(federation::routes())
         .merge(metrics_read)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            gate::grant_gate,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
     // O observador é a camada mais externa: sem isso, 401/403/404 e rota não
     // casada ficariam fora da contagem — exatamente o que se quer enxergar.
+    // Logo abaixo dele está o portão de abuso (payload/IP/timeout), que também
+    // enxerga as rotas públicas de federação.
     Router::new()
         .route("/healthz", axum::routing::get(healthz))
         // Federação: o pedido de ingresso é público **por rota**, não por
@@ -137,6 +224,10 @@ fn build_router(
         // rotas de federação entram em `protected` com escopo explícito.
         .merge(federation::public_routes())
         .merge(protected)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            gate::http_gate,
+        ))
         .layer(middleware::from_fn_with_state(state.clone(), observe))
         .with_state(state)
 }
