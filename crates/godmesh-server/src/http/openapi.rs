@@ -48,7 +48,7 @@ use crate::admin::{
 use crate::api::{IncidentPayload, IncidentResponse};
 use crate::auth::Scope;
 use crate::events::{EventAck, EventPage, EventRecord};
-use crate::federation::JoinRequestView;
+use crate::federation::{ApprovalDecision, JoinRequestView};
 use crate::inbox::{
     InboxBatchPayload, InboxBatchResponse, InboxGap, InboxPositionPayload, InboxState,
 };
@@ -369,6 +369,8 @@ fn components() -> Components {
         .schema_from::<RevokeGrantPayload>()
         .schema_from::<RevocationResponse>()
         .schema_from::<JoinRequestView>()
+        .schema_from::<ApprovalDecision>()
+        .schema_from::<godmesh_federation::ApprovalCertificate>()
         .schema_from::<Scope>()
         .schema_from::<godmesh_federation::manifest::SignedManifest>()
         .schema_from::<godmesh_federation::peer::PeerRecord>()

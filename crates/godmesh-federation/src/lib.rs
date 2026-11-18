@@ -7,6 +7,11 @@
 //!   ([`manifest::SignedManifest`] com serialização canônica definida e testada)
 //!   e [`peer`] ([`peer::PeerRecord`], [`peer::TrustState`] e o registro em
 //!   memória [`peer::PeerRegistry`]).
+//! * **M1b — aprovação assinada**: [`approval`] ([`approval::ApprovalCertificate`],
+//!   a prova de que quem aprovou é um **nó**, não um token solto) e [`genesis`]
+//!   ([`genesis::Genesis`], bootstrap declarado pelo operador via
+//!   `GODMESH_FEDERATION_GENESIS`). A emenda à ADR-071 §1/§5 é a norma: a
+//!   autoridade de ingresso é de nó, e o bootstrap não é *trust on first use*.
 //! * **M2 — transporte**: [`transport`] (QUIC + TLS 1.3 com mTLS obrigatório e
 //!   validação por chave registrada, ALPN fixo `godmesh/1`), [`handshake`]
 //!   (manifesto assinado nos dois sentidos, códigos de fechamento `0x474D00xx`),
@@ -18,7 +23,7 @@
 //!   sem assinatura de nó autorizado não entra no log durável.
 //!
 //! Existe **uma** definição de `NodeIdentity`, `SignedManifest` e `PeerRecord`: a
-//! de M1, que é a que o banco (`migration 0008`) e as rotas
+//! de M1, que é a que o banco (`migration 0008` e `0009`) e as rotas
 //! `/v1/federation/**` consomem. O transporte consome esses tipos; a única
 //! extensão feita para M2 foi o campo assinado `alpn` do manifesto.
 //!
@@ -29,6 +34,8 @@
 #![forbid(unsafe_code)]
 
 pub mod event;
+pub mod approval;
+pub mod genesis;
 pub mod handshake;
 pub mod identity;
 pub mod link;
@@ -38,6 +45,8 @@ pub mod peer;
 pub mod transport;
 
 pub use event::{EventPositionClaim, SignedEvent, SignedEventError, signed_event};
+pub use approval::{ApprovalCertificate, ApprovalError};
+pub use genesis::{Genesis, GenesisError, GenesisNode, GENESIS_ENV};
 pub use identity::{IdentityError, NodeIdentity, node_id_for, verify_node_id};
 pub use manifest::{DEFAULT_MAX_AGE_SECONDS, ManifestError, SignedManifest};
 pub use peer::{PeerRecord, PeerRegistry, TrustState, TrustTransitionError};

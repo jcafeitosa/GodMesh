@@ -188,6 +188,9 @@ impl From<IdentityError> for ManifestError {
     }
 }
 
+/// Tag length-prefixed: o mesmo codec canônico do manifesto é usado pelo
+/// certificado de aprovação (`crate::approval`), para que "bytes canônicos do
+/// projeto" signifique uma única coisa.
 pub(crate) fn push_field(out: &mut Vec<u8>, tag: &str, value: &[u8]) {
     out.extend_from_slice(&(tag.len() as u32).to_be_bytes());
     out.extend_from_slice(tag.as_bytes());

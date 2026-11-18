@@ -10,9 +10,16 @@
 //!   par (`GET /v1/federation/peers/{node_id}/link`);
 //! * `federation:admin` — aprovar e rejeitar.
 //!
-//! Auditoria registra `join_request_id`/`node_id` e quem agiu (`token_id`). O
-//! corpo do manifesto nunca é logado e a chave privada não existe no servidor
-//! nesta fatia (a identidade de nó é do runtime, não do route handler).
+//! Desde a emenda à ADR-071 (fatia M1b) `federation:admin` **não basta**: as
+//! duas rotas de decisão exigem também um `ApprovalCertificate` no corpo,
+//! assinado por um nó `authorized`. O escopo humano autoriza a operação; a
+//! assinatura de nó é o que prova a autoridade de ingresso. As duas recusam
+//! antes de qualquer transição de estado.
+//!
+//! Auditoria registra `join_request_id`/`node_id`, quem agiu (`token_id`) e o
+//! `node_id` do aprovador. O corpo do manifesto nunca é logado, e a chave
+//! privada do aprovador nunca chega aqui: quem assina é o nó aprovador, e o
+//! servidor só verifica contra a chave pública registrada.
 
 use std::collections::HashMap;
 
@@ -26,8 +33,8 @@ use super::{ApiErrorResponse, AppState, created_status};
 use crate::api::ApiError;
 use crate::auth::{Scope, VerifiedGrant};
 use crate::federation::{
-    JoinRequestView, approve_join_request, list_join_requests, list_peers, reject_join_request,
-    submit_join_request,
+    ApprovalDecision, JoinRequestView, approve_join_request, list_join_requests, list_peers,
+    reject_join_request, submit_join_request,
 };
 use godmesh_federation::SignedManifest;
 use godmesh_federation::identity::is_node_id;
@@ -122,10 +129,16 @@ pub(super) fn register(reg: &mut Registry) {
         "/v1/federation/join-requests/{join_request_id}/approve",
         admin,
         RouteDoc {
-            summary: "Aprova pedido pendente e registra o par como authorized; decisão terminal",
-            request: None,
+            summary: "Aprova pedido pendente e registra o par como authorized; exige certificado assinado por nó autorizado (ADR-071 emenda §2), decisão terminal",
+            request: Some("ApprovalDecision"),
             success: &[(200, Schema::Ref("JoinRequestView"))],
             errors: &[
+                "approval_signature_invalid",
+                "approver_not_authorized",
+                "approval_expired",
+                "approval_not_yet_valid",
+                "approval_epoch_regressed",
+                "no_authorized_approver",
                 "join_request_not_found",
                 "join_request_state_conflict",
                 "illegal_trust_transition",
@@ -140,10 +153,16 @@ pub(super) fn register(reg: &mut Registry) {
         "/v1/federation/join-requests/{join_request_id}/reject",
         admin,
         RouteDoc {
-            summary: "Rejeita pedido pendente; nenhum par é criado, decisão terminal",
-            request: None,
+            summary: "Rejeita pedido pendente; nenhum par é criado. Também exige certificado assinado por nó autorizado (governança), decisão terminal",
+            request: Some("ApprovalDecision"),
             success: &[(200, Schema::Ref("JoinRequestView"))],
             errors: &[
+                "approval_signature_invalid",
+                "approver_not_authorized",
+                "approval_expired",
+                "approval_not_yet_valid",
+                "approval_epoch_regressed",
+                "no_authorized_approver",
                 "join_request_not_found",
                 "join_request_state_conflict",
                 "storage_unavailable",
@@ -201,33 +220,61 @@ async fn get_join_requests(
 }
 
 /// Aprova um pedido pendente e registra o par como `authorized`.
+///
+/// O corpo é a segunda autoridade: sem `approval`, a operação morre no
+/// extrator com `invalid_request` e nenhum estado muda.
 async fn post_join_request_approve(
     State(state): State<AppState>,
     Extension(grant): Extension<VerifiedGrant>,
     Path(join_request_id): Path<String>,
+    payload: Result<Json<ApprovalDecision>, JsonRejection>,
 ) -> Result<Json<JoinRequestView>, ApiErrorResponse> {
+    let Json(decision) = payload.map_err(|rejection| {
+        ApiErrorResponse::from(ApiError::InvalidRequest(format!(
+            "aprovar exige o certificado de aprovação assinado por nó autorizado no corpo \
+             (campo approval): {}",
+            rejection.body_text()
+        )))
+    })?;
     let now = state.authorization.now_unix();
     let approver = if grant.subject.principal.trim().is_empty() {
         grant.token_id.clone()
     } else {
         grant.subject.principal.clone()
     };
-    match approve_join_request(&state.pool, &join_request_id, &approver, now).await {
+    let result = approve_join_request(
+        &state.pool,
+        &state.genesis,
+        &join_request_id,
+        &approver,
+        &decision.approval,
+        now,
+    )
+    .await;
+    match result {
         Ok((request, peer)) => {
             state.authorization.audit_event(&format!(
-                "event=federation_join_approved join_request_id={} node_id={} epoch={} peer_state={} by={}",
+                "event=federation_join_approved join_request_id={} node_id={} epoch={} peer_state={} by={} approved_by_node={} approval_epoch={}",
                 request.join_request_id,
                 request.node_id,
                 request.epoch,
                 peer.trust_state.as_str(),
-                grant.token_id
+                grant.token_id,
+                decision.approval.node_id,
+                decision.approval.epoch
             ));
             Ok(Json(request))
         }
         Err(e) => {
+            // Nenhum estado mudou; a auditoria nomeia o aprovador **alegado**,
+            // porque é o dado que um operador precisa para distinguir chave
+            // errada de nó não autorizado. O `node_id` vem de um certificado
+            // que não se verificou, logo é alegação — e o log diz isso.
             state.authorization.audit_event(&format!(
-                "event=federation_join_approve_denied by={}",
-                grant.token_id
+                "event=federation_join_approve_denied by={} claimed_approver={} reason={}",
+                grant.token_id,
+                claimed_approver(&decision.approval.node_id),
+                approval_code(&e)
             ));
             Err(ApiErrorResponse::from(e))
         }
@@ -235,26 +282,73 @@ async fn post_join_request_approve(
 }
 
 /// Rejeita um pedido pendente. Nenhum par é criado.
+///
+/// Rejeitar é ação de governança: exige o mesmo certificado assinado por nó
+/// autorizado que aprovar. O banco não guarda prova de aprovação em pedido
+/// rejeitado (CHECK da migração 0009) — quem rejeitou fica na auditoria.
 async fn post_join_request_reject(
     State(state): State<AppState>,
     Extension(grant): Extension<VerifiedGrant>,
     Path(join_request_id): Path<String>,
+    payload: Result<Json<ApprovalDecision>, JsonRejection>,
 ) -> Result<Json<JoinRequestView>, ApiErrorResponse> {
-    match reject_join_request(&state.pool, &join_request_id).await {
+    let Json(decision) = payload.map_err(|rejection| {
+        ApiErrorResponse::from(ApiError::InvalidRequest(format!(
+            "rejeitar exige o certificado de aprovação assinado por nó autorizado no corpo \
+             (campo approval): {}",
+            rejection.body_text()
+        )))
+    })?;
+    let now = state.authorization.now_unix();
+    let result = reject_join_request(
+        &state.pool,
+        &state.genesis,
+        &join_request_id,
+        &decision.approval,
+        now,
+    )
+    .await;
+    match result {
         Ok(request) => {
             state.authorization.audit_event(&format!(
-                "event=federation_join_rejected join_request_id={} node_id={} epoch={} by={}",
-                request.join_request_id, request.node_id, request.epoch, grant.token_id
+                "event=federation_join_rejected join_request_id={} node_id={} epoch={} by={} rejected_by_node={}",
+                request.join_request_id,
+                request.node_id,
+                request.epoch,
+                grant.token_id,
+                decision.approval.node_id
             ));
             Ok(Json(request))
         }
         Err(e) => {
             state.authorization.audit_event(&format!(
-                "event=federation_join_reject_denied by={}",
-                grant.token_id
+                "event=federation_join_reject_denied by={} claimed_approver={} reason={}",
+                grant.token_id,
+                claimed_approver(&decision.approval.node_id),
+                approval_code(&e)
             ));
             Err(ApiErrorResponse::from(e))
         }
+    }
+}
+
+/// Só o código estável do erro: a linha de auditoria não pode carregar texto
+/// controlado por quem chamou.
+fn approval_code(e: &ApiError) -> &'static str {
+    super::contract::error_parts(e).1
+}
+
+/// `node_id` **alegado** por um certificado que ainda não se verificou.
+///
+/// Auditoria é linha única (`event=… campo=valor`): um identificador com
+/// quebra de linha forjaria eventos que não aconteceram. O valor só é
+/// transcrito se tiver a forma canônica; fora dela, vira um rótulo fixo — o
+/// motivo exato já está no `reason=`, e ele é um código do catálogo.
+fn claimed_approver(node_id: &str) -> &str {
+    if is_node_id(node_id) {
+        node_id
+    } else {
+        "<fora-do-formato>"
     }
 }
 

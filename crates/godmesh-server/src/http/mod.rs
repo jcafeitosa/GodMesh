@@ -40,6 +40,7 @@ use crate::events::EventWindow;
 use crate::federation::JoinWindow;
 use crate::metrics::{Gauges, Metrics};
 use crate::observability::{observe, RequestContext, RequestLog, StderrRequestLog};
+use godmesh_federation::Genesis;
 use godmesh_federation::link::PeerLinks;
 use godmesh_host::collect::{SharedSnapshot, unix_millis};
 use godmesh_host::snapshot::Snapshot;
@@ -67,6 +68,11 @@ pub struct AppState {
     /// (`GODMESH_EVENT_MAX_AGE_SECONDS`, padrão 5 minutos). Configuração
     /// própria: afrouxar ingresso não afrouxa o ingest (S-sec-2).
     pub event_window: EventWindow,
+    /// Nós genesis declarados pelo operador (`GODMESH_FEDERATION_GENESIS`): a
+    /// única autoridade de aprovação que existe antes de haver par autorizado.
+    /// Lista vazia é o estado declarado **sem bootstrap**, não um default
+    /// confiável — ver [`godmesh_federation::genesis`].
+    pub genesis: Arc<Genesis>,
     /// Enlaces de federação observados neste processo. `None` quando o runtime
     /// de malha não está anexado: o diagnóstico responde `unknown`, que é o piso
     /// honesto, em vez de fingir saúde. `GET /v1/meta →
@@ -170,6 +176,27 @@ impl HostTelemetry {
     }
 }
 
+/// Genesis lido do ambiente, com falha **fechada** e alto.
+///
+/// `GODMESH_FEDERATION_GENESIS` malformada não vira lista parcialmente confiável
+/// nem default silencioso: o processo passa a não ter aprovador por
+/// configuração, e a linha em stderr diz por quê. O binário valida o ambiente
+/// antes de servir (EX_CONFIG); este caminho existe para os construtores de
+/// teste e de desenvolvimento, onde o custo de derrubar o processo seria pior
+/// que o de recusar aprovação.
+fn genesis_from_env() -> Arc<Genesis> {
+    match Genesis::from_env() {
+        Ok(genesis) => Arc::new(genesis),
+        Err(e) => {
+            eprintln!(
+                "godmesh-server: GODMESH_FEDERATION_GENESIS inválida; sem genesis declarado, \
+                 aprovar exige um par já autorizado: {e}"
+            );
+            Arc::new(Genesis::empty())
+        }
+    }
+}
+
 /// Rotas do servidor com a composição de produção (relógio do sistema,
 /// revogação em Postgres). Publicador **não** está anexado e as cotas são as
 /// padrão documentadas: capacidades do contrato refletem o processo real
@@ -197,6 +224,7 @@ pub fn router_with_admission(
         admission,
         false,
         HostTelemetry::default(),
+        genesis_from_env(),
     )
 }
 
@@ -215,6 +243,7 @@ pub fn router_with_log(
         AdmissionConfig::default(),
         false,
         HostTelemetry::default(),
+        genesis_from_env(),
     )
 }
 
@@ -235,6 +264,7 @@ pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
         AdmissionConfig::default(),
         false,
         HostTelemetry::default(),
+        genesis_from_env(),
     )
 }
 
@@ -257,6 +287,7 @@ pub fn router_with_federation(
         AdmissionConfig::default(),
         false,
         HostTelemetry::default(),
+        genesis_from_env(),
     )
 }
 
@@ -279,6 +310,7 @@ pub fn router_with_federation_and_admission(
         admission,
         false,
         HostTelemetry::default(),
+        genesis_from_env(),
     )
 }
 
@@ -297,6 +329,7 @@ pub fn router_runtime(
     federation: Option<Arc<PeerLinks>>,
     admission: AdmissionConfig,
     outbox_enabled: bool,
+    genesis: Arc<Genesis>,
 ) -> Router {
     router_runtime_with_host(
         pool,
@@ -305,6 +338,7 @@ pub fn router_runtime(
         admission,
         outbox_enabled,
         HostTelemetry::default(),
+        genesis,
     )
 }
 
@@ -320,6 +354,7 @@ pub fn router_runtime_with_host(
     admission: AdmissionConfig,
     outbox_enabled: bool,
     host: HostTelemetry,
+    genesis: Arc<Genesis>,
 ) -> Router {
     let authorization = Authorization::new(grants, pool.clone());
     build_router(
@@ -330,6 +365,7 @@ pub fn router_runtime_with_host(
         admission,
         outbox_enabled,
         host,
+        genesis,
     )
 }
 
@@ -350,9 +386,34 @@ pub fn router_with_host(
         AdmissionConfig::default(),
         false,
         host,
+        genesis_from_env(),
     )
 }
 
+/// Rotas com o **bootstrap de confiança injetado**, para teste.
+///
+/// É o construtor de quem precisa provar quem aprova: `GODMESH_FEDERATION_GENESIS`
+/// é ambiente global e concorrente entre testes, então o genesis entra por
+/// parâmetro — mesma razão de ser de [`godmesh_federation::NodeIdentity::from_env_with`].
+pub fn router_with_log_and_genesis(
+    pool: PgPool,
+    authorization: Authorization,
+    log: Arc<dyn RequestLog>,
+    genesis: Genesis,
+) -> Router {
+    build_router(
+        pool,
+        authorization,
+        log,
+        None,
+        AdmissionConfig::default(),
+        false,
+        HostTelemetry::default(),
+        Arc::new(genesis),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_router(
     pool: PgPool,
     authorization: Authorization,
@@ -361,6 +422,7 @@ fn build_router(
     admission: AdmissionConfig,
     outbox_enabled: bool,
     host: HostTelemetry,
+    genesis: Arc<Genesis>,
 ) -> Router {
     let join_window = JoinWindow::from_env();
     let event_window = EventWindow::from_env();
@@ -454,6 +516,7 @@ fn build_router(
         log,
         join_window,
         event_window,
+        genesis,
         federation,
         admission,
         outbox_enabled,
@@ -654,6 +717,17 @@ impl ApiErrorResponse {
             ApiError::JoinRequestStateConflict { state } => {
                 vec![("state", Value::String(state.clone()))]
             }
+            ApiError::ApprovalExpired { expires_at, now } => vec![
+                ("expires_at", json!(expires_at)),
+                ("now", json!(now)),
+            ],
+            ApiError::ApprovalNotYetValid { not_before, now } => {
+                vec![("not_before", json!(not_before)), ("now", json!(now))]
+            }
+            ApiError::ApprovalEpochRegressed { recorded, presented } => vec![
+                ("recorded", json!(recorded)),
+                ("presented", json!(presented)),
+            ],
             ApiError::TrustTransition { current, next } => vec![
                 ("current", Value::String(current.clone())),
                 ("next", Value::String(next.clone())),

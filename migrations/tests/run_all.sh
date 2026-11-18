@@ -10,6 +10,7 @@
 #   migrations/0006_incident_listing.sql
 #   migrations/0007_grant_issuance.sql
 #   migrations/0008_federation_peers.sql
+#   migrations/0009_federation_approval.sql
 #   migrations/0010_event_signed_ingest.sql
 # depois roda todos os `*_invariants.sql` e falha (exit != 0) se algum bloco
 # `NOTICE: OK` esperado não aparecer.
@@ -79,9 +80,7 @@ aplicar "$raiz/migrations/0005_sync_inbox.sql"
 aplicar "$raiz/migrations/0006_incident_listing.sql"
 aplicar "$raiz/migrations/0007_grant_issuance.sql"
 aplicar "$raiz/migrations/0008_federation_peers.sql"
-# 0009 pertence à M1b (aprovação de ingresso assinada, emenda ADR-071) e ainda
-# não tem arquivo; 0010 é a S-sec-2. O runner aplica em ordem de nome, então a
-# M1b entra antes da 0010 no dia em que nascer — nenhuma reordenação aqui.
+aplicar "$raiz/migrations/0009_federation_approval.sql"
 aplicar "$raiz/migrations/0010_event_signed_ingest.sql"
 
 if [ -n "$sabotagem" ]; then
@@ -144,6 +143,15 @@ esperado_0008=(
     "OK 5: trust_state inventado recusado (CHECK)"
     "OK 6: tabelas de federação guardam apenas chave pública"
 )
+esperado_0009=(
+    "OK 1: approved sem prova assinada recusado (CHECK)"
+    "OK 2: certificado de aprovação em pedido não aprovado recusado (CHECK)"
+    "OK 3: aprovação incompleta (sem assinatura) recusada (CHECK)"
+    "OK 4: node_id do aprovador fora do formato recusado (CHECK)"
+    "OK 5: approval_signature fora do formato recusada (CHECK)"
+    "OK 6: approval_epoch negativo recusado (CHECK)"
+    "OK 7: aprovação com certificado completo persiste e nenhuma coluna guarda segredo"
+)
 esperado_0010=(
     "OK 1: escopo duplicado recusado (PK)"
     "OK 2: escopo de nó não registrado recusado (FK)"
@@ -198,6 +206,7 @@ verificar "$tests/0005_invariants.sql" "${esperado_0005[@]}"
 verificar "$tests/0006_invariants.sql" "${esperado_0006[@]}"
 verificar "$tests/0007_invariants.sql" "${esperado_0007[@]}"
 verificar "$tests/0008_invariants.sql" "${esperado_0008[@]}"
+verificar "$tests/0009_invariants.sql" "${esperado_0009[@]}"
 verificar "$tests/0010_invariants.sql" "${esperado_0010[@]}"
 
 rm -f "$saida"

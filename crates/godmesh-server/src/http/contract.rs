@@ -486,6 +486,36 @@ const fn advice(e: &ApiError) -> (&'static str, bool, &'static str) {
             false,
             "o corpo aceito é o schema SignedManifest de /openapi.json; deny_unknown_fields vale aqui",
         ),
+        ApiError::ApprovalSignatureInvalid(_) => (
+            "o certificado de aprovação não prova nada: assinatura, campo ou node_id do aprovador não conferem",
+            false,
+            "reassine o ApprovalCertificate com a chave privada do nó aprovador, cobrindo este join_request_id; nenhuma decisão foi alterada",
+        ),
+        ApiError::ApproverNotAuthorized(_) => (
+            "quem assinou não é um nó autorizado no cluster do pedido (par revoked/pending, chave divergente da registrada ou fora do genesis)",
+            false,
+            "só nó authorized aprova: ver GET /v1/federation/peers e GODMESH_FEDERATION_GENESIS; nenhuma decisão foi alterada",
+        ),
+        ApiError::ApprovalExpired { .. } => (
+            "o certificado de aprovação tem expires_at no passado (replay de decisão velha)",
+            false,
+            "emita um certificado novo com janela vigente e epoch não regressivo; o pedido continua pendente",
+        ),
+        ApiError::ApprovalNotYetValid { .. } => (
+            "o certificado de aprovação tem not_before no futuro",
+            true,
+            "aguarde not_before (ou corrija o relógio do nó aprovador) e repita; nada foi alterado",
+        ),
+        ApiError::ApprovalEpochRegressed { .. } => (
+            "o epoch do certificado é menor que o piso já assinado por este nó (anti-rollback)",
+            false,
+            "assine com a geração atual da identidade do nó; decisão velha não reescreve decisão nova",
+        ),
+        ApiError::NoAuthorizedApprover => (
+            "não existe nenhum nó autorizado no cluster: sem genesis declarado e sem par authorized, aprovar é impossível",
+            false,
+            "declare GODMESH_FEDERATION_GENESIS com node_id:chave_pública dos primeiros nós (ADR-071 emenda §5); não há confiança por primeiro uso",
+        ),
         ApiError::JoinRequestNotFound => (
             "join_request_id inexistente",
             false,
@@ -586,6 +616,21 @@ fn probes() -> Vec<ApiError> {
             ApiError::ManifestExpired,
             ApiError::ManifestNotYetValid,
             ApiError::InvalidManifest("sonda".to_owned()),
+            ApiError::ApprovalSignatureInvalid("sonda".to_owned()),
+            ApiError::ApproverNotAuthorized("sonda".to_owned()),
+            ApiError::ApprovalExpired {
+                expires_at: 1,
+                now: 2,
+            },
+            ApiError::ApprovalNotYetValid {
+                not_before: 2,
+                now: 1,
+            },
+            ApiError::ApprovalEpochRegressed {
+                recorded: 3,
+                presented: 2,
+            },
+            ApiError::NoAuthorizedApprover,
             ApiError::JoinRequestNotFound,
             ApiError::JoinRequestStateConflict {
                 state: "approved".to_owned(),
@@ -761,6 +806,38 @@ pub(crate) fn error_parts(e: &ApiError) -> (StatusCode, &'static str, String) {
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_manifest",
             detail.clone(),
+        ),
+        ApiError::ApprovalSignatureInvalid(detail) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "approval_signature_invalid",
+            format!("certificado de aprovação inválido: {detail}"),
+        ),
+        ApiError::ApproverNotAuthorized(detail) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "approver_not_authorized",
+            format!("aprovador não é nó autorizado: {detail}"),
+        ),
+        ApiError::ApprovalExpired { expires_at, now } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "approval_expired",
+            format!("certificado de aprovação expirado: expires_at={expires_at}, now={now}"),
+        ),
+        ApiError::ApprovalNotYetValid { not_before, now } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "approval_not_yet_valid",
+            format!("certificado de aprovação ainda não válido: not_before={not_before}, now={now}"),
+        ),
+        ApiError::ApprovalEpochRegressed { recorded, presented } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "approval_epoch_regressed",
+            format!(
+                "epoch do certificado ({presented}) é regressivo; este nó já assinou epoch {recorded}"
+            ),
+        ),
+        ApiError::NoAuthorizedApprover => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no_authorized_approver",
+            "nenhum nó autorizado no cluster: sem genesis declarado e sem par authorized, aprovar é impossível".to_owned(),
         ),
         ApiError::JoinRequestNotFound => (
             StatusCode::NOT_FOUND,
@@ -974,6 +1051,11 @@ pub(crate) async fn capabilities(state: &AppState) -> Value {
     };
     json!({
         "federation_enabled": state.federation.is_some(),
+        // Estado efetivo do bootstrap de confiança (ADR-071 emenda §5): quantos
+        // nós o operador declarou como aprovadores antes de existir par
+        // autorizado. `0` não é "não medido" — é "sem genesis", e então aprovar
+        // exige um par já autorizado.
+        "federation_genesis_nodes": state.genesis.len(),
         "retention_classes": retention_classes,
         "outbox_enabled": state.outbox_enabled,
         "host_metrics_available": state.host_metrics_available,

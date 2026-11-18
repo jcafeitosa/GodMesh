@@ -24,6 +24,10 @@
 //!   UDP do listener QUIC/mTLS da malha. Sem ela não há transporte de federação
 //!   e `/v1/federation/peers/{node_id}/link` responde `unknown` — o piso honesto.
 //!   Ligada, exige `GODMESH_FEDERATION_CLUSTER` e `GODMESH_FEDERATION_REGION`.
+//! - `GODMESH_FEDERATION_GENESIS` (opcional; vazio = sem bootstrap): lista de
+//!   `<node_id>:<chave pública em hex>` dos primeiros nós do cluster, autorizados
+//!   por configuração (ADR-071 emenda §5). Entrada malformada derruba o processo
+//!   com EX_CONFIG: lista de confiança não tem item "ignorado".
 //! - `GODMESH_FEDERATION_PEERS_REFRESH_MS` (opcional; default 5000): intervalo de
 //!   recarga da allowlist de pares a partir de `federation_peer`.
 //! - `GODMESH_ENV` (opcional; ausente é tratado como `production`)
@@ -161,6 +165,10 @@ enum Mode {
         /// Em `Box` para o enum não crescer por um campo de config (clippy
         /// `large_enum_variant`); o conteúdo é idêntico.
         admission: Box<AdmissionConfig>,
+        /// Bootstrap de confiança declarado pelo operador
+        /// (`GODMESH_FEDERATION_GENESIS`). Lido e validado no boot: entrada
+        /// malformada derruba o processo em vez de servir sem aprovador.
+        genesis: Arc<godmesh_federation::Genesis>,
     },
 }
 
@@ -211,6 +219,15 @@ impl Config {
                 // default silencioso servindo tráfego.
                 let admission = AdmissionConfig::from_env()
                     .map_err(|e| format!("configuração de cotas/admissão: {e}"))?;
+                // ADR-071 emenda §5: os primeiros nós são autorizados **por
+                // configuração**, fora de banda. Uma lista malformada não vira
+                // "sem genesis" silencioso — cai em EX_CONFIG com a entrada
+                // nomeada. Lista ausente ou vazia é o estado declarado sem
+                // aprovador por bootstrap.
+                let genesis = Arc::new(
+                    godmesh_federation::Genesis::from_env()
+                        .map_err(|e| format!("bootstrap de federação inválido: {e}"))?,
+                );
                 Mode::Serve {
                     grants,
                     bind_addr,
@@ -218,6 +235,7 @@ impl Config {
                     host,
                     federation: Box::new(federation),
                     admission: Box::new(admission),
+                    genesis,
                 }
             }
         };
@@ -398,6 +416,7 @@ async fn run(config: Config) -> Result<(), String> {
         host,
         federation,
         admission,
+        genesis,
     } = config.mode
     else {
         pool.close().await;
@@ -427,6 +446,19 @@ async fn run(config: Config) -> Result<(), String> {
         identity.node_id(),
         identity.public_key_hex()
     );
+    // Autoridade de ingresso (ADR-071 emenda): o que existe antes de qualquer
+    // aprovação assinada. Sem genesis, a afirmação honesta é "ninguém pode
+    // aprovar ainda", não um default confiável.
+    if genesis.is_empty() {
+        println!(
+            "godmesh-server: GODMESH_FEDERATION_GENESIS vazio; aprovar/rejeitar exige um par              já authorized em federation_peer (sem confiança por primeiro uso)"
+        );
+    } else {
+        println!(
+            "godmesh-server: bootstrap de federação declarado: {} nó(s) genesis autorizado(s)              por configuração",
+            genesis.len()
+        );
+    }
 
     // Um único sinal de término alimenta o HTTP, o publicador e a federação.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -530,6 +562,7 @@ async fn run(config: Config) -> Result<(), String> {
         *admission,
         outbox.enabled,
         HostTelemetry::new(host_snapshot.clone(), host.stale_after()),
+        genesis,
     );
     let served = runtime::serve(listener, app, pool.clone(), async move {
         let _ = encerrar.changed().await;

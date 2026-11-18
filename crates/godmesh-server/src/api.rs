@@ -121,6 +121,34 @@ pub enum ApiError {
     ManifestNotYetValid,
     /// Manifesto malformado ou internamente incoerente (422).
     InvalidManifest(String),
+    /// Certificado de aprovação com assinatura que não confere, campo violado
+    /// ou `node_id` não derivado da chave (422). A decisão **não** mudou de
+    /// estado: é a prova de nó que falta, não o pedido.
+    ApprovalSignatureInvalid(String),
+    /// Quem assinou não é um nó `authorized` deste cluster, ou declarou uma
+    /// chave diferente da registrada (422).
+    ApproverNotAuthorized(String),
+    /// Certificado de aprovação com `expires_at` já passado (422) — replay de
+    /// decisão velha não aprova nada.
+    ApprovalExpired {
+        expires_at: i64,
+        now: i64,
+    },
+    /// Certificado de aprovação com `not_before` no futuro (422).
+    ApprovalNotYetValid {
+        not_before: i64,
+        now: i64,
+    },
+    /// `epoch` do certificado abaixo do piso já registrado para o aprovador
+    /// (422): decisão velha não reescreve decisão nova (ADR-071 emenda §4).
+    ApprovalEpochRegressed {
+        recorded: u64,
+        presented: u64,
+    },
+    /// Não existe **nenhum** nó autorizado no cluster: nem genesis declarado,
+    /// nem par `authorized` no registro (422). Aprovar é impossível por
+    /// construção, e é isso que a resposta diz.
+    NoAuthorizedApprover,
     /// Pedido de ingresso inexistente (404).
     JoinRequestNotFound,
     /// Pedido de ingresso em estado que não aceita a decisão pedida (409).
