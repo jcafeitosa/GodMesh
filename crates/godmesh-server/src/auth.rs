@@ -68,11 +68,18 @@ pub enum Scope {
     /// Escopo deliberadamente separado dos escopos de domínio.
     #[serde(rename = "admin:grants")]
     AdminGrants,
+    /// Leitura do estado de federação: pedidos de ingresso e pares registrados.
+    #[serde(rename = "federation:read")]
+    FederationRead,
+    /// Decisão sobre ingresso na federação: aprovar e rejeitar pedidos.
+    /// Separado de `federation:read`: ver quem pediu não é decidir quem entra.
+    #[serde(rename = "federation:admin")]
+    FederationAdmin,
 }
 
 impl Scope {
     /// Conjunto completo, usado apenas por composição de teste (`from_entries`).
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::IncidentWrite,
         Self::IncidentRead,
         Self::EventWrite,
@@ -81,6 +88,8 @@ impl Scope {
         Self::SyncRead,
         Self::AdminMetrics,
         Self::AdminGrants,
+        Self::FederationRead,
+        Self::FederationAdmin,
     ];
 
     /// Nome estável do escopo no contrato JSON e nos corpos de erro.
@@ -95,6 +104,8 @@ impl Scope {
             Self::SyncRead => "sync:read",
             Self::AdminMetrics => "admin:metrics",
             Self::AdminGrants => "admin:grants",
+            Self::FederationRead => "federation:read",
+            Self::FederationAdmin => "federation:admin",
         }
     }
 

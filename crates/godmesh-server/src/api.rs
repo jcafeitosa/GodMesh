@@ -113,7 +113,37 @@ pub enum ApiError {
     MissingHumanProof,
     /// O contrato do incidente recusou a transição; nunca deveria sair do servidor.
     Invariant(IncidentError),
+    /// Manifesto de federação com assinatura que não confere (401).
+    InvalidManifestSignature,
+    /// Manifesto com `issued_at` fora da janela de frescor (422).
+    ManifestExpired,
+    /// Manifesto emitido no futuro além da tolerância (422).
+    ManifestNotYetValid,
+    /// Manifesto malformado ou internamente incoerente (422).
+    InvalidManifest(String),
+    /// Pedido de ingresso inexistente (404).
+    JoinRequestNotFound,
+    /// Pedido de ingresso em estado que não aceita a decisão pedida (409).
+    JoinRequestStateConflict {
+        /// Estado persistido do pedido.
+        state: String,
+    },
+    /// Transição de confiança recusada pela máquina de estados (409).
+    TrustTransition {
+        /// Estado atual do par.
+        current: String,
+        /// Estado pretendido.
+        next: String,
+    },
+    /// Estado persistido de federação fora do contrato: invariante de banco (500).
+    FederationInvariant(String),
     Storage(sqlx::Error),
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Storage(e)
+    }
 }
 
 impl From<AuthError> for ApiError {

@@ -23,11 +23,13 @@ use sqlx::PgPool;
 
 use crate::api::ApiError;
 use crate::auth::{bearer_token, Authorization, GrantRegistry, Scope, VerifiedGrant};
+use crate::federation::JoinWindow;
 use crate::metrics::{Gauges, Metrics};
 use crate::observability::{observe, RequestContext, RequestLog, StderrRequestLog};
 
 mod admin;
 mod events;
+mod federation;
 mod incidents;
 mod sync;
 
@@ -38,6 +40,9 @@ pub struct AppState {
     pub authorization: Arc<Authorization>,
     pub metrics: Metrics,
     pub log: Arc<dyn RequestLog>,
+    /// Janela de frescor aceita no `issued_at` de manifesto de ingresso.
+    /// Lida do ambiente na composição do router (padrão: 5 minutos).
+    pub join_window: JoinWindow,
 }
 
 /// Rotas do servidor com a composição de produção (relógio do sistema,
@@ -75,6 +80,7 @@ fn build_router(pool: PgPool, authorization: Authorization, log: Arc<dyn Request
         authorization: Arc::new(authorization),
         metrics: Metrics::new(),
         log,
+        join_window: JoinWindow::from_env(),
     };
 
     // Métricas operacionais: escopo próprio (`admin:metrics`). Ver a nota em
@@ -92,6 +98,7 @@ fn build_router(pool: PgPool, authorization: Authorization, log: Arc<dyn Request
         .merge(events::routes())
         .merge(sync::routes())
         .merge(admin::routes())
+        .merge(federation::routes())
         .merge(metrics_read)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
@@ -99,6 +106,10 @@ fn build_router(pool: PgPool, authorization: Authorization, log: Arc<dyn Request
     // casada ficariam fora da contagem — exatamente o que se quer enxergar.
     Router::new()
         .route("/healthz", axum::routing::get(healthz))
+        // Federação: o pedido de ingresso é público **por rota**, não por
+        // omissão do middleware. Ele fica fora do router protegido, e as demais
+        // rotas de federação entram em `protected` com escopo explícito.
+        .merge(federation::public_routes())
         .merge(protected)
         .layer(middleware::from_fn_with_state(state.clone(), observe))
         .with_state(state)
@@ -364,6 +375,51 @@ impl ApiErrorResponse {
                 "invariant_violation",
                 format!("contrato do incidente recusou a transição: {e:?}"),
             ),
+            // 401: o manifesto não prova quem diz ser. Nada foi gravado.
+            ApiError::InvalidManifestSignature => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_manifest_signature",
+                "assinatura do manifesto não confere".to_owned(),
+            ),
+            // 422: assinatura válida, manifesto velho demais para ingresso.
+            ApiError::ManifestExpired => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "manifest_expired",
+                "manifesto fora da janela de frescor".to_owned(),
+            ),
+            ApiError::ManifestNotYetValid => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "manifest_not_yet_valid",
+                "manifesto emitido no futuro além da tolerância".to_owned(),
+            ),
+            ApiError::InvalidManifest(detail) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_manifest",
+                detail.clone(),
+            ),
+            ApiError::JoinRequestNotFound => (
+                StatusCode::NOT_FOUND,
+                "join_request_not_found",
+                "pedido de ingresso não encontrado".to_owned(),
+            ),
+            // 409: o pedido existe e já foi decidido de outro jeito.
+            ApiError::JoinRequestStateConflict { state } => (
+                StatusCode::CONFLICT,
+                "join_request_state_conflict",
+                format!("pedido de ingresso em estado {state}"),
+            ),
+            // 409: a máquina de estados de confiança recusou (ex.: revogado não
+            // volta direto a autorizado).
+            ApiError::TrustTransition { current, next } => (
+                StatusCode::CONFLICT,
+                "illegal_trust_transition",
+                format!("transição de confiança ilegal: {current} → {next}"),
+            ),
+            ApiError::FederationInvariant(detail) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "federation_invariant_violation",
+                detail.clone(),
+            ),
             ApiError::Storage(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "storage_unavailable",
@@ -382,6 +438,13 @@ impl ApiErrorResponse {
             ApiError::IllegalTransition { current } => {
                 vec![("state", Value::String(current.clone()))]
             }
+            ApiError::JoinRequestStateConflict { state } => {
+                vec![("state", Value::String(state.clone()))]
+            }
+            ApiError::TrustTransition { current, next } => vec![
+                ("current", Value::String(current.clone())),
+                ("next", Value::String(next.clone())),
+            ],
             ApiError::InboxGap {
                 expected,
                 received,

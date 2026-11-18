@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 godmesh-core = { path = "../godmesh-core" }
 godmesh-emergency = { path = "../godmesh-emergency" }
+godmesh-federation = { path = "../godmesh-federation" }
 godmesh-identity = { path = "../godmesh-identity", features = ["serde"] }
 godmesh-policy = { path = "../godmesh-policy" }
 godmesh-protocol = { path = "../godmesh-protocol" }

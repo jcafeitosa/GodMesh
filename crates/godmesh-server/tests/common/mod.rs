@@ -84,3 +84,91 @@ async fn migrar(pool: &PgPool, url: &str) {
     );
     migrados.insert(url.to_owned());
 }
+
+// --- cliente HTTP/1.1 de teste, sem dependência nova -------------------------
+
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
+
+/// Resposta HTTP como o teste precisa vê-la: status e corpo cru.
+pub struct HttpResponse {
+    /// Código de status.
+    pub status: u16,
+    /// Corpo integral.
+    pub body: String,
+}
+
+impl HttpResponse {
+    /// Corpo como JSON; falha alto se não for.
+    ///
+    /// # Panics
+    /// Corpo não-JSON, com o status junto — nunca um "skip" silencioso.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::from_str(&self.body).unwrap_or_else(|e| {
+            panic!(
+                "corpo não é JSON ({e}): {:?} (status {})",
+                self.body, self.status
+            )
+        })
+    }
+}
+
+/// Executa um pedido HTTP/1.1 completo. `token = None` faz pedido **sem**
+/// `Authorization`, que é como se prova rota pública.
+///
+/// # Panics
+/// Falha de rede ou resposta HTTP malformada.
+pub fn call(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&str>,
+) -> HttpResponse {
+    let mut stream = TcpStream::connect(addr).expect("conecta ao servidor de teste");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout de leitura");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout de escrita");
+
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n");
+    if let Some(value) = token {
+        request.push_str(&format!("Authorization: Bearer {value}\r\n"));
+    }
+    if let Some(body) = body {
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("Connection: close\r\n\r\n");
+    if let Some(body) = body {
+        request.push_str(body);
+    }
+
+    stream.write_all(request.as_bytes()).expect("envia pedido");
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).expect("lê resposta");
+    let (head, body) = raw
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("resposta HTTP sem cabeçalho: {raw:?}"));
+    let status: u16 = head
+        .lines()
+        .next()
+        .and_then(|line| line.split(' ').nth(1))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("resposta HTTP sem status: {raw:?}"));
+    HttpResponse {
+        status,
+        body: body.to_owned(),
+    }
+}
+
+/// GET autenticado.
+///
+/// # Panics
+/// Falha de rede.
+pub fn get(addr: SocketAddr, path: &str, token: &str) -> HttpResponse {
+    call(addr, "GET", path, Some(token), None)
+}
