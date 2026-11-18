@@ -38,7 +38,7 @@ pub const MAX_REASON_CHARS: usize = 1024;
 ///
 /// `deny_unknown_fields`: tentar declarar `token`, `token_hash`, `token_id` ou
 /// `authority_epoch` no corpo é erro de fronteira, não campo ignorado.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IssueGrantPayload {
     pub tenant_id: String,
@@ -51,7 +51,7 @@ pub struct IssueGrantPayload {
 ///
 /// `Debug` é escrito à mão para redigir o token; um log acidental de
 /// `{:?}` não vaza a credencial.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IssuedGrantResponse {
     pub token_id: String,
     pub token: String,
@@ -79,7 +79,7 @@ impl fmt::Debug for IssuedGrantResponse {
 }
 
 /// Metadados de grant: sem token e sem hash, por construção.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GrantMetadata {
     pub token_id: String,
     pub tenant_id: String,
@@ -95,7 +95,7 @@ pub struct GrantMetadata {
 }
 
 /// Corpo de `POST /v1/admin/grants/{token_id}/revoke`. Motivo é obrigatório.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RevokeGrantPayload {
     pub reason: String,
@@ -103,7 +103,7 @@ pub struct RevokeGrantPayload {
 
 /// Resposta da revogação. Repetir a revogação devolve o mesmo instante: a
 /// operação é idempotente e não reescreve a história.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RevocationResponse {
     pub token_id: String,
     pub revoked: bool,

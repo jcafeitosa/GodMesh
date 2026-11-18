@@ -26,7 +26,7 @@ use crate::identity::{self, PUBLIC_KEY_LEN};
 use crate::manifest::SignedManifest;
 
 /// Estado de confiança de um par.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TrustState {
     /// Pedido registrado, aguardando decisão administrativa.
@@ -115,7 +115,7 @@ impl std::error::Error for TrustTransitionError {}
 ///
 /// Só campo público: `public_key` é dado público por definição e é o que
 /// permite verificar manifestos. Nenhuma chave privada tem lugar aqui.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PeerRecord {
     /// Identificador do registro de par. Nesta fatia é igual a `node_id`; fica
     /// separado para que a fatia de transporte (M2) possa distinguir registros

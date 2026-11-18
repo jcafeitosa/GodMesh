@@ -19,14 +19,14 @@ use crate::auth::{AuthError, CredentialError, VerifiedGrant};
 /// `principal` ou qualquer cláusula do grant é recusado antes do efeito, em vez
 /// de ser aceito por conveniência. Não há campo de tenancy a divergir porque não
 /// existe campo de tenancy no corpo.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IncidentPayload {
     pub incident_id: String,
 }
 
 /// Resposta do endpoint. `ack_class` é a única alegação permitida.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IncidentResponse {
     pub incident_id: String,
     pub state: String,

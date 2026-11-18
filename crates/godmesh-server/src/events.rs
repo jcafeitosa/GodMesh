@@ -36,7 +36,7 @@ pub const CURSOR_PROFILE: &str = "gmp.event.v1";
 pub const MAX_EVENTS_LIMIT: u32 = 100;
 
 /// Corpo do recebimento de evento.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EventPayload {
     pub origin_node: String,
@@ -48,7 +48,7 @@ pub struct EventPayload {
 }
 
 /// Resposta do recebimento. `ack_class` é a única alegação permitida.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EventAck {
     pub origin_node: String,
     pub stream_id: String,
@@ -86,7 +86,7 @@ pub struct EventQuery {
 }
 
 /// Evento lido de `event_position`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EventRecord {
     pub origin_node: String,
     pub stream_id: String,
@@ -98,7 +98,7 @@ pub struct EventRecord {
 }
 
 /// Página de leitura. `next_cursor` nulo significa fim do intervalo consultado.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EventPage {
     pub events: Vec<EventRecord>,
     pub next_cursor: Option<String>,

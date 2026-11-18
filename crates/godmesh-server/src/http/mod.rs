@@ -1,20 +1,27 @@
 //! Camada HTTP: traduz o caso de uso para axum, sem regra de domínio aqui.
 //!
-//! Autenticação é aplicada por `route_layer` em `/v1/*`: rota nova sob esse
-//! router nasce protegida, em vez de depender de alguém lembrar do middleware.
-//! O handler só recebe o grant pela extensão preenchida pelo middleware, logo
-//! não existe caminho de código que chame o caso de uso sem credencial.
+//! Autenticação é aplicada por `route_layer` no grupo protegido: rota nova sob
+//! esse router nasce protegida, em vez de depender de alguém lembrar do
+//! middleware. O handler só recebe o grant pela extensão preenchida pelo
+//! middleware, logo não existe caminho de código que chame o caso de uso sem
+//! credencial.
 //!
-//! O roteador é dividido por domínio (`incidents`, `events`, `sync`, `admin`,
-//! `federation`); cada módulo declara as rotas e o escopo que exige. Este módulo
-//! mantém só a composição, os portões (abuso, autenticação, escopo), `healthz`,
-//! `/metrics` e o formato de erro.
+//! **Onde uma rota nasce:** `contract::Registry`. Os módulos de domínio
+//! (incidents, events, sync, admin, federation) *registran* handlers no
+//! registro; o roteador, `GET /v1/meta` e `openapi.json` são três leituras do
+//! mesmo registro. Não existe `.route()` fora de `contract.rs` — o teste de
+//! contrato (`tests/api_contract.rs`) vigia essa regra e sonda o router real
+//! contra o documento: documento que mente derruba o build do teste.
 //!
-//! Ordem de execução em uma rota `/v1`, de fora para dentro:
+//! Este módulo mantém a composição, os portões de autenticação/escopo, o
+//! portão de abuso (`gate`) e o formato de erro (código/status/detail via
+//! `contract::error_parts`, campos acionáveis via catálogo).
+//!
+//! Ordem de execução em uma rota `/v1` protegida, de fora para dentro:
 //! `observe → http_gate → require_grant → grant_gate → portão de escopo →
-//! handler`. Mudar essa ordem muda o que é contado e o que é recusado antes de
-//! qualquer efeito; está escrita em `build_router` e é o que os testes de
-//! `tests/limits.rs` verificam.
+//! portão semântico (idempotência/dry_run) → handler`. Mudar essa ordem muda
+//! o que é contado e o que é recusado antes de qualquer efeito; é o que os
+//! testes de `tests/limits.rs` verificam.
 
 use std::sync::Arc;
 
@@ -22,13 +29,12 @@ use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
-use crate::api::ApiError;
 use crate::admission::{Admission, AdmissionConfig};
+use crate::api::ApiError;
 use crate::auth::{bearer_token, Authorization, GrantRegistry, Scope, VerifiedGrant};
 use crate::federation::JoinWindow;
 use crate::metrics::{Gauges, Metrics};
@@ -36,10 +42,12 @@ use crate::observability::{observe, RequestContext, RequestLog, StderrRequestLog
 use godmesh_federation::link::PeerLinks;
 
 mod admin;
+mod contract;
 mod events;
 mod federation;
 mod gate;
 mod incidents;
+mod openapi;
 mod sync;
 
 /// Estado compartilhado.
@@ -54,20 +62,31 @@ pub struct AppState {
     pub join_window: JoinWindow,
     /// Enlaces de federação observados neste processo. `None` quando o runtime
     /// de malha não está anexado: o diagnóstico responde `unknown`, que é o piso
-    /// honesto, em vez de fingir saúde.
+    /// honesto, em vez de fingir saúde. `GET /v1/meta →
+    /// capabilities.federation_enabled` publica exatamente isto.
     pub federation: Option<Arc<PeerLinks>>,
     /// Portão de abuso: cotas, tetos de payload e admissão por classe. Vive em
     /// `Arc` porque o estado é clonado por requisição; os buckets são **por
-    /// processo** (ver docs de `crate::admission`).
+    /// processo** (ver docs de `crate::admission`). Os limites efetivos saem
+    /// daqui para `GET /v1/meta → routes[].limits.rate`.
     pub admission: Arc<Admission>,
+    /// O **publicador** do outbox roda neste processo? Estado efetivo, não
+    /// intenção: `GET /v1/meta → capabilities.outbox_enabled` publica isto.
+    /// Os construtores de teste não rodam publicador, logo `false`; o
+    /// binário chama [`router_runtime`] com a flag real.
+    pub outbox_enabled: bool,
+    /// A tabela que construiu este router. `GET /v1/meta` publica daqui.
+    route_specs: Arc<Vec<contract::RouteSpec>>,
+    /// `openapi.json` serializado uma vez na composição (mesmo registro).
+    openapi_json: Arc<String>,
+    /// Derivado do registro: `/metrics` foi montado neste processo.
+    host_metrics_available: bool,
 }
 
 /// Rotas do servidor com a composição de produção (relógio do sistema,
-/// revogação em Postgres).
-///
-/// Toda rota sob `/v1` passa por `require_grant` **e** pelo portão de escopo da
-/// própria rota. `/healthz` é público de propósito: não expõe dado de tenant e
-/// não tem efeito.
+/// revogação em Postgres). Publicador **não** está anexado e as cotas são as
+/// padrão documentadas: capacidades do contrato refletem o processo real
+/// deste router (ADR-074).
 pub fn router(pool: PgPool, grants: GrantRegistry) -> Router {
     let authorization = Authorization::new(grants, pool.clone());
     router_with(pool, authorization)
@@ -75,8 +94,8 @@ pub fn router(pool: PgPool, grants: GrantRegistry) -> Router {
 
 /// Rotas do servidor com configuração de cotas explícita — é o construtor que
 /// os testes de portão usam para baixar cotas sem tocar no ambiente global.
-/// O binário usa [`router_with_federation_and_admission`], que além das cotas
-/// anexa o runtime de malha.
+/// O binário usa [`router_runtime`], que além das cotas anexa o runtime de
+/// malha e declara o estado efetivo do publicador.
 pub fn router_with_admission(
     pool: PgPool,
     grants: GrantRegistry,
@@ -89,11 +108,12 @@ pub fn router_with_admission(
         Arc::new(StderrRequestLog),
         None,
         admission,
+        false,
     )
 }
 
 /// Rotas do servidor com destino de log injetado. Existe para o teste provar o
-/// que foi (e o que não foi) registrado; produção usa [`router`].
+/// que foi (e o que não foi) registrado; produção usa [`router_runtime`].
 pub fn router_with_log(
     pool: PgPool,
     authorization: Authorization,
@@ -105,19 +125,18 @@ pub fn router_with_log(
         log,
         None,
         AdmissionConfig::default(),
+        false,
     )
 }
 
 /// Rotas do servidor com autorização injetada (relógio e fonte de revogação).
 ///
-/// Cada grupo de rotas declara o escopo que exige na própria construção do
-/// router: rota nova nasce com escopo explícito, em vez de herdá-lo por omissão.
-/// Os construtores públicos abaixo usam [`AdmissionConfig::default`] (tetos
-/// altos, documentados): os valores de ambiente só valem na subida do binário,
-/// via [`router_with_federation_and_admission`] (ou [`router_with_admission`],
-/// sem malha), que é onde a config inválida derruba o processo com EX_CONFIG —
-/// ler ambiente silenciosamente dentro de um teste seria um acoplamento
-/// invisível.
+/// Cada rota declara o escopo que exige **no registro**; rota nova nasce com
+/// escopo explícito, em vez de herdá-lo por omissão. Os construtores públicos
+/// abaixo usam [`AdmissionConfig::default`] (tetos altos, documentados): os
+/// valores de ambiente só valem na subida do binário, via [`router_runtime`],
+/// que é onde a config inválida derruba o processo com EX_CONFIG — ler
+/// ambiente silenciosamente dentro de um teste seria um acoplamento invisível.
 pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
     build_router(
         pool,
@@ -125,11 +144,13 @@ pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
         Arc::new(StderrRequestLog),
         None,
         AdmissionConfig::default(),
+        false,
     )
 }
 
 /// Rotas com o runtime de federação anexado: habilita o diagnóstico de enlace
-/// com estado real. Sem isto, `/v1/federation/**` responde `unknown`.
+/// com estado real. Sem isto, `/v1/federation/**` responde `unknown` e
+/// `capabilities.federation_enabled` é `false`.
 ///
 /// As cotas ficam no [`AdmissionConfig::default`]; existe também a variante com
 /// cotas explícitas, [`router_with_federation_and_admission`].
@@ -144,17 +165,14 @@ pub fn router_with_federation(
         Arc::new(StderrRequestLog),
         Some(links),
         AdmissionConfig::default(),
+        false,
     )
 }
 
 /// Rotas com os dois anexos de produção: o runtime de malha (diagnóstico de
-/// enlace) e as cotas validadas no boot. É **o** construtor do binário.
-///
-/// `federation` é `Option` porque a malha é desligável por ambiente
-/// (`GODMESH_FEDERATION_BIND`): desligada, o diagnóstico responde `unknown` e
-/// nenhuma rota muda de comportamento. A cota nunca é opcional — sem config
-/// explícita vale [`AdmissionConfig::default`], e o binário é que valida o
-/// ambiente antes de chegar aqui.
+/// enlace) e as cotas validadas no boot. Sem publicador anexado
+/// (`capabilities.outbox_enabled = false`) — a porta completa do binário é
+/// [`router_runtime`].
 pub fn router_with_federation_and_admission(
     pool: PgPool,
     grants: GrantRegistry,
@@ -168,6 +186,34 @@ pub fn router_with_federation_and_admission(
         Arc::new(StderrRequestLog),
         federation,
         admission,
+        false,
+    )
+}
+
+/// Composição completa do binário: federação, cotas e publicador com seus
+/// estados efetivos. É a única porta que declara `outbox_enabled = true`, e só
+/// o `main` a chama quando o publicador roda de fato.
+///
+/// `federation` é `Option` porque a malha é desligável por ambiente
+/// (`GODMESH_FEDERATION_BIND`): desligada, o diagnóstico responde `unknown` e
+/// nenhuma rota muda de comportamento. A cota nunca é opcional — sem config
+/// explícita vale [`AdmissionConfig::default`], e o binário é que valida o
+/// ambiente antes de chegar aqui.
+pub fn router_runtime(
+    pool: PgPool,
+    grants: GrantRegistry,
+    federation: Option<Arc<PeerLinks>>,
+    admission: AdmissionConfig,
+    outbox_enabled: bool,
+) -> Router {
+    let authorization = Authorization::new(grants, pool.clone());
+    build_router(
+        pool,
+        authorization,
+        Arc::new(StderrRequestLog),
+        federation,
+        admission,
+        outbox_enabled,
     )
 }
 
@@ -177,52 +223,121 @@ fn build_router(
     log: Arc<dyn RequestLog>,
     federation: Option<Arc<PeerLinks>>,
     admission: AdmissionConfig,
+    outbox_enabled: bool,
 ) -> Router {
+    let join_window = JoinWindow::from_env();
+
+    // 1. O registro é a única fonte: ele constrói o router E é publicado.
+    let mut reg = contract::Registry::new();
+    incidents::register(&mut reg);
+    events::register(&mut reg);
+    sync::register(&mut reg);
+    admin::register(&mut reg);
+    federation::register(&mut reg);
+
+    // Métricas operacionais: escopo próprio (`admin:metrics`). Ver a nota em
+    // `get_metrics` sobre por que não é só loopback.
+    reg.get(
+        "/metrics",
+        contract::Access::Scope(Scope::AdminMetrics),
+        contract::RouteDoc {
+            summary: "Métricas Prometheus agregadas do nó (sem dado de tenant)",
+            request: None,
+            success: &[(200, contract::Schema::Text("text/plain; version=0.0.4; charset=utf-8"))],
+            errors: &["storage_unavailable"],
+            params: &[],
+        },
+        get_metrics,
+    );
+
+    // Endpoints de contrato e liveness, públicos por rota (não expõem dado de
+    // tenant e não têm efeito).
+    reg.get(
+        "/healthz",
+        contract::Access::Public,
+        contract::RouteDoc {
+            summary: "Liveness com dependência real: 200 só com Postgres respondendo",
+            request: None,
+            success: &[
+                (200, contract::Schema::Ref("HealthResponse")),
+                (503, contract::Schema::Ref("HealthResponse")),
+            ],
+            errors: &[],
+            params: &[],
+        },
+        healthz,
+    );
+    reg.get(
+        "/v1/meta",
+        contract::Access::Public,
+        contract::RouteDoc {
+            summary: "Contrato legível por máquina: versões, rotas, erros, capacidades",
+            request: None,
+            success: &[(200, contract::Schema::Ref(contract::META_SCHEMA_COMPONENT))],
+            errors: &[],
+            params: &[],
+        },
+        contract::get_meta,
+    );
+    reg.get(
+        "/openapi.json",
+        contract::Access::Public,
+        contract::RouteDoc {
+            summary: "Documento OpenAPI 3.1 gerado do registro de rotas",
+            request: None,
+            success: &[(200, contract::Schema::Ref("OpenApiDocument"))],
+            errors: &[],
+            params: &[],
+        },
+        get_openapi_json,
+    );
+
+    let out = reg.build();
+    // Os limites efetivos do processo (mesma `AdmissionConfig` que os portões
+    // aplicam) entram no registro **antes** de ele virar meta/openapi: uma
+    // única fonte, três leituras honestas.
+    let admission = Arc::new(Admission::new(admission));
+    let mut specs = out.specs;
+    contract::apply_effective_limits(&mut specs, admission.config());
+    let route_specs = Arc::new(specs);
+    // O documento OpenAPI nasce do MESMO registro que montou o router; se um
+    // dia divergir, o teste de contrato sonda rota por rota e falha.
+    let openapi_json = Arc::new(openapi::document(&route_specs));
+    let host_metrics_available = route_specs.iter().any(|spec| spec.path == "/metrics");
+
     let state = AppState {
         pool,
         authorization: Arc::new(authorization),
         metrics: Metrics::new(),
         log,
-        join_window: JoinWindow::from_env(),
+        join_window,
         federation,
-        admission: Arc::new(Admission::new(admission)),
+        admission,
+        outbox_enabled,
+        route_specs,
+        openapi_json,
+        host_metrics_available,
     };
 
-    // Métricas operacionais: escopo próprio (`admin:metrics`). Ver a nota em
-    // `get_metrics` sobre por que não é só loopback.
-    let metrics_read = Router::new()
-        .route("/metrics", get(get_metrics))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::AdminMetrics),
-            require_scope,
-        ));
-
-    // O portão de autenticação é aplicado por último (camada mais externa do
-    // grupo protegido): ele roda antes do portão de cotas, que lê o
-    // `VerifiedGrant` já injetado na extensão, e antes do portão de escopo.
-    // ordem de execução por rota: `require_grant → grant_gate → escopo → handler`.
-    let protected = incidents::routes()
-        .merge(events::routes())
-        .merge(sync::routes())
-        .merge(admin::routes())
-        .merge(federation::routes())
-        .merge(metrics_read)
+    // 2. O portão de autenticação é a camada mais externa do grupo protegido
+    // (roda por último ao adicionar); abaixo dele está o portão de abuso
+    // pós-autenticação, que conhece o `VerifiedGrant` injetado na extensão.
+    // ordem por rota protegida: `require_grant → grant_gate → escopo →
+    // portão semântico → handler`.
+    let protected = out
+        .protected
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             gate::grant_gate,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
-    // O observador é a camada mais externa: sem isso, 401/403/404 e rota não
-    // casada ficariam fora da contagem — exatamente o que se quer enxergar.
-    // Logo abaixo dele está o portão de abuso (payload/IP/timeout), que também
-    // enxerga as rotas públicas de federação.
+    // 3. O observador é a camada mais externa: sem isso, 401/403/404 e rota
+    // não casada ficariam fora da contagem — exatamente o que se quer
+    // enxergar. Logo abaixo dele está o portão de abuso (payload/IP/timeout),
+    // que também enxerga as rotas públicas do registro.
     Router::new()
-        .route("/healthz", axum::routing::get(healthz))
-        // Federação: o pedido de ingresso é público **por rota**, não por
-        // omissão do middleware. Ele fica fora do router protegido, e as demais
-        // rotas de federação entram em `protected` com escopo explícito.
-        .merge(federation::public_routes())
+        .merge(out.public)
         .merge(protected)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -232,7 +347,7 @@ fn build_router(
         .with_state(state)
 }
 
-/// Escopo que uma rota exige, carregado pelo middleware de escopo.
+/// Escopo exigido por uma rota, carregado pelo middleware de escopo.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ScopeGate(pub(super) Scope);
 
@@ -258,7 +373,18 @@ async fn healthz(State(state): State<AppState>) -> Response {
     }
 }
 
-/// Portão único de autenticação das rotas `/v1`.
+/// `GET /openapi.json`: o documento serializado na composição. Não há
+/// segunda fonte — a string é o registro renderizado.
+async fn get_openapi_json(State(state): State<AppState>) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        state.openapi_json.as_str().to_owned(),
+    )
+        .into_response()
+}
+
+/// Portão único de autenticação das rotas protegidas.
 ///
 /// Sem header, com esquema errado, com token desconhecido → 401 e o handler
 /// nunca roda (portanto nenhum INSERT). Credencial expirada, ainda não válida
@@ -335,6 +461,7 @@ async fn get_metrics(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
+#[must_use]
 pub(super) const fn created_status(created: bool) -> StatusCode {
     if created {
         StatusCode::CREATED
@@ -349,200 +476,6 @@ pub(super) struct ApiErrorResponse(ApiError);
 impl From<ApiError> for ApiErrorResponse {
     fn from(e: ApiError) -> Self {
         Self(e)
-    }
-}
-
-impl ApiErrorResponse {
-    fn status_and_code(&self) -> (StatusCode, &'static str, String) {
-        match &self.0 {
-            // 401 com `WWW-Authenticate` é o formato esperado por cliente HTTP.
-            ApiError::Unauthenticated => (
-                StatusCode::UNAUTHORIZED,
-                "unauthenticated",
-                "credencial ausente ou desconhecida".to_owned(),
-            ),
-            ApiError::InvalidCredential(e) => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_credential",
-                e.to_string(),
-            ),
-            ApiError::CredentialExpired => (
-                StatusCode::UNAUTHORIZED,
-                "credential_expired",
-                "credencial expirada".to_owned(),
-            ),
-            ApiError::CredentialNotYetValid => (
-                StatusCode::UNAUTHORIZED,
-                "credential_not_yet_valid",
-                "credencial ainda não válida".to_owned(),
-            ),
-            ApiError::CredentialRevoked => (
-                StatusCode::UNAUTHORIZED,
-                "credential_revoked",
-                "credencial revogada".to_owned(),
-            ),
-            // 403: a credencial é válida; o que falta é autorização para esta rota.
-            ApiError::InsufficientScope => (
-                StatusCode::FORBIDDEN,
-                "insufficient_scope",
-                "grant sem o escopo exigido por esta rota".to_owned(),
-            ),
-            // Falha fechada: revogação ilegível não vira aceitação.
-            ApiError::RevocationUnavailable => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "revocation_unavailable",
-                "não foi possível consultar a revogação; acesso negado".to_owned(),
-            ),
-            // Mesma regra para o registro de grants emitidos: falha fechada.
-            ApiError::IssuanceUnavailable => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "issuance_unavailable",
-                "não foi possível consultar grants emitidos; acesso negado".to_owned(),
-            ),
-            // 404 também aqui: token_id desconhecido não confirma nada além de si.
-            ApiError::GrantNotFound => (
-                StatusCode::NOT_FOUND,
-                "grant_not_found",
-                "grant não encontrado".to_owned(),
-            ),
-            ApiError::RandomnessUnavailable(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "randomness_unavailable",
-                "RNG do sistema indisponível; nenhuma credencial foi emitida".to_owned(),
-            ),
-            ApiError::InvalidRequest(detail) => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_request",
-                detail.clone(),
-            ),
-            ApiError::GrantDenied(d) => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "grant_denied",
-                format!("{d:?}"),
-            ),
-            ApiError::RetentionPolicyMissing => (
-                StatusCode::CONFLICT,
-                "retention_policy_missing",
-                "classe de retenção sem política aplicável à jurisdição do tenant".to_owned(),
-            ),
-            // Lacuna não é aceita nem completada: a resposta nomeia a posição que
-            // a stream espera, e nada é gravado.
-            ApiError::SequenceGap { expected, got } => (
-                StatusCode::CONFLICT,
-                "sequence_gap",
-                format!("posição {got} salta a lacuna: a stream espera {expected}"),
-            ),
-            // Mesmo código de lacuna no lote de Inbox: o prefixo aceito antes da
-            // lacuna ficou durável, e a resposta diz onde reenviar e o que já foi
-            // confirmado.
-            ApiError::InboxGap {
-                expected,
-                received,
-                accepted,
-                ..
-            } => (
-                StatusCode::CONFLICT,
-                "sequence_gap",
-                format!(
-                    "posição {received} salta a lacuna: a stream espera {expected}; \
-                     {accepted} posição(ões) antes da lacuna foram persistidas"
-                ),
-            ),
-            // Cursor ilegível/expirado e cursor vazio são recusados de forma
-            // distinta de cursor ausente (que começa a leitura do início).
-            ApiError::CursorInvalid(detail) => (
-                StatusCode::BAD_REQUEST,
-                "cursor_invalid",
-                detail.clone(),
-            ),
-            ApiError::CursorIncomparable(detail) => (
-                StatusCode::BAD_REQUEST,
-                "cursor_incomparable",
-                detail.clone(),
-            ),
-            ApiError::RetentionScopeUnresolved => (
-                StatusCode::CONFLICT,
-                "retention_scope_unresolved",
-                "tenant sem jurisdição declarada".to_owned(),
-            ),
-            ApiError::IncidentIdConflict => (
-                StatusCode::CONFLICT,
-                "incident_id_conflict",
-                "incident_id já pertence a outro tenant".to_owned(),
-            ),
-            // 404, nunca 403: um 403 confirmaria que o identificador existe em
-            // outro tenant, e existência de incidente alheio não é dado público.
-            ApiError::IncidentNotFound => (
-                StatusCode::NOT_FOUND,
-                "incident_not_found",
-                "incidente não encontrado".to_owned(),
-            ),
-            ApiError::IllegalTransition { current } => (
-                StatusCode::CONFLICT,
-                "illegal_transition",
-                format!("transição ilegal a partir de {current}"),
-            ),
-            ApiError::MissingHumanProof => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "missing_human_proof",
-                "reconhecimento humano exige responder (prova de pessoa)".to_owned(),
-            ),
-            ApiError::Invariant(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invariant_violation",
-                format!("contrato do incidente recusou a transição: {e:?}"),
-            ),
-            // 401: o manifesto não prova quem diz ser. Nada foi gravado.
-            ApiError::InvalidManifestSignature => (
-                StatusCode::UNAUTHORIZED,
-                "invalid_manifest_signature",
-                "assinatura do manifesto não confere".to_owned(),
-            ),
-            // 422: assinatura válida, manifesto velho demais para ingresso.
-            ApiError::ManifestExpired => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "manifest_expired",
-                "manifesto fora da janela de frescor".to_owned(),
-            ),
-            ApiError::ManifestNotYetValid => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "manifest_not_yet_valid",
-                "manifesto emitido no futuro além da tolerância".to_owned(),
-            ),
-            ApiError::InvalidManifest(detail) => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_manifest",
-                detail.clone(),
-            ),
-            ApiError::JoinRequestNotFound => (
-                StatusCode::NOT_FOUND,
-                "join_request_not_found",
-                "pedido de ingresso não encontrado".to_owned(),
-            ),
-            // 409: o pedido existe e já foi decidido de outro jeito.
-            ApiError::JoinRequestStateConflict { state } => (
-                StatusCode::CONFLICT,
-                "join_request_state_conflict",
-                format!("pedido de ingresso em estado {state}"),
-            ),
-            // 409: a máquina de estados de confiança recusou (ex.: revogado não
-            // volta direto a autorizado).
-            ApiError::TrustTransition { current, next } => (
-                StatusCode::CONFLICT,
-                "illegal_trust_transition",
-                format!("transição de confiança ilegal: {current} → {next}"),
-            ),
-            ApiError::FederationInvariant(detail) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "federation_invariant_violation",
-                detail.clone(),
-            ),
-            ApiError::Storage(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "storage_unavailable",
-                "falha de persistência".to_owned(),
-            ),
-        }
     }
 }
 
@@ -581,8 +514,12 @@ impl ApiErrorResponse {
 }
 
 impl IntoResponse for ApiErrorResponse {
+    /// Corpo padronizado e acionável (ADR-074):
+    /// `{error, detail, hint, docs_url, retryable, ack_class, ...extras}`.
+    /// `error`/`detail` preservam os códigos testados; `hint` diz o próximo
+    /// passo concreto; `docs_url` aponta para o catálogo público.
     fn into_response(self) -> Response {
-        let (status, code, detail) = self.status_and_code();
+        let (status, code, detail) = contract::error_parts(&self.0);
         let mut body = Map::new();
         body.insert("error".to_owned(), Value::String(code.to_owned()));
         body.insert("detail".to_owned(), Value::String(detail));
@@ -591,6 +528,11 @@ impl IntoResponse for ApiErrorResponse {
             "ack_class".to_owned(),
             Value::String("transport_accepted".to_owned()),
         );
+        if let Some(spec) = contract::error_by_code(code) {
+            body.insert("hint".to_owned(), Value::String(spec.hint.to_owned()));
+            body.insert("retryable".to_owned(), json!(spec.retryable));
+            body.insert("docs_url".to_owned(), Value::String("/v1/meta".to_owned()));
+        }
         for (key, value) in self.extra() {
             body.insert(key.to_owned(), value);
         }

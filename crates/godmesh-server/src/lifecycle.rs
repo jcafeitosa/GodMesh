@@ -24,7 +24,7 @@ use crate::api::{parse_state, rehydrate, state_name, ApiError};
 use crate::auth::VerifiedGrant;
 
 /// Um registro da trilha de ACK, como o banco guarda.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AckView {
     pub ack_class: String,
     pub source: String,
@@ -35,7 +35,7 @@ pub struct AckView {
 ///
 /// `state`, `ack_class` e `ui_label` vêm todos do estado persistido; `acks` é a
 /// trilha na ordem em que foi gravada.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IncidentView {
     pub incident_id: String,
     pub state: String,
@@ -48,7 +48,7 @@ pub struct IncidentView {
 ///
 /// `responder` é a prova de que uma **pessoa** reconheceu. Sem ele, a transição
 /// para `acknowledged_human` não acontece (`422 missing_human_proof`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AcknowledgePayload {
     #[serde(default)]

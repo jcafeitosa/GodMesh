@@ -492,15 +492,18 @@ async fn run(config: Config) -> Result<(), String> {
     };
 
     let mut encerrar = shutdown_rx;
-    // Os dois anexos de produção, juntos: o runtime de malha (dá o estado real
-    // do enlace) e as cotas validadas no boot. Sem `GODMESH_FEDERATION_BIND` o
-    // diagnóstico responde `unknown` — não "saúde" por omissão.
+    // `router_runtime`: a única porta que declara capacidades efetivas —
+    // publicador ligado/desligado, federação anexada/ausente e as cotas
+    // validadas no boot aparecem exatamente como este processo é, em
+    // `GET /v1/meta`. Sem `GODMESH_FEDERATION_BIND` o diagnóstico responde
+    // `unknown` — não "saúde" por omissão.
     let federation_links = runtime_federation.as_ref().map(|node| node.links());
-    let app = godmesh_server::http::router_with_federation_and_admission(
+    let app = godmesh_server::http::router_runtime(
         pool.clone(),
         grants,
         federation_links,
         *admission,
+        outbox.enabled,
     );
     let served = runtime::serve(listener, app, pool.clone(), async move {
         let _ = encerrar.changed().await;

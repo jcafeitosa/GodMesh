@@ -17,7 +17,7 @@ use serde::Serialize;
 
 
 /// Estado do enlace de um par.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkState {
     /// Handshake concluído **e** heartbeat dentro da janela.
@@ -43,7 +43,7 @@ impl LinkState {
 }
 
 /// Fotografia do enlace, como o endpoint de diagnóstico devolve.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct LinkSnapshot {
     /// `ready`, `unknown` ou `rejected`.
     pub state: LinkState,

@@ -1,39 +1,146 @@
 //! Rotas de incidente: escrita (criação e transições) e leitura (item e lista).
+//!
+//! Registradas no `Registry`: a assinatura exige escopo, semântica e
+//! documentação — não existe rota registrada sem contrato (ADR-074).
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
-use axum::middleware;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 
-use super::{created_status, require_scope, AppState, ApiErrorResponse, ScopeGate};
+use super::contract::{Access, ParamSpec, Registry, RouteDoc, Schema};
+use super::{created_status, AppState, ApiErrorResponse};
 use crate::api::{create_incident, ApiError, IncidentPayload, IncidentResponse};
 use crate::auth::{Scope, VerifiedGrant};
 use crate::incidents::{list_incidents, IncidentListQuery, IncidentPage};
 use crate::lifecycle::{load_incident, transition, AcknowledgePayload, IncidentView, Transition};
 
-pub(super) fn routes() -> Router<AppState> {
-    let write = Router::new()
-        .route("/v1/incidents", post(post_incident))
-        .route("/v1/incidents/{id}/replicate", post(post_replicate))
-        .route("/v1/incidents/{id}/ack-technical", post(post_ack_technical))
-        .route("/v1/incidents/{id}/acknowledge", post(post_acknowledge))
-        .route("/v1/incidents/{id}/close", post(post_close))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::IncidentWrite),
-            require_scope,
-        ));
+pub(super) fn register(reg: &mut Registry) {
+    let write = Access::Scope(Scope::IncidentWrite);
+    let read = Access::Scope(Scope::IncidentRead);
+    const ID_PARAM: ParamSpec = ParamSpec {
+        name: "id",
+        in_path: true,
+        required: true,
+        ty: "string",
+        desc: "identificador do incidente do tenant autenticado",
+    };
 
-    let read = Router::new()
-        .route("/v1/incidents", get(get_incidents))
-        .route("/v1/incidents/{id}", get(get_incident))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::IncidentRead),
-            require_scope,
-        ));
+    reg.post(
+        "/v1/incidents",
+        write,
+        RouteDoc {
+            summary: "Cria o incidente do tenant; repetição idempotente devolve 200 sem reescrever a trilha",
+            request: Some("IncidentPayload"),
+            success: &[
+                (201, Schema::Ref("IncidentResponse")),
+                (200, Schema::Ref("IncidentResponse")),
+            ],
+            errors: &[
+                "invalid_request",
+                "grant_denied",
+                "retention_scope_unresolved",
+                "retention_policy_missing",
+                "incident_id_conflict",
+                "invariant_violation",
+                "storage_unavailable",
+            ],
+            params: &[],
+        },
+        post_incident,
+    );
+    reg.get(
+        "/v1/incidents",
+        read,
+        RouteDoc {
+            summary: "Lista incidentes do tenant, paginada por cursor opaco",
+            request: None,
+            success: &[(200, Schema::Ref("IncidentPage"))],
+            errors: &[
+                "invalid_request",
+                "cursor_invalid",
+                "cursor_incomparable",
+                "grant_denied",
+                "storage_unavailable",
+            ],
+            params: &[
+                ParamSpec {
+                    name: "limit",
+                    in_path: false,
+                    required: true,
+                    ty: "integer",
+                    desc: "1..=100, obrigatório: paginação sem default publicado seria parâmetro inventado",
+                },
+                ParamSpec {
+                    name: "state",
+                    in_path: false,
+                    required: false,
+                    ty: "string",
+                    desc: "filtro pelo conjunto fechado de estados (see IncidentView.state)",
+                },
+                ParamSpec {
+                    name: "cursor",
+                    in_path: false,
+                    required: false,
+                    ty: "string",
+                    desc: "next_cursor da página anterior; de outra partição/filtro é recusado",
+                },
+            ],
+        },
+        get_incidents,
+    );
+    reg.get(
+        "/v1/incidents/{id}",
+        read,
+        RouteDoc {
+            summary: "Lê o incidente com a trilha de ACK; inexistente e alheio devolvem o mesmo 404",
+            request: None,
+            success: &[(200, Schema::Ref("IncidentView"))],
+            errors: &[
+                "incident_not_found",
+                "grant_denied",
+                "storage_unavailable",
+            ],
+            params: &[ID_PARAM],
+        },
+        get_incident,
+    );
 
-    write.merge(read)
+    const TRANSITIONS: &[(&str, &str, bool)] = &[
+        ("/v1/incidents/{id}/replicate", "Replica o incidente para a autoridade (persistido → replicado)", false),
+        ("/v1/incidents/{id}/ack-technical", "Reconhecimento técnico (replicado → acknowledged_technical)", false),
+        ("/v1/incidents/{id}/acknowledge", "Reconhecimento humano; exige prova de pessoa no corpo", false),
+        ("/v1/incidents/{id}/close", "Encerra o incidente; transição terminal, por isso aceita dry_run", true),
+    ];
+    // Um registro por transição: o handler específico vive na tabela, e a
+    // semântica (destructive) também — ninguém esquece o dry_run do `close`.
+    for &(path, summary, destructive) in TRANSITIONS {
+        let doc = RouteDoc {
+            summary,
+            request: if path.ends_with("acknowledge") {
+                Some("AcknowledgePayload")
+            } else {
+                None
+            },
+            success: &[(200, Schema::Ref("IncidentView"))],
+            errors: &[
+                "incident_not_found",
+                "illegal_transition",
+                "missing_human_proof",
+                "grant_denied",
+                "invariant_violation",
+                "storage_unavailable",
+            ],
+            params: &[ID_PARAM],
+        };
+        match (path, destructive) {
+            ("/v1/incidents/{id}/replicate", _) => reg.post(path, write, doc, post_replicate),
+            ("/v1/incidents/{id}/ack-technical", _) => reg.post(path, write, doc, post_ack_technical),
+            ("/v1/incidents/{id}/acknowledge", _) => reg.post(path, write, doc, post_acknowledge),
+            ("/v1/incidents/{id}/close", true) => reg.post_destructive(path, write, doc, post_close),
+            _ => unreachable!("transição fora da tabela"),
+        }
+    }
 }
 
 pub(super) async fn post_incident(

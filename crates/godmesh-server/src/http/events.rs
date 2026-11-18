@@ -3,31 +3,62 @@
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
-use axum::middleware;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 
-use super::{created_status, require_scope, AppState, ApiErrorResponse, ScopeGate};
+use super::contract::{Access, ParamSpec, Registry, RouteDoc, Schema};
+use super::{created_status, AppState, ApiErrorResponse};
 use crate::api::ApiError;
 use crate::auth::{Scope, VerifiedGrant};
 use crate::events::{create_event, list_events, EventAck, EventPage, EventPayload, EventQuery};
 
-pub(super) fn routes() -> Router<AppState> {
-    let write = Router::new()
-        .route("/v1/events", post(post_event))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::EventWrite),
-            require_scope,
-        ));
-
-    let read = Router::new()
-        .route("/v1/events", get(get_events))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::EventRead),
-            require_scope,
-        ));
-
-    write.merge(read)
+pub(super) fn register(reg: &mut Registry) {
+    reg.post(
+        "/v1/events",
+        Access::Scope(Scope::EventWrite),
+        RouteDoc {
+            summary: "Aceita a posição de um evento; replay da mesma posição devolve 200 sem reescrever",
+            request: Some("EventPayload"),
+            success: &[
+                (201, Schema::Ref("EventAck")),
+                (200, Schema::Ref("EventAck")),
+            ],
+            errors: &[
+                "invalid_request",
+                "grant_denied",
+                "retention_scope_unresolved",
+                "retention_policy_missing",
+                "sequence_gap",
+                "storage_unavailable",
+            ],
+            params: &[],
+        },
+        post_event,
+    );
+    reg.get(
+        "/v1/events",
+        Access::Scope(Scope::EventRead),
+        RouteDoc {
+            summary: "Lê a stream do tenant paginada por cursor opaco",
+            request: None,
+            success: &[(200, Schema::Ref("EventPage"))],
+            errors: &[
+                "invalid_request",
+                "cursor_invalid",
+                "cursor_incomparable",
+                "grant_denied",
+                "storage_unavailable",
+            ],
+            params: &[
+                ParamSpec { name: "stream_id", in_path: false, required: true, ty: "string", desc: "identificador da stream" },
+                ParamSpec { name: "partition", in_path: false, required: true, ty: "integer", desc: "partição da posição canônica (ADR-057)" },
+                ParamSpec { name: "authority_epoch", in_path: false, required: true, ty: "integer", desc: "epoch da autoridade; cursor de outro epoch não é comparável" },
+                ParamSpec { name: "limit", in_path: false, required: true, ty: "integer", desc: "1..=100, obrigatório" },
+                ParamSpec { name: "origin_node", in_path: false, required: false, ty: "string", desc: "filtro opcional por nó de origem" },
+                ParamSpec { name: "cursor", in_path: false, required: false, ty: "string", desc: "next_cursor da página anterior" },
+            ],
+        },
+        get_events,
+    );
 }
 
 pub(super) async fn post_event(

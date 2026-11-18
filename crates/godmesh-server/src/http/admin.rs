@@ -1,15 +1,15 @@
 //! Rotas de administração de grants: emitir, consultar e revogar credenciais.
 //!
-//! O escopo é o da rota (`admin:grants`), não um "admin" genérico.
+//! O escopo é o da rota (`admin:grants`), não um "admin" genérico. Revogar é
+//! destrutiva por definição (irreversível): o registro impõe `dry_run`.
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
-use axum::middleware;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 
-use super::{require_scope, AppState, ApiErrorResponse, ScopeGate};
+use super::contract::{Access, ParamSpec, Registry, RouteDoc, Schema};
+use super::{AppState, ApiErrorResponse};
 use crate::admin::{
     grant_metadata, issue_grant, revoke_grant, GrantMetadata, IssueGrantPayload,
     IssuedGrantResponse, RevokeGrantPayload, RevocationResponse,
@@ -17,18 +17,56 @@ use crate::admin::{
 use crate::api::ApiError;
 use crate::auth::{Scope, VerifiedGrant};
 
-pub(super) fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/v1/admin/grants", post(post_admin_grant))
-        .route("/v1/admin/grants/{token_id}", get(get_admin_grant))
-        .route(
-            "/v1/admin/grants/{token_id}/revoke",
-            post(post_admin_grant_revoke),
-        )
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::AdminGrants),
-            require_scope,
-        ))
+pub(super) fn register(reg: &mut Registry) {
+    let access = Access::Scope(Scope::AdminGrants);
+    const TOKEN_PARAM: ParamSpec = ParamSpec {
+        name: "token_id",
+        in_path: true,
+        required: true,
+        ty: "string",
+        desc: "identificador público do grant emitido pela API",
+    };
+
+    reg.post(
+        "/v1/admin/grants",
+        access,
+        RouteDoc {
+            summary: "Emite um grant; o token em claro volta uma única vez e nunca é logado",
+            request: Some("IssueGrantPayload"),
+            success: &[(201, Schema::Ref("IssuedGrantResponse"))],
+            errors: &[
+                "invalid_request",
+                "randomness_unavailable",
+                "storage_unavailable",
+            ],
+            params: &[],
+        },
+        post_admin_grant,
+    );
+    reg.get(
+        "/v1/admin/grants/{token_id}",
+        access,
+        RouteDoc {
+            summary: "Metadados de um grant: sem token e sem hash, por construção",
+            request: None,
+            success: &[(200, Schema::Ref("GrantMetadata"))],
+            errors: &["grant_not_found", "storage_unavailable"],
+            params: &[TOKEN_PARAM],
+        },
+        get_admin_grant,
+    );
+    reg.post_destructive(
+        "/v1/admin/grants/{token_id}/revoke",
+        access,
+        RouteDoc {
+            summary: "Revoga um grant; vale no mesmo processo e é idempotente no instante",
+            request: Some("RevokeGrantPayload"),
+            success: &[(200, Schema::Ref("RevocationResponse"))],
+            errors: &["invalid_request", "grant_not_found", "storage_unavailable"],
+            params: &[TOKEN_PARAM],
+        },
+        post_admin_grant_revoke,
+    );
 }
 
 /// Emite um grant. O token volta **uma vez** e nunca é logado.

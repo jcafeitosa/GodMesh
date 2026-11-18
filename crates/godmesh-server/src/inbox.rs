@@ -44,7 +44,7 @@ pub const MAX_INBOX_BATCH: usize = 100;
 
 /// Posição recebida no lote. Espelha a posição canônica da ADR-057 **sem**
 /// `tenant_id`: tenancy vem do grant, nunca do corpo.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InboxPositionPayload {
     pub origin_node: String,
@@ -59,7 +59,7 @@ pub struct InboxPositionPayload {
 /// `retention_class` é obrigatória no envelope (e não em cada posição): toda
 /// posição aceita vira linha em `event_position`, que não existe sem classe com
 /// política na jurisdição do tenant (ADR-062).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InboxBatchPayload {
     pub retention_class: String,
@@ -67,7 +67,7 @@ pub struct InboxBatchPayload {
 }
 
 /// Resposta do lote aceito.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct InboxBatchResponse {
     pub accepted: u64,
     pub duplicates: u64,
@@ -95,7 +95,7 @@ pub struct InboxStateQuery {
 /// `contiguous_prefix == 0` e `last_recorded_at == null` significam "nenhum
 /// evento durável neste namespace" — stream desconhecida é estado vazio, não
 /// erro (não existe lista de streams autorizadas a consultar por tentativa).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct InboxState {
     pub contiguous_prefix: u64,
     pub last_recorded_at: Option<String>,
@@ -108,7 +108,7 @@ pub struct InboxState {
 /// buraco em `event_position` aparece aqui mesmo depois de reinício. Quando o
 /// Inbox está contíguo (invariante desta API), a lista é vazia — a autoridade
 /// sobre "existe lacuna" continua sendo o `409 sequence_gap`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct InboxGap {
     pub origin_node: String,
     pub from: u64,

@@ -62,7 +62,7 @@ pub const MAX_MANIFEST_FRAME_BYTES: usize = 8 * 1024;
 ///
 /// `deny_unknown_fields` é deliberado: o corpo vem da rede e um campo
 /// desconhecido não é ignorado em silêncio — o pedido é recusado na fronteira.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SignedManifest {
     /// Identificador público do nó: `gmn_` + hex de `sha256(public_key)`.

@@ -19,11 +19,10 @@ use std::collections::HashMap;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
-use axum::middleware;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 
-use super::{ApiErrorResponse, AppState, ScopeGate, created_status, require_scope};
+use super::contract::{Access, ParamSpec, Registry, RouteDoc, Schema};
+use super::{ApiErrorResponse, AppState, created_status};
 use crate::api::ApiError;
 use crate::auth::{Scope, VerifiedGrant};
 use crate::federation::{
@@ -35,40 +34,124 @@ use godmesh_federation::identity::is_node_id;
 use godmesh_federation::link::LinkSnapshot;
 use godmesh_federation::peer::PeerRecord;
 
-/// Rotas públicas da federação. Montadas **fora** do portão `require_grant`.
-pub(super) fn public_routes() -> Router<AppState> {
-    Router::new().route("/v1/federation/join-requests", post(post_join_request))
-}
+/// Todas as rotas de federação, no registro. O `Access` é o portão: a rota
+/// pública fica fora do `require_grant` **por declaração explícita no
+/// registro**, não por omissão de montagem.
+pub(super) fn register(reg: &mut Registry) {
+    reg.post(
+        "/v1/federation/join-requests",
+        Access::Public,
+        RouteDoc {
+            summary: "Pede ingresso na federação; a credencial é a assinatura do manifesto, não um token",
+            request: Some("SignedManifest"),
+            success: &[
+                (201, Schema::Ref("JoinRequestView")),
+                (200, Schema::Ref("JoinRequestView")),
+            ],
+            errors: &[
+                "invalid_manifest",
+                "invalid_manifest_signature",
+                "manifest_expired",
+                "manifest_not_yet_valid",
+                "storage_unavailable",
+            ],
+            params: &[],
+        },
+        post_join_request,
+    );
 
-/// Rotas autenticadas da federação.
-pub(super) fn routes() -> Router<AppState> {
-    let read = Router::new()
-        .route("/v1/federation/join-requests", get(get_join_requests))
-        .route("/v1/federation/peers", get(get_peers))
-        .route(
-            "/v1/federation/peers/{node_id}/link",
-            get(get_peer_link),
-        )
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::FederationRead),
-            require_scope,
-        ));
+    let read = Access::Scope(Scope::FederationRead);
+    reg.get(
+        "/v1/federation/join-requests",
+        read,
+        RouteDoc {
+            summary: "Lista pedidos de ingresso; ?state=pending|approved|rejected|expired filtra",
+            request: None,
+            success: &[(200, Schema::Array("JoinRequestView"))],
+            errors: &["invalid_request", "storage_unavailable"],
+            params: &[ParamSpec {
+                name: "state",
+                in_path: false,
+                required: false,
+                ty: "string",
+                desc: "filtro opcional pelo estado do pedido",
+            }],
+        },
+        get_join_requests,
+    );
+    reg.get(
+        "/v1/federation/peers",
+        read,
+        RouteDoc {
+            summary: "Lista pares registrados; só dados públicos (chave pública em hex)",
+            request: None,
+            success: &[(200, Schema::Array("PeerRecord"))],
+            errors: &["storage_unavailable"],
+            params: &[],
+        },
+        get_peers,
+    );
+    reg.get(
+        "/v1/federation/peers/{node_id}/link",
+        read,
+        RouteDoc {
+            summary: "Estado do enlace com um par; unknown é estado de primeira classe (ADR-072)",
+            request: None,
+            success: &[(200, Schema::Ref("LinkSnapshot"))],
+            errors: &["invalid_request"],
+            params: &[ParamSpec {
+                name: "node_id",
+                in_path: true,
+                required: true,
+                ty: "string",
+                desc: "gmn_ + 64 hex minúsculos (sha256 da chave pública Ed25519); fora da forma é 422",
+            }],
+        },
+        get_peer_link,
+    );
 
-    let admin = Router::new()
-        .route(
-            "/v1/federation/join-requests/{join_request_id}/approve",
-            post(post_join_request_approve),
-        )
-        .route(
-            "/v1/federation/join-requests/{join_request_id}/reject",
-            post(post_join_request_reject),
-        )
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::FederationAdmin),
-            require_scope,
-        ));
-
-    read.merge(admin)
+    let admin = Access::Scope(Scope::FederationAdmin);
+    const JR_PARAM: ParamSpec = ParamSpec {
+        name: "join_request_id",
+        in_path: true,
+        required: true,
+        ty: "string",
+        desc: "identificador público do pedido (fjr_ + 32 hex)",
+    };
+    reg.post_destructive(
+        "/v1/federation/join-requests/{join_request_id}/approve",
+        admin,
+        RouteDoc {
+            summary: "Aprova pedido pendente e registra o par como authorized; decisão terminal",
+            request: None,
+            success: &[(200, Schema::Ref("JoinRequestView"))],
+            errors: &[
+                "join_request_not_found",
+                "join_request_state_conflict",
+                "illegal_trust_transition",
+                "federation_invariant_violation",
+                "storage_unavailable",
+            ],
+            params: &[JR_PARAM],
+        },
+        post_join_request_approve,
+    );
+    reg.post_destructive(
+        "/v1/federation/join-requests/{join_request_id}/reject",
+        admin,
+        RouteDoc {
+            summary: "Rejeita pedido pendente; nenhum par é criado, decisão terminal",
+            request: None,
+            success: &[(200, Schema::Ref("JoinRequestView"))],
+            errors: &[
+                "join_request_not_found",
+                "join_request_state_conflict",
+                "storage_unavailable",
+            ],
+            params: &[JR_PARAM],
+        },
+        post_join_request_reject,
+    );
 }
 
 /// Pede ingresso na federação. Público: a assinatura é a credencial.

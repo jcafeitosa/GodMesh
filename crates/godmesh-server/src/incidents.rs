@@ -65,7 +65,7 @@ pub struct IncidentListQuery {
 
 /// Um incidente na listagem. Sem a trilha de ACK: a lista é índice, e a trilha é
 /// leitura de um incidente (`GET /v1/incidents/{id}`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IncidentSummary {
     pub incident_id: String,
     pub state: String,
@@ -76,7 +76,7 @@ pub struct IncidentSummary {
 }
 
 /// Página de incidentes. `next_cursor` nulo significa fim do intervalo.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IncidentPage {
     pub incidents: Vec<IncidentSummary>,
     pub next_cursor: Option<String>,

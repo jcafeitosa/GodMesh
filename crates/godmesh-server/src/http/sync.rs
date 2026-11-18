@@ -4,33 +4,57 @@
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Query, State};
-use axum::middleware;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 
-use super::{require_scope, AppState, ApiErrorResponse, ScopeGate};
+use super::contract::{Access, ParamSpec, Registry, RouteDoc, Schema};
+use super::{AppState, ApiErrorResponse};
 use crate::api::ApiError;
 use crate::auth::{Scope, VerifiedGrant};
 use crate::inbox::{
     read_state, receive_batch, InboxBatchPayload, InboxBatchResponse, InboxState, InboxStateQuery,
 };
 
-pub(super) fn routes() -> Router<AppState> {
-    let write = Router::new()
-        .route("/v1/sync/inbox", post(post_sync_inbox))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::SyncWrite),
-            require_scope,
-        ));
-
-    let read = Router::new()
-        .route("/v1/sync/state", get(get_sync_state))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::SyncRead),
-            require_scope,
-        ));
-
-    write.merge(read)
+pub(super) fn register(reg: &mut Registry) {
+    reg.post(
+        "/v1/sync/inbox",
+        Access::Scope(Scope::SyncWrite),
+        RouteDoc {
+            summary: "Recebe um lote de até 100 posições e avança o prefixo contíguo do namespace",
+            request: Some("InboxBatchPayload"),
+            success: &[(200, Schema::Ref("InboxBatchResponse"))],
+            errors: &[
+                "invalid_request",
+                "grant_denied",
+                "retention_scope_unresolved",
+                "retention_policy_missing",
+                "sequence_gap",
+                "storage_unavailable",
+            ],
+            params: &[],
+        },
+        post_sync_inbox,
+    );
+    reg.get(
+        "/v1/sync/state",
+        Access::Scope(Scope::SyncRead),
+        RouteDoc {
+            summary: "Estado do Inbox: prefixo contíguo, último avanço e lacunas do namespace",
+            request: None,
+            success: &[(200, Schema::Ref("InboxState"))],
+            errors: &[
+                "invalid_request",
+                "grant_denied",
+                "storage_unavailable",
+            ],
+            params: &[
+                ParamSpec { name: "stream_id", in_path: false, required: true, ty: "string", desc: "identificador da stream" },
+                ParamSpec { name: "partition", in_path: false, required: true, ty: "integer", desc: "partição da posição canônica" },
+                ParamSpec { name: "authority_epoch", in_path: false, required: true, ty: "integer", desc: "epoch da autoridade" },
+                ParamSpec { name: "origin_node", in_path: false, required: false, ty: "string", desc: "sem ele, agregado conservador entre origens" },
+            ],
+        },
+        get_sync_state,
+    );
 }
 
 /// `MAX_INBOX_BATCH`) é recusado na fronteira, antes de qualquer efeito. O teto é

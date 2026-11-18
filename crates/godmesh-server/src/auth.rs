@@ -46,7 +46,7 @@ pub struct Subject {
 
 /// Escopo exigido por uma rota. A rota declara um destes; o grant precisa
 /// contê-lo, senão a resposta é `403 insufficient_scope`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum Scope {
     #[serde(rename = "incident:write")]
     IncidentWrite,

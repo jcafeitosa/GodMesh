@@ -77,7 +77,7 @@ impl JoinWindow {
 }
 
 /// Pedido de ingresso como a API devolve.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct JoinRequestView {
     /// Identificador público do pedido (`fjr_` + 32 hex).
     pub join_request_id: String,
