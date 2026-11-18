@@ -12,3 +12,4 @@ pub mod auth;
 pub mod events;
 pub mod http;
 pub mod lifecycle;
+pub mod migrate;

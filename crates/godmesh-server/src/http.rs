@@ -5,6 +5,8 @@
 //! O handler só recebe o grant pela extensão preenchida pelo middleware, logo
 //! não existe caminho de código que chame o caso de uso sem credencial.
 
+use std::time::Duration;
+
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -49,8 +51,40 @@ pub fn router(pool: PgPool, grants: GrantRegistry) -> Router {
         .with_state(state)
 }
 
-async fn healthz() -> impl IntoResponse {
-    Json(json!({ "status": "ok", "ack_class": "transport_accepted" }))
+/// Tempo máximo que `/healthz` espera pelo banco.
+///
+/// Curto de propósito: um health check que espera o timeout do pool responde
+/// depois do orquestrador já ter decidido que o processo está morto.
+const HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// `/healthz` prova a dependência, não só o processo.
+///
+/// `200` só quando `SELECT 1` volta dentro de [`HEALTHCHECK_TIMEOUT`]. Banco
+/// fora, lento ou pool fechado → `503` nomeando a dependência. `ack_class` fica
+/// nas duas respostas: a taxonomia de ACK do ADR-058 vale para todo retorno.
+async fn healthz(State(state): State<AppState>) -> Response {
+    let probe = tokio::time::timeout(
+        HEALTHCHECK_TIMEOUT,
+        sqlx::query("SELECT 1").execute(&state.pool),
+    )
+    .await;
+
+    match probe {
+        Ok(Ok(_)) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "ack_class": "transport_accepted" })),
+        )
+            .into_response(),
+        Ok(Err(_)) | Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "unavailable",
+                "dependency": "postgres",
+                "ack_class": "transport_accepted",
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// Portão único de autenticação das rotas `/v1`.
@@ -340,12 +374,18 @@ impl IntoResponse for ApiErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::created_status;
+    use super::{created_status, HEALTHCHECK_TIMEOUT};
     use axum::http::StatusCode;
+    use std::time::Duration;
 
     #[test]
     fn replay_is_200_and_first_write_is_201() {
         assert_eq!(created_status(false), StatusCode::OK);
         assert_eq!(created_status(true), StatusCode::CREATED);
+    }
+
+    #[test]
+    fn healthcheck_espera_pouco_pelo_banco() {
+        assert!(HEALTHCHECK_TIMEOUT <= Duration::from_secs(1));
     }
 }

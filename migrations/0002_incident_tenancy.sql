@@ -7,8 +7,12 @@
 --     aceitava INSERT direto sem classe de retenção;
 --   * PK global de `id` fazia um tenant bloquear o `id` de outro (squatting);
 --   * não existia fonte de jurisdição por tenant para resolver a política.
-
-BEGIN;
+--
+-- Transação: o arquivo NÃO abre `BEGIN`/`COMMIT`. Quem é dono da transação é o
+-- runner (`crates/godmesh-server/src/migrate.rs`), que envia o arquivo e o
+-- registro em `schema_migration` como um único script — o Postgres executa isso
+-- como um bloco transacional implícito. Um `BEGIN` aqui aninharia/quebraria esse
+-- bloco.
 
 -- Jurisdição declarada por tenant (ADR-066). A jurisdição é dado do servidor,
 -- nunca do corpo do pedido: campo enviado pelo cliente é seleção sujeita a
@@ -82,5 +86,3 @@ ALTER TABLE sos_incident ADD CONSTRAINT sos_incident_pkey PRIMARY KEY (tenant_id
 ALTER TABLE sos_incident ADD CONSTRAINT sos_incident_id_key UNIQUE (id);
 ALTER TABLE sos_ack ADD CONSTRAINT sos_ack_incident_id_fkey
     FOREIGN KEY (incident_id) REFERENCES sos_incident (id);
-
-COMMIT;
