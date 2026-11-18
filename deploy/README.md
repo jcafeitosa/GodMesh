@@ -66,7 +66,41 @@ repontada.
 `EXPOSE 8080` é **metadado**: não publica porta, não abre firewall e não substitui
 `-p 8080:8080`. Quem publica porta é o operador, na execução.
 
-Build:
+### Build e execução final (18/11/2026)
+
+```bash
+# build (versão + digests fixados no topo do Dockerfile; nunca `latest`)
+docker build -f deploy/prod/Dockerfile -t godmesh-server:1.0.0 .
+
+docker run -d --name godmesh-server \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges \
+  --user 10001:10001 \
+  --network host \
+  -e DATABASE_URL='postgres://USUARIO:SENHA@HOST:5432/godmesh' \
+  -e GODMESH_GRANTS="$(cat /caminho/grants.json)" \
+  -e BIND_ADDR=127.0.0.1:8080 \
+  godmesh-server:1.0.0
+```
+
+Flags de execução e o que cada uma compra:
+
+| Flag | Papel |
+|---|---|
+| `--read-only` | rootfs imutável; é o **único** controle que resiste a `--user 0:0` (o `chmod a-w /migrations` é só DAC) |
+| `--cap-drop=ALL` | nenhuma capability Linux; o servidor só precisa de socket TCP de saída |
+| `--security-opt no-new-privileges` | setuid/file-capabilities não elevam privilégio |
+| `--user 10001:10001` | uid/gid sem home e sem shell definidos na imagem |
+| `--network host` | bind direto; em produção troque por `-p 8080:8080` e `BIND_ADDR=0.0.0.0:8080` |
+| `-e DATABASE_URL` | obrigatória: ausente/vazia → mensagem clara, exit 78 |
+| `-e GODMESH_GRANTS` | obrigatória para servir: JSON de grants verificados; ausente/inválida → exit 78 |
+| `-e BIND_ADDR` | obrigatória fora de `GODMESH_ENV=dev`/`development` (exit 78 citando a variável) |
+
+O binário aplica as migrações na subida (`/migrations`, versionadas na imagem,
+idempotentes) antes de escutar. `--migrate-only` aplica e sai 0, para pipeline.
+
+Build de desenvolvimento (mesmo Dockerfile):
 
 ```bash
 docker build -f deploy/prod/Dockerfile -t godmesh-server:dev .
@@ -119,19 +153,44 @@ touch: cannot touch '/migrations/x': Read-only file system
 
 ### O que o `HEALTHCHECK` verifica — e o que não verifica
 
-`deploy/prod/healthcheck.sh` faz duas coisas:
+`deploy/prod/healthcheck.sh` faz duas coisas, com pesos diferentes:
 
 1. `GET /healthz` no **bind efetivo** (`BIND_ADDR`, espelhando a regra do binário),
-   exigindo `200` e `"status":"ok"`;
-2. **alcance TCP** do Postgres cujo host/porta vêm de `DATABASE_URL`.
+   exigindo `200` e `"status":"ok"`. **Autoritativo.** Desde 18/11/2026 o handler
+   consulta o pool (`SELECT 1`, timeout de 500 ms) e devolve `503
+   {"status":"unavailable","dependency":"postgres"}` sem banco — então `200`
+   prova consulta bem-sucedida, não apenas porta aberta.
+2. **Alcance TCP** do Postgres derivado de `DATABASE_URL`. **Diagnóstico
+   secundário**: registra no log se a porta está fechada e **não** reprova o
+   contêiner quando o `/healthz` já respondeu `200`.
 
-Limite declarado: o `/healthz` atual (`crates/godmesh-server/src/http.rs`) devolve
-JSON estático e **não consulta o pool**, então ele responde `200` com o banco caído.
-O item 2 é alcance TCP — prova porta aberta, não prova consulta bem-sucedida. O
-correto é `/healthz` devolver `503` quando o pool falhar; isso é dependência de
-`http.rs` e está registrado como pendência (não implementado aqui).
+Limites declarados: `/healthz` prova uma consulta ao pool, não a saúde de tabelas,
+réplica primária, disco ou outbox drenado; a checagem TCP não autentica nem
+consulta. Host unix-socket e IPv6 literal em `DATABASE_URL` pulam a checagem TCP
+com aviso. Evidência: `docs/09-equipe/evidencias/2026-11-18-container-final.md`.
 
-## Estado verificado em 18/11/2026 (build real)
+## Estado final do contêiner (18/11/2026)
+
+Imagem `godmesh-server:1.0.0` construída em `linux/arm64` (Docker 29.8.2,
+OrbStack), 18/11/2026 16:47Z–16:53Z, código `67e2a2c`. Evidência literal:
+`docs/09-equipe/evidencias/2026-11-18-container-final.md`.
+
+| Item | Estado |
+|---|---|
+| `docker build --no-cache` | **verificado**: 48 s, 157 crates, `--release --locked` |
+| Tamanho / digest | **155 MB** (`SizeBytes=154568871`), digest `sha256:6849b622a6fe7b135b189734d287f81515240360fa6fcd6749b980e60b2bb9b8` |
+| Bases | **verificado** na Docker Hub API em 18/11/2026: `rust:1.100-slim-bookworm` (1.100.0, 12/11) e `debian:trixie-slim` (13, 05/11), digests idênticos aos anteriores |
+| Runtime endurecido (`--read-only --cap-drop=ALL --no-new-privileges --user 10001:10001`) | **verificado**: sobe, serve, healthcheck `0` |
+| `/healthz` | **verificado**: 200 com banco; **503** com banco derrubado (consulta o pool) |
+| `HEALTHCHECK` | **verificado**: `healthy` com banco; `unhealthy` após 3 falhas com banco fora; volta a `healthy` ao restaurar |
+| Ciclo do incidente + `/v1/events` | **verificado** no contêiner: 201/200 |
+| Emitir → usar → revogar grant | **verificado**: 201 → 201 → 200 → **401** sem reiniciar |
+| `/metrics` | **verificado**: 200 com `admin:metrics`; 403 sem o escopo; 401 sem credencial |
+| Falta de `DATABASE_URL` / `GODMESH_GRANTS` | **verificado**: exit 78 com mensagem clara |
+| `SIGTERM` | **verificado**: 0,17 s, exit 0, log de drenagem |
+| `amd64`, registry, SBOM, assinatura, TLS, multi-réplica, limites de recurso | **não feito** |
+
+## Estado verificado em 18/11/2026 (build real anterior)
 
 Execução em 2026-11-18T13:14Z–13:20Z, code base `70f0a57`. Evidência literal:
 `docs/09-equipe/evidencias/2026-11-17-container-prod.md`, seção 6.
@@ -190,7 +249,7 @@ macOS arm64), 18/11/2026 13:47Z. Evidência literal completa:
 | `strip` | **verificado**: ELF sem `.symtab` e sem `.strtab` (parse dos section headers) |
 | Healthcheck com banco no ar | **verificado**: `healthy`, `Failing=0` |
 | Healthcheck com Postgres derrubado | **verificado**: `Failing` crescente → `unhealthy` após 3 falhas (retries=3, intervalo 30 s) |
-| `/healthz` com banco caído | **responde `200`** — lacuna conhecida, depende de `http.rs` |
+| `/healthz` com banco caído | **responde `200`** nesta imagem histórica (`gate-d`); corrigido depois — ver estado final acima |
 | `touch /migrations/x` | **verificado**: falha com `Read-only file system` sob `--read-only`, mesmo com `--user 0:0`; **sucede** só com `chmod a-w` (root) |
 | Servidor sob `--read-only --cap-drop=ALL --no-new-privileges --user 10001:10001` | **verificado**: healthcheck `0`, `/healthz` `200` |
 | Build `amd64` | **não feito** |
@@ -213,7 +272,9 @@ Regras que valem em produção:
    imagem só carrega os `.sql`; a etapa controlada de migração ainda não existe.
 5. **Publicação**: registry, assinatura/atestação e SBOM continuam fora de escopo até
    haver autorização para publicar.
-6. **`/healthz` não consulta o pool**: depende de mudança em
-   `crates/godmesh-server/src/http.rs` (devolver `503` quando o pool falhar). Enquanto
-   isso, o `HEALTHCHECK` só prova alcance TCP do Postgres. Detalhes em
-   `docs/09-equipe/evidencias/2026-11-18-gate-d-container.md`.
+6. ~~**`/healthz` não consulta o pool**~~ — **resolvido** (18/11/2026): o handler
+   faz `SELECT 1` com timeout de 500 ms e devolve `503` sem banco; o
+   `healthcheck.sh` exige `200` e usa a checagem TCP só como diagnóstico.
+   Evidência: `docs/09-equipe/evidencias/2026-11-18-container-final.md`.
+7. **Distribuição**: sem registry, SBOM, assinatura ou atestação; só `linux/arm64`
+   construído, sem `amd64`.
