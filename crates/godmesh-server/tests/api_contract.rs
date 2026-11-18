@@ -979,3 +979,44 @@ async fn capacidades_do_meta_refletem_o_processo() {
         "classe semeada não apareceu: {classes:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn contrato_publica_corpo_e_erros_das_decisoes_de_ingresso() {
+    let addr = serve_sem_banco().await;
+    let meta = meta(addr);
+    let doc = openapi(addr);
+    let errors = meta["errors"].as_array().unwrap();
+    let codes = [
+        "invalid_request",
+        "approval_signature_invalid",
+        "approver_not_authorized",
+        "approval_not_yet_valid",
+        "approval_expired",
+        "approval_epoch_regressed",
+        "no_authorized_approver",
+        "federation_governance_disabled",
+    ];
+    for (action, domain) in [
+        ("approve", "godmesh.federation.approval.v1"),
+        ("reject", "godmesh.federation.rejection.v1"),
+    ] {
+        let path = format!("/v1/federation/join-requests/{{join_request_id}}/{action}");
+        let op = &doc["paths"][path]["post"];
+        assert!(op["summary"].as_str().unwrap().contains(domain));
+        assert_eq!(
+            op["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ApprovalDecision"
+        );
+        let response_schema = &op["responses"]["200"]["content"]["application/json"]["schema"];
+        let alternatives = response_schema["oneOf"].as_array().expect("decisão e dry_run");
+        for name in ["JoinRequestView", "DryRunResponse"] {
+            let reference = format!("#/components/schemas/{name}");
+            assert!(alternatives.iter().any(|schema| schema["$ref"] == reference));
+        }
+        let response = &op["responses"]["422"];
+        for code in codes {
+            assert!(errors.iter().any(|e| e["error"] == code && e["http_status"] == 422));
+            assert!(response["description"].as_str().unwrap().contains(code), "{action}: {code}");
+        }
+    }
+}

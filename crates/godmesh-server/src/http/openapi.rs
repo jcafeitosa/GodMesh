@@ -33,7 +33,7 @@ use utoipa::openapi::path::{
     PathItemBuilder,
 };
 use utoipa::openapi::request_body::RequestBodyBuilder;
-use utoipa::openapi::schema::{ArrayBuilder, Object, ObjectBuilder, Type};
+use utoipa::openapi::schema::{ArrayBuilder, Object, ObjectBuilder, OneOfBuilder, Type};
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme};
 use utoipa::openapi::{
     Components, ComponentsBuilder, Content, ContentBuilder, InfoBuilder, OpenApi, OpenApiBuilder,
@@ -105,19 +105,22 @@ fn json_content(schema: Option<RefOr<SchemaValue>>, example: Option<serde_json::
     content.build()
 }
 
-fn error_response(code: &str) -> Response {
-    let spec = contract::error_by_code(code)
-        .unwrap_or_else(|| panic!("rota documenta código fora do catálogo: {code}"));
+fn error_response(status: u16, errors: &[&contract::ErrorSpec]) -> Response {
+    let description = errors
+        .iter()
+        .map(|spec| format!("`{}` — {}", spec.error, spec.when))
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let mut response = ResponseBuilder::new()
-        .description(format!("`{code}` — {}", spec.when))
+        .description(description)
         .content(
-        "application/json",
-        json_content(
-            Some(RefOr::Ref(Ref::from_schema_name("Error"))),
-            contract::error_example(code),
-        ),
-    );
-    if spec.http_status == 401 {
+            "application/json",
+            json_content(
+                Some(RefOr::Ref(Ref::from_schema_name("Error"))),
+                contract::error_example(errors[0].error),
+            ),
+        );
+    if status == 401 {
         response = response.header(
             "WWW-Authenticate",
             HeaderBuilder::new()
@@ -235,27 +238,36 @@ fn operation(spec: &RouteSpec) -> OperationBuilder {
     }
 
     let mut responses = ResponsesBuilder::new();
-    for (status, schema) in doc.success {
-        let media = match schema {
+    let dry_run_schema = || RefOr::Ref(Ref::from_schema_name("DryRunResponse"));
+    for (status, success_schema) in doc.success {
+        let media = match success_schema {
             Schema::Text(m) => *m,
             _ => "application/json",
         };
-        // Exemplo real do `/healthz` (o bloco `capacity` é parte do corpo e o
-        // teste de contrato compara o corpo real com as propriedades deste
-        // schema; exemplo ausente aqui seria documento mudo sobre o campo).
-        let example = match schema {
+        let example = match success_schema {
             Schema::Ref("HealthResponse") => Some(health_example(*status)),
             _ => None,
         };
+        let mut schema = schema_of(*success_schema);
+        let mut description = format!("HTTP {status} esperado por contrato");
+        if spec.destructive && *status == 200 && let Some(success) = schema {
+            schema = Some(RefOr::T(SchemaValue::OneOf(
+                OneOfBuilder::new()
+                    .item(success)
+                    .item(dry_run_schema())
+                    .build(),
+            )));
+            description.push_str(" na operação normal ou com `dry_run=true`");
+        }
         responses = responses.response(
             status.to_string(),
             ResponseBuilder::new()
-                .description(format!("HTTP {status} esperado por contrato"))
-                .content(media, json_content(schema_of(*schema), example))
+                .description(description)
+                .content(media, json_content(schema, example))
                 .build(),
         );
     }
-    if spec.destructive {
+    if spec.destructive && doc.success.iter().all(|(status, _)| *status != 200) {
         responses = responses.response(
             "200",
             ResponseBuilder::new()
@@ -263,7 +275,7 @@ fn operation(spec: &RouteSpec) -> OperationBuilder {
                 .content(
                     "application/json",
                     json_content(
-                        Some(RefOr::Ref(Ref::from_schema_name("DryRunResponse"))),
+                        Some(dry_run_schema()),
                         Some(serde_json::json!({
                             "would_do": [format!("POST {}", spec.path)],
                             "applied": false,
@@ -280,12 +292,14 @@ fn operation(spec: &RouteSpec) -> OperationBuilder {
             codes.push(code);
         }
     }
-    for code in codes.iter() {
-        let status = contract::error_by_code(code)
-            .unwrap_or_else(|| panic!("código documentado fora do catálogo: {code}"))
-            .http_status
-            .to_string();
-        responses = responses.response(status, error_response(code));
+    let mut by_status: BTreeMap<u16, Vec<&contract::ErrorSpec>> = BTreeMap::new();
+    for code in codes {
+        let error = contract::error_by_code(code)
+            .unwrap_or_else(|| panic!("código documentado fora do catálogo: {code}"));
+        by_status.entry(error.http_status).or_default().push(error);
+    }
+    for (status, errors) in by_status {
+        responses = responses.response(status.to_string(), error_response(status, &errors));
     }
     op = op.responses(responses.build());
 
