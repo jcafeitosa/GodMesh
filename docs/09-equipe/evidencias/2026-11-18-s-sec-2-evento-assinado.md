@@ -111,3 +111,13 @@ linha no banco: as recusas não escreveram.
   com a própria chave" está coberta pelo caminho de código `signed_event()` e
   pelos testes que a exercitam, **não** por um smoke do binário completo com a
   variável apontando para arquivo real.
+
+## Nota do CTO — integração no main (18/11/2026)
+
+Integrado em `8a75841` sobre `e369b62`. Verificação independente:
+
+- `cargo test --workspace`: **1 falha intermitente** vista em uma das execuções (`cursor_of_another_principal_is_400_cursor_invalid`), **não reproduzida** em duas execuções completas seguintes nem em 3 execuções isoladas do teste. Registro como flake a investigar, não como sucesso.
+- `cargo clippy --workspace --all-targets -- -D warnings`: 0.
+- `migrations/tests/run_all.sh`: OK — **50 invariantes** (44 + 6 da 0010), banco criado do zero.
+
+**Pendência herdada e aceita com registro:** `POST /v1/sync/inbox` ainda aceita posição sem envelope assinado — a regra dura fecha o ingest HTTP de eventos, não o Inbox. Fechar o Inbox é a fatia M4 e está anotada no modelo de ameaça §8.
