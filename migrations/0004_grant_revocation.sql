@@ -13,7 +13,7 @@
 -- Fail-closed: se esta consulta falhar, a requisição é negada (503
 -- `revocation_unavailable`), nunca aceita por omissão.
 
-BEGIN;
+-- Sem BEGIN/COMMIT: o runner é dono da transação (contrato de migrations).
 
 CREATE TABLE grant_revocation (
     -- Identificador público do grant (`GrantRecord.token_id`). É a mesma chave
@@ -33,5 +33,3 @@ COMMENT ON COLUMN grant_revocation.revoked_at IS
 
 COMMENT ON COLUMN grant_revocation.reason IS
     'Justificativa operacional obrigatória; vazia é recusada pelo CHECK.';
-
-COMMIT;
