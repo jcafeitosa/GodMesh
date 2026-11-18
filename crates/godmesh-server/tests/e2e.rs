@@ -850,6 +850,18 @@ async fn credencial_de_outro_tenant_nao_le_incidente_alheio() {
 
 // --- verificação 21 -----------------------------------------------------------
 
+/// Caminho de identidade de nó para o binário (`GODMESH_NODE_KEY`).
+///
+/// Desde a fatia de federação o binário exige identidade persistida para servir.
+/// Deixamos o caminho **inexistente** de propósito: o binário gera a chave com
+/// `O_EXCL` e modo 0600, que é o caminho de produção — criar o arquivo vazio aqui
+/// faria o carregador recusar ("esperados 32 bytes, obtidos 0").
+fn node_key_file() -> PathBuf {
+    let caminho = std::env::temp_dir().join(format!("godmesh-e2e-node-{}.key", std::process::id()));
+    let _ = std::fs::remove_file(&caminho);
+    caminho
+}
+
 /// Diretório de migrações do repositório, independente do `cwd` do `cargo test`.
 fn migrations_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -935,6 +947,7 @@ async fn binario_encerra_por_sigterm_com_codigo_zero() {
             .env("GODMESH_GRANTS", grants_json())
             .env("GODMESH_ENV", "dev")
             .env("BIND_ADDR", "127.0.0.1:0")
+            .env("GODMESH_NODE_KEY", node_key_file())
             .env("GODMESH_OUTBOX", "off")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -67,6 +67,13 @@ fn sa_url(base: &str) -> String {
     with_database(base, &sa_db())
 }
 
+/// Caminho de identidade de nó; deixado inexistente para o binário criar com 0600.
+fn caminho_chave_no() -> PathBuf {
+    let caminho = std::env::temp_dir().join(format!("godmesh-rt-node-{}.key", std::process::id()));
+    let _ = std::fs::remove_file(&caminho);
+    caminho
+}
+
 fn binario() -> &'static str {
     env!("CARGO_BIN_EXE_godmesh-server")
 }
@@ -558,6 +565,7 @@ async fn binario_encerra_por_sigterm_com_codigo_zero() {
         .env("DATABASE_URL", sa_url(&base))
         .env("GODMESH_MIGRATIONS_DIR", migrations_dir())
         .env("GODMESH_GRANTS", "{\"grants\":[]}")
+        .env("GODMESH_NODE_KEY", caminho_chave_no())
         .env("GODMESH_ENV", "dev")
         .env("BIND_ADDR", "127.0.0.1:0")
         .stdout(Stdio::piped())
