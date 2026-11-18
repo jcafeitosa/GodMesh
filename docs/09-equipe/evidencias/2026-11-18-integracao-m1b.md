@@ -37,3 +37,28 @@ O cliente terminou com código zero. Esta execução verifica transporte local, 
 Em `65136e6`, o cliente HTTP registrou a recusa do evento de B antes da aprovação e a recusa por falta de escopo após a aprovação. Com escopo concedido, observou `201` com `persisted_local`, `200` no replay, uma única posição durável e `409 sequence_gap` para salto de sequência. B aprovou C e os esquemas de aprovação e evento apareceram no OpenAPI. A repetição do teste QUIC com três servidores verificou assinatura de aprovação no retorno de cada servidor e os mesmos estados de enlace da tabela anterior.
 
 A suíte padrão do workspace passou com 467 testes, zero falhas e 1 ignorado. O caso ignorado passou quando executado isoladamente em outro banco descartável. O Clippy saiu com código zero e o script de migrações passou com 57 invariantes. O candidato ficou no worktree para correção dos dois pontos de revisão da v1.3.
+
+## Aceite local da v1.3
+
+Em 18/11/2026, o crítico independente aprovou o código em `e060b4e04bd331abb706d36cc8d9d49f2bcc593a`. O parecer conferiu a associação entre a SPEC v1.3 e o candidato, o piso por aprovador, rollback, replay, expiração UTC exata e compatibilidade das migrações. A `main` local foi avançada até esse commit após os testes.
+
+| Verificação em PostgreSQL 16.15 descartável | Resultado observado |
+|---|---|
+| `cargo test --workspace --locked`, paralelismo padrão com as duas variáveis de banco no mesmo ambiente | 470 aprovados, 0 falhas, 1 ignorado pela suíte |
+| `cargo test --locked -p godmesh-server --test retention_policy_missing -- --ignored`, banco isolado | 1 aprovado |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | Código de saída 0 |
+| `bash migrations/tests/run_all.sh` | 57 invariantes. 0009, 0010 e 0011 aplicadas em ordem. |
+| `git diff --check` e comparação dos arquivos SQL e Cargo | Diff limpo. 0009 e 0010 idênticas às origens. Cargo.toml e Cargo.lock idênticos à base. |
+| Ingresso e ingest assinados com cliente Python independente | Nó pendente recusado. A aprova B, o servidor persiste a assinatura, B publica após receber escopo, o replay mantém uma posição e B aprova C. Contratos de aprovação e evento conferidos no OpenAPI. |
+| Transporte QUIC/mTLS com três instâncias e aprovações assinadas obtidas pela API de cada uma | C permaneceu `unknown` até autorização. Todos os enlaces foram a `ready`. Os enlaces de A e C com B passaram a `unknown` após a parada de B, AC e CA seguiram prontos e os seis voltaram a `ready` após o reinício de B. |
+
+O teste do piso confirmou que a rejeição também eleva o epoch aceito para decisões futuras. O teste de validade comparou sem arredondamento a expiração armazenada no banco e a retornada na API. Ambos mantiveram o último segundo persistível, e o segundo seguinte retornou `422 invalid_request` sem efeito. A correção da fixture compartilhada passou em dez rodadas paralelas de `events` e na suíte integrada padrão.
+
+Arquivos de código e migração integrados:
+
+- `crates/godmesh-federation/src/{approval,genesis,lib,manifest}.rs`
+- `crates/godmesh-server/src/{api,events,federation,inbox,main}.rs` e `crates/godmesh-server/src/http/{contract,federation,mod,openapi}.rs`
+- `crates/godmesh-server/tests/{api_contract,event_signature,federation,runtime}.rs` e `crates/godmesh-server/tests/common/mod.rs`
+- `migrations/0009_federation_approval.sql`, `migrations/0011_federation_decision_epoch.sql`, `migrations/tests/0009_invariants.sql`, `migrations/tests/run_all.sh` e `deploy/README.md`
+
+O aceite é local, com aprovação em cada servidor. Para o aceite de ponta a ponta ainda faltam a [cadeia portátil de ingresso e revogação](../../08-specs/federacao/m1c-cadeia-confianca.md), a configuração assinada, a replicação escopada e o ensaio em hosts independentes.
