@@ -1,6 +1,6 @@
 # Rede-alvo — desenho do CTO (proposta, não normativa)
 
-> **Status:** proposta de arquitetura de rede para discussão. Não substitui a [arquitetura de referência](../01-arquitetura/arquitetura-referencia.md) nem as ADRs; alterações normativas exigem ADR própria.
+> **Status:** **direção aprovada pelo usuário em 18/11/2026** (ADR-072) como alvo de arquitetura de rede. Cada item continua exigindo ADR própria antes de virar norma; este documento é o mapa, não a norma.
 > **Pergunta que responde:** como eu desenharia a rede se pudesse escolher tudo do zero, dado o que o GodMesh precisa fazer.
 
 ## 1. O que "perfeita" significa aqui

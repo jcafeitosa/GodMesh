@@ -317,3 +317,12 @@ Decisão do usuário: "shadcn fica". Regras para não virar dois sistemas:
 
 **Efeito na implementação:** a rota de aprovação deixa de aceitar apenas o escopo `federation:admin` e passa a exigir **identidade de nó autorizado + assinatura de aprovação**; o escopo humano permanece como autorização secundária para o operador que dispara a operação. A fatia M1 implementa o registro; a verificação por assinatura de nó entra em M1b.
 
+## ADR-072 — Adoção da rede-alvo de cinco planos
+
+| Campo | Conteúdo |
+|---|---|
+| **Status** | Aprovada pelo usuário em 18/11/2026 ("vamos seguir com esse desenho") |
+| **Contexto** | O desenho de rede do CTO ([rede-alvo](../../docs/09-equipe/rede-alvo-cto.md)) organiza entrada, controle, dados, mídia e borda em planos separados, com dez invariantes testáveis e ordem de implementação explícita. |
+| **Decisão** | Adotar o documento como **alvo de arquitetura de rede**. Ordem de implementação vinculante: identidade de nó → ingresso assinado → transporte QUIC/mTLS → sync escopado entre nós → mídia → borda. Cada mudança normativa derivada (topologia, SLO, residência, relay) exige ADR própria; o mapa não substitui a arquitetura de referência. |
+| **Consequências** | Fatias de federação passam a ser avaliadas contra os invariantes do §2 do documento (mídia fora do event bus, ingresso assinado, `unknown` não promovido, fencing no efetor etc.). Nenhuma fatia pode declarar "malha pronta" sem prova de nó não autorizado ficando isolado. |
+| **Verificação** | Cada invariante precisa de teste automatizado ou consulta SQL que o comprove; o mapa é considerado cumprido apenas quando os dez invariantes tiverem evidência registrada. |

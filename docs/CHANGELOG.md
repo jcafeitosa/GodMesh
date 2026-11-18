@@ -1,5 +1,10 @@
 # Histórico da documentação
 
+## Rede-alvo aprovada — 18/11/2026
+- ADR-072 adota o desenho de cinco planos (entrada, controle, dados, mídia, borda) como alvo de arquitetura de rede, com dez invariantes testáveis e ordem de implementação: identidade → ingresso assinado → transporte → sync escopado → mídia → borda.
+- Documento: `docs/09-equipe/rede-alvo-cto.md` promovido de proposta a direção aprovada; itens normativos derivados continuam exigindo ADR própria.
+- Emenda à ADR-071: quem autoriza um nó é nó já autorizado, com aprovação assinada, cadeia verificável, revogação com epoch e bootstrap por genesis declarado.
+
 ## Outbox publicador durável — 18/11/2026
 - Migração `0003_outbox_publisher.sql`: `outbox_entry.attempts` (contador de falhas do efeito), `CHECK outbox_entry_confirmed_requires_published` (confirmação sem publicação é impossível no banco), índice parcial de pendências e a tabela de **teste** `outbox_sink` (não é integração externa).
 - `godmesh-sync::pg_outbox` implementa o contrato da ADR-061 sobre a tabela: append transacional com lock de grupo, reivindicação de publicação atômica (`FOR UPDATE SKIP LOCKED` + `UPDATE … RETURNING`), confirmação só após publicação e só na ordem do prefixo, contagem de tentativas e leitura de pendências que para na primeira sequência ausente.
