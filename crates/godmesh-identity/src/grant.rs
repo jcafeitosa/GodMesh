@@ -5,6 +5,8 @@
 
 /// Operação solicitada sob grant offline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum OfflineOp {
     OpenSosIncident,
     GuardianCheckIn,
@@ -29,6 +31,8 @@ impl OfflineOp {
 
 /// Fonte de frescor disponível no dispositivo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum FreshnessSource {
     /// Sem fonte confiável: nenhuma operação condicional é autorizada.
     None,
@@ -42,6 +46,8 @@ pub enum FreshnessSource {
 
 /// Estado de revogação conhecido no momento da decisão.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum RevocationState {
     /// Evidência positiva de que não há revogação para o escopo e instante.
     Absent,
@@ -64,6 +70,8 @@ pub struct GrantPredicate {
 
 /// Resultado do predicado.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum GrantDecision {
     Allow,
     DenyNeverOffline,

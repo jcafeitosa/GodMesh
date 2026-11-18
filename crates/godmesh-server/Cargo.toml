@@ -1,0 +1,26 @@
+[package]
+name = "godmesh-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+godmesh-core = { path = "../godmesh-core" }
+godmesh-emergency = { path = "../godmesh-emergency" }
+godmesh-identity = { path = "../godmesh-identity", features = ["serde"] }
+godmesh-policy = { path = "../godmesh-policy" }
+godmesh-protocol = { path = "../godmesh-protocol" }
+
+axum = "0.8.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+
+[[bin]]
+name = "godmesh-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
