@@ -1,0 +1,15 @@
+# Contexto de build do servidor: só o necessário para o workspace Cargo.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!migrations/
+!deploy/prod/Dockerfile
+target/
+**/target/
+.git/
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
