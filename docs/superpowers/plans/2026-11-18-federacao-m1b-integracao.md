@@ -20,6 +20,7 @@
 
 - [ ] Em `tests/federation.rs` e `src/main.rs`, fixar a configuração explícita do cluster sem votantes, desabilitada por padrão, e os erros de configuração e HTTP. Manter o corpo e domínio de aprovação e vincular a rejeição ao domínio próprio em `godmesh-federation/src/approval.rs`.
 - [ ] Fixar em teste que replay de aprovação mantém o registro e a configuração do par e que uma falha transacional permite retomar. Serializar por identidade do aprovador até o commit em `src/federation.rs`.
+- [ ] Provar o piso de epoch após aprovação e rejeição e o limite exato de `timestamptz` antes de implementar a v1.3. Criar `0011_federation_decision_epoch.sql` para inicializar e proteger o piso durável. Conferir transição e dados de prova sob o mesmo commit.
 
 ## 4. Serializar ingest e Inbox
 
