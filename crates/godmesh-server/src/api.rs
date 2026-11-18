@@ -95,9 +95,19 @@ pub async fn create_incident(pool: &PgPool, payload: IncidentPayload) -> Result<
 
     // A classe de ACK vem do domínio, não de string local: `persist` é a transição
     // que autoriza alegar `persisted_local` (ADR-058).
+    // O instante do ACK é real (relógio do host) e nunca zero: `sos_ack.at_unix`
+    // é `NOT NULL` e um ACK sem instante não é evidência.
+    let at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| ApiError::Invariant(IncidentError::MissingTimestamp))?
+        .as_secs();
     let mut incident = Incident::triggered(&payload.incident_id, &payload.tenant_id, &payload.principal);
     incident
-        .persist(&format!("inbox:{}", payload.tenant_id), incident.retention_class())
+        .persist(
+            &format!("inbox:{}", payload.tenant_id),
+            incident.retention_class(),
+            at_unix,
+        )
         .map_err(ApiError::Invariant)?;
 
     let mut tx = pool.begin().await.map_err(ApiError::Storage)?;

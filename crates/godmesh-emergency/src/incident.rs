@@ -3,6 +3,12 @@
 //!
 //! Invariante central: o rótulo exibido ao usuário é derivado do estado, nunca da
 //! intenção. Sem persistência não existe "acionado".
+//!
+//! A trilha de ACK é append-only no estado: nenhuma transição sai de
+//! `NotPersisted`, `OutcomeUnknown` ou `Closed` para uma etapa anterior. As
+//! transições que declaram falha (`fail_persistence`) e resultado desconhecido
+//! (`mark_outcome_unknown`) também devolvem `Result`, porque uma falha contábil
+//! nunca justifica reescrever um estado que já tem evidência.
 
 /// Estado do incidente SOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,10 +38,17 @@ impl IncidentState {
         match self {
             Self::TriggeredLocally => "transport_accepted",
             Self::PersistedLocal => "persisted_local",
-            Self::ReplicatedToAuthority | Self::OutcomeUnknown => "replicated_to_authority",
+            Self::ReplicatedToAuthority => "replicated_to_authority",
+            // `OutcomeUnknown` é envio sem recibo: a autoridade não provou
+            // replicação, então a classe não pode ser `replicated_to_authority`.
+            // `transport_accepted` existe no CHECK de `sos_ack` (migrations/0001_core.sql)
+            // e não promete nada além do transporte. O estado não retém qual
+            // prova existia antes (só `NotPersisted` ou `ReplicatedToAuthority`
+            // o alcançam), então a classe fica no piso honesto; as classes
+            // anteriores continuam na trilha de `acks()`.
+            Self::OutcomeUnknown | Self::NotPersisted => "transport_accepted",
             Self::AcknowledgedTechnical => "materialized",
             Self::AcknowledgedHuman | Self::Closed => "acknowledged_human",
-            Self::NotPersisted => "transport_accepted",
         }
     }
 
@@ -138,28 +151,54 @@ impl Incident {
         }
     }
 
+    /// Persiste o registro mínimo local e grava o instante real do ACK.
+    ///
+    /// `at_unix` é o instante em que a escrita durável foi aceita: `0` é ausência
+    /// de instante, não meia-noite de 1970, e é recusado.
+    ///
     /// # Errors
-    /// `IllegalTransition` fora do estado permitido; `EmptyField` sem referência.
-    pub fn persist(&mut self, inbox_ref: &str, retention_policy: &str) -> Result<(), IncidentError> {
+    /// `IllegalTransition` fora de `TriggeredLocally`; `EmptyField` sem referência;
+    /// `MissingTimestamp` quando `at_unix` é `0`.
+    pub fn persist(
+        &mut self,
+        inbox_ref: &str,
+        retention_policy: &str,
+        at_unix: u64,
+    ) -> Result<(), IncidentError> {
         if self.state != IncidentState::TriggeredLocally {
             return Err(IncidentError::IllegalTransition);
         }
         if inbox_ref.is_empty() || retention_policy.is_empty() {
             return Err(IncidentError::EmptyField);
         }
+        if at_unix == 0 {
+            return Err(IncidentError::MissingTimestamp);
+        }
         self.state = IncidentState::PersistedLocal;
         self.acks.push(Acknowledgement {
             class: "persisted_local",
             source: inbox_ref.to_owned(),
-            at_unix: 0,
+            at_unix,
         });
         Ok(())
     }
 
-    /// Registra a falha de persistência; o pedido passa a não existir.
-    pub fn fail_persistence(&mut self, reason: &str) {
+    /// Registra a falha de persistência: o pedido passa a não existir.
+    ///
+    /// Só é verdade a partir de `TriggeredLocally`. Um incidente que já tem ACK
+    /// persistido não pode ser reapresentado como "não salvo": o estado anterior é
+    /// evidência e a trilha é append-only.
+    ///
+    /// # Errors
+    /// `IllegalTransition` em qualquer estado com evidência; o estado não muda e
+    /// nenhum ACK é criado.
+    pub fn fail_persistence(&mut self, reason: &str) -> Result<(), IncidentError> {
+        if self.state != IncidentState::TriggeredLocally {
+            return Err(IncidentError::IllegalTransition);
+        }
         self.state = IncidentState::NotPersisted;
         self.reason = Some(reason.to_owned());
+        Ok(())
     }
 
     /// # Errors
@@ -211,9 +250,25 @@ impl Incident {
     }
 
     /// Envio sem confirmação. Não promove a classe de ACK.
-    pub fn mark_outcome_unknown(&mut self, reason: &str) {
+    ///
+    /// Exige uma tentativa de envio real: só a partir de `PersistedLocal` ou
+    /// `ReplicatedToAuthority`. `TriggeredLocally` nada enviou, e `Closed` /
+    /// `Acknowledged*` já têm evidência de chegada — nenhum deles pode virar
+    /// "resultado desconhecido".
+    ///
+    /// # Errors
+    /// `IllegalTransition` fora de `PersistedLocal`/`ReplicatedToAuthority`; o
+    /// estado não muda.
+    pub fn mark_outcome_unknown(&mut self, reason: &str) -> Result<(), IncidentError> {
+        if !matches!(
+            self.state,
+            IncidentState::PersistedLocal | IncidentState::ReplicatedToAuthority
+        ) {
+            return Err(IncidentError::IllegalTransition);
+        }
         self.state = IncidentState::OutcomeUnknown;
         self.reason = Some(reason.to_owned());
+        Ok(())
     }
 
     /// # Errors
@@ -273,4 +328,5 @@ pub enum IncidentError {
     IllegalTransition,
     MissingHumanProof,
     EmptyField,
+    MissingTimestamp,
 }

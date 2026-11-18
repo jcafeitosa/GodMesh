@@ -56,7 +56,7 @@ fn persist_requires_retention_class_and_marks_not_persisted_when_missing() {
     let inc = core_estreito.open_incident(&grant_valido(), "inc-4", "tenant-1", "principal-42").unwrap();
     let id = inc.id().to_owned();
 
-    let r = core_estreito.persist_incident(&id, "inbox:tenant-1:3-7-1");
+    let r = core_estreito.persist_incident(&id, "inbox:tenant-1:3-7-1", 1_700_000_100);
     assert!(r.is_err(), "classe sem política não persiste");
     assert_eq!(core_estreito.incident(&id).unwrap().state(), IncidentState::NotPersisted);
 }
@@ -66,7 +66,7 @@ fn ack_class_round_trips_between_emergency_and_protocol() {
     let mut core = Core::new(tabela());
     let inc = core.open_incident(&grant_valido(), "inc-5", "tenant-1", "principal-42").unwrap();
     let id = inc.id().to_owned();
-    core.persist_incident(&id, "inbox:tenant-1:3-7-2").unwrap();
+    core.persist_incident(&id, "inbox:tenant-1:3-7-2", 1_700_000_101).unwrap();
 
     let classe = core.incident_ack_class(&id).unwrap();
     assert_eq!(classe, AckClass::PersistedLocal);
@@ -78,7 +78,7 @@ fn human_ack_requires_technical_stage_across_crates() {
     let mut core = Core::new(tabela());
     let inc = core.open_incident(&grant_valido(), "inc-6", "tenant-1", "principal-42").unwrap();
     let id = inc.id().to_owned();
-    core.persist_incident(&id, "inbox:tenant-1:3-7-3").unwrap();
+    core.persist_incident(&id, "inbox:tenant-1:3-7-3", 1_700_000_102).unwrap();
 
     let tentativa = core.acknowledge_human(&id, HumanProof::person("resp-9", 1_700_000_000));
     assert!(tentativa.is_err(), "sem etapa técnica não há ACK humano");

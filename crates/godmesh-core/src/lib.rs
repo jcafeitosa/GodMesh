@@ -51,20 +51,31 @@ impl Core {
         Ok(incident)
     }
 
+    /// `at_unix` é o instante real da escrita durável; o núcleo não inventa relógio.
+    ///
     /// # Errors
-    /// `NotFound`; `Retention` quando a classe do incidente não tem política.
-    pub fn persist_incident(&mut self, id: &str, inbox_ref: &str) -> Result<(), CoreError> {
+    /// `NotFound`; `Retention` quando a classe do incidente não tem política;
+    /// `Incident` para transição ilegal ou instante ausente.
+    pub fn persist_incident(
+        &mut self,
+        id: &str,
+        inbox_ref: &str,
+        at_unix: u64,
+    ) -> Result<(), CoreError> {
         let policy_ref = match self.retention.get("incidente_sos") {
             Ok(policy) => format!("policy:{}m", policy.months()),
             Err(e) => {
                 if let Some(inc) = self.incidents.get_mut(id) {
-                    inc.fail_persistence("retention_policy_missing");
+                    // Só um incidente sem evidência pode passar a "não salvo". Se já
+                    // havia ACK persistido, `fail_persistence` recusa e o estado
+                    // verdadeiro permanece — a trilha não regride.
+                    inc.fail_persistence("retention_policy_missing").ok();
                 }
                 return Err(CoreError::Retention(e));
             }
         };
         let inc = self.incidents.get_mut(id).ok_or(CoreError::NotFound)?;
-        inc.persist(inbox_ref, &policy_ref).map_err(CoreError::Incident)
+        inc.persist(inbox_ref, &policy_ref, at_unix).map_err(CoreError::Incident)
     }
 
     /// # Errors
