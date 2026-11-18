@@ -527,6 +527,14 @@ async fn verify_approval_certificate(
         )));
     }
 
+    // Limites inclusivos de timestamptz do PostgreSQL 16, em segundos Unix.
+    const MIN_EXPIRY: i64 = -210_866_803_200;
+    const MAX_EXPIRY: i64 = 9_224_318_015_999;
+    if !(MIN_EXPIRY..=MAX_EXPIRY).contains(&certificate.expires_at) {
+        return Err(ApiError::InvalidRequest(
+            "expires_at fora da faixa de timestamptz".to_owned(),
+        ));
+    }
     let now = clock();
     if let Err(e) = certificate.check_validity(now) {
         return Err(match e {
@@ -558,18 +566,15 @@ async fn verify_approval_certificate(
         )));
     }
 
-    // Piso anti-rollback: a maior geração que este nó já assinou. Igual vale
-    // (repetir a mesma decisão é idempotente); menor é decisão velha tentando
-    // reescrever o presente. `max()` sobre zero linhas devolve uma linha com
-    // NULL: `Option<i64>` é o tipo certo, e `None` significa "este nó ainda não
-    // assinou decisão nenhuma".
     let epoch = i64::try_from(certificate.epoch)
         .map_err(|_| ApiError::InvalidRequest("epoch de decisão excede bigint".to_owned()))?;
-    let recorded = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT max(approval_epoch) FROM federation_join_request WHERE approved_by_node = $1",
+    // O advisory lock do aprovador também protege a ausência de uma linha.
+    let recorded: Option<i64> = sqlx::query_scalar(
+        "SELECT decision_epoch FROM federation_decision_epoch
+          WHERE approver_node_id = $1 FOR UPDATE",
     )
     .bind(&certificate.node_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
     if let Some(recorded) = recorded
         && epoch < recorded
@@ -581,6 +586,25 @@ async fn verify_approval_certificate(
     }
 
     Ok((now, epoch))
+}
+
+async fn advance_decision_epoch(
+    tx: &mut sqlx::PgConnection,
+    approver_node_id: &str,
+    epoch: i64,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO federation_decision_epoch (approver_node_id, decision_epoch)
+         VALUES ($1, $2)
+         ON CONFLICT (approver_node_id) DO UPDATE
+           SET decision_epoch = EXCLUDED.decision_epoch
+         WHERE federation_decision_epoch.decision_epoch < EXCLUDED.decision_epoch",
+    )
+    .bind(approver_node_id)
+    .bind(epoch)
+    .execute(tx)
+    .await?;
+    Ok(())
 }
 
 macro_rules! peer_query {
@@ -722,6 +746,9 @@ pub async fn approve_join_request(
     .execute(&mut *tx)
     .await?;
 
+    advance_decision_epoch(&mut tx, &certificate.node_id, approval_epoch).await?;
+    // Dias inteiros e segundos residuais evitam converter o instante inteiro
+    // em microssegundos via ponto flutuante. UTC independe da sessão.
     sqlx::query(
         "UPDATE federation_join_request
             SET state = 'approved',
@@ -730,7 +757,10 @@ pub async fn approve_join_request(
                 approved_by_node = $4,
                 approval_signature = $5,
                 approval_epoch = $6,
-                approval_expires_at = to_timestamp($7::double precision)
+                approval_expires_at =
+                    (date '1970-01-01' + ($7::bigint / 86400)::integer
+                     + make_interval(secs => ($7::bigint % 86400)::double precision))
+                    AT TIME ZONE 'UTC'
           WHERE join_request_id = $1 AND state = 'pending'",
     )
     .bind(join_request_id)
@@ -739,7 +769,7 @@ pub async fn approve_join_request(
     .bind(&certificate.node_id)
     .bind(&certificate.signature)
     .bind(approval_epoch)
-    .bind(certificate.expires_at as f64)
+    .bind(certificate.expires_at)
     .execute(&mut *tx)
     .await?;
 
@@ -786,7 +816,7 @@ pub async fn reject_join_request(
 
     config.require_enabled(&request.manifest.cluster)?;
     lock_decision_node(&mut tx, &certificate.node_id).await?;
-    verify_approval_certificate(
+    let (_, decision_epoch) = verify_approval_certificate(
         &mut tx,
         &config.genesis,
         &request,
@@ -802,6 +832,7 @@ pub async fn reject_join_request(
         });
     }
 
+    advance_decision_epoch(&mut tx, &certificate.node_id, decision_epoch).await?;
     sqlx::query(
         "UPDATE federation_join_request SET state = 'rejected' \
           WHERE join_request_id = $1 AND state = 'pending'",

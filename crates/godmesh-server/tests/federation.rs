@@ -1688,8 +1688,11 @@ async fn falha_de_persistencia_reverte_par_e_permite_repetir_decisao() {
     );
     assert_eq!(stored_approval(&pool, id).await, (None, None, None, None));
 
+    assert_eq!(decision_floor(&pool, &approver).await, None);
+
     let retry = approve_with(&server, id, &cert);
     assert_eq!(retry.status, 200, "{}", retry.body);
+    assert_eq!(decision_floor(&pool, &approver).await, Some(1));
     assert_eq!(retry.json()["approval_signature"], cert.signature);
     assert_eq!(
         peer_state(&pool, candidate.identity.node_id())
@@ -1738,4 +1741,164 @@ async fn epoch_bigint_preserva_limite_e_recusa_valor_fora_da_faixa() {
     assert_eq!(response.status, 422, "{}", response.body);
     assert_eq!(response.json()["error"], "invalid_request");
     assert_eq!(stored_approval(&pool, id).await, before);
+}
+
+async fn decision_floor(pool: &PgPool, approver: &Node) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT decision_epoch FROM federation_decision_epoch WHERE approver_node_id = $1",
+    )
+    .bind(approver.identity.node_id())
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejeicao_atualiza_piso_duravel_e_replays_preservam_o_piso() {
+    let Some(env) = env().await else { return };
+    let pool = pool(env).await;
+    let approver = genesis_approver("piso-rejeicao");
+    let candidate = node_with_key("piso-rejeicao-candidato");
+    let server = serve_with_genesis(pool.clone(), genesis_of(&[&approver])).await;
+    let rejected = join_pending(&server, &candidate, 1);
+    let rejected_id = rejected["join_request_id"].as_str().unwrap();
+    let mut rejection = fresh_certificate(&approver, &rejected);
+    rejection.epoch = 7;
+    rejection.sign_for(&approver.identity, DecisionAction::Reject);
+    let response = reject_with(&server, rejected_id, &rejection);
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.json()["state"], "rejected");
+    assert_eq!(
+        stored_approval(&pool, rejected_id).await,
+        (None, None, None, None)
+    );
+    assert!(
+        peer_state(&pool, candidate.identity.node_id())
+            .await
+            .is_none()
+    );
+    assert_eq!(decision_floor(&pool, &approver).await, Some(7));
+
+    let pending = join_pending(&server, &candidate, 2);
+    let id = pending["join_request_id"].as_str().unwrap();
+    let mut approval = fresh_certificate(&approver, &pending);
+    approval.epoch = 6;
+    approval.sign(&approver.identity);
+    let mut another_rejection = approval.clone();
+    another_rejection.sign_for(&approver.identity, DecisionAction::Reject);
+    for response in [
+        approve_with(&server, id, &approval),
+        reject_with(&server, id, &another_rejection),
+    ] {
+        assert_eq!(response.status, 422, "{}", response.body);
+        assert_eq!(response.json()["error"], "approval_epoch_regressed");
+        assert_eq!(response.json()["recorded"], 7);
+    }
+    assert_eq!(stored_approval(&pool, id).await, (None, None, None, None));
+    assert!(
+        peer_state(&pool, candidate.identity.node_id())
+            .await
+            .is_none()
+    );
+    assert_eq!(decision_floor(&pool, &approver).await, Some(7));
+
+    rejection.epoch = 8;
+    rejection.sign_for(&approver.identity, DecisionAction::Reject);
+    let response = reject_with(&server, rejected_id, &rejection);
+    assert_eq!(response.status, 409, "{}", response.body);
+    assert_eq!(response.json()["error"], "join_request_state_conflict");
+    assert_eq!(decision_floor(&pool, &approver).await, Some(7));
+
+    approval.epoch = 7;
+    approval.sign(&approver.identity);
+    let response = approve_with(&server, id, &approval);
+    assert_eq!(response.status, 200, "{}", response.body);
+
+    approval.epoch = 9;
+    approval.sign(&approver.identity);
+    let replay = approve_with(&server, id, &approval);
+    assert_eq!(replay.status, 200, "{}", replay.body);
+    assert_eq!(replay.json(), response.json());
+    assert_eq!(decision_floor(&pool, &approver).await, Some(7));
+
+    let next = join_pending(&server, &candidate, 3);
+    let id = next["join_request_id"].as_str().unwrap();
+    let mut approval = fresh_certificate(&approver, &next);
+    approval.epoch = 8;
+    approval.sign(&approver.identity);
+    let response = approve_with(&server, id, &approval);
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(decision_floor(&pool, &approver).await, Some(8));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expiracao_persiste_o_ultimo_segundo_utc_exato() {
+    let Some(env) = env().await else { return };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET TIME ZONE 'America/Sao_Paulo'")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&env.url)
+        .await
+        .unwrap();
+    let approver = genesis_approver("expiracao-limite");
+    let candidate = node_with_key("expiracao-limite-candidato");
+    let server = serve_with_genesis(pool.clone(), genesis_of(&[&approver])).await;
+    let pending = join_pending(&server, &candidate, 1);
+    let id = pending["join_request_id"].as_str().unwrap();
+    let last_second = 9_224_318_015_999_i64;
+    let mut cert = fresh_certificate(&approver, &pending);
+
+    cert.expires_at = last_second;
+    cert.sign(&approver.identity);
+    let approved = approve_with(&server, id, &cert);
+    assert_eq!(approved.status, 200, "{}", approved.body);
+    assert_eq!(approved.json()["approval_expires_at"], last_second);
+    let exact: bool = sqlx::query_scalar(
+        "SELECT extract(epoch FROM approval_expires_at) = $2::bigint
+           FROM federation_join_request WHERE join_request_id = $1",
+    )
+    .bind(id)
+    .bind(last_second)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        exact,
+        "a expiração no banco deve coincidir exatamente com o segundo assinado"
+    );
+
+    let pending = join_pending(&server, &candidate, 2);
+    let id = pending["join_request_id"].as_str().unwrap();
+    let mut cert = fresh_certificate(&approver, &pending);
+    cert.epoch = 9;
+    cert.expires_at = last_second + 1;
+    cert.sign(&approver.identity);
+    let response = approve_with(&server, id, &cert);
+    assert_eq!(response.status, 422, "{}", response.body);
+    assert_eq!(response.json()["error"], "invalid_request");
+    cert.sign_for(&approver.identity, DecisionAction::Reject);
+    let response = reject_with(&server, id, &cert);
+    assert_eq!(response.status, 422, "{}", response.body);
+    assert_eq!(response.json()["error"], "invalid_request");
+    assert_eq!(stored_approval(&pool, id).await, (None, None, None, None));
+    let first_second = -210_866_803_200_i64;
+    cert.not_before = first_second - 2;
+    for (expires_at, code) in [
+        (first_second - 1, "invalid_request"),
+        (first_second, "approval_expired"),
+    ] {
+        cert.expires_at = expires_at;
+        cert.sign(&approver.identity);
+        let response = approve_with(&server, id, &cert);
+        assert_eq!(response.status, 422, "{}", response.body);
+        assert_eq!(response.json()["error"], code);
+    }
+    assert_eq!(decision_floor(&pool, &approver).await, Some(1));
 }
