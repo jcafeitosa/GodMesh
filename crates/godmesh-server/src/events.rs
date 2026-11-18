@@ -204,11 +204,6 @@ pub async fn create_event(
         denied => return Err(ApiError::GrantDenied(denied)),
     }
 
-    // --- fronteira de assinatura -------------------------------------------------
-    // Nada daqui abaixo abre transação de escrita antes que o envelope esteja
-    // provado. Cada recusa devolve 422 nomeado e não deixa rastro em
-    // `event_position`.
-
     event
         .validate_fields()
         .map_err(|e| ApiError::InvalidRequest(e.to_string()))?;
@@ -237,16 +232,27 @@ pub async fn create_event(
     let seq = i64::try_from(position.seq())
         .map_err(|_| ApiError::InvalidRequest("seq fora do intervalo".to_owned()))?;
 
+    let tenant_id = &grant.subject.tenant_id;
+    let mut tx = begin_event_write(
+        pool,
+        &event.position.origin_node,
+        tenant_id,
+        &event.position.stream_id,
+        partition,
+    )
+    .await?;
+
     // A chave que verifica a assinatura vem **só** do registro de pares aprovado
     // por ingresso (migração 0008). O envelope não carrega `public_key`: trazê-
     // la no corpo abriria um canal de troca de identidade que a assinatura não
     // fecha — quem apresenta a chave decidiria quem é.
-    let peer: Option<(String, String)> =
-        sqlx::query_as("SELECT public_key, trust_state FROM federation_peer WHERE node_id = $1")
-            .bind(&event.node_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(ApiError::Storage)?;
+    let peer: Option<(String, String)> = sqlx::query_as(
+        "SELECT public_key, trust_state FROM federation_peer WHERE node_id = $1 FOR SHARE",
+    )
+    .bind(&event.node_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(ApiError::Storage)?;
     let Some((public_key, trust_state)) = peer else {
         return Err(ApiError::EventNodeUnauthorized(format!(
             "nó {} não tem chave registrada na federação",
@@ -269,7 +275,6 @@ pub async fn create_event(
     // Tenancy: o tenant assinado no envelope é conferido contra o grant.
     // Assinatura de nó autorizado não amplia tenancy, e grant não escolhe
     // origem. Qualquer um dos dois mentindo é negativa de escopo.
-    let tenant_id = &grant.subject.tenant_id;
     if &event.tenant_id != tenant_id {
         return Err(ApiError::EventScopeDenied(
             "tenant_id assinado no envelope não é o tenant autenticado pelo grant".to_owned(),
@@ -278,12 +283,12 @@ pub async fn create_event(
 
     let scoped: Option<String> = sqlx::query_scalar(
         "SELECT stream_id FROM federation_peer_scope \
-          WHERE node_id = $1 AND tenant_id = $2 AND stream_id = $3",
+          WHERE node_id = $1 AND tenant_id = $2 AND stream_id = $3 FOR SHARE",
     )
     .bind(&event.node_id)
     .bind(tenant_id)
     .bind(&event.position.stream_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(ApiError::Storage)?;
     if scoped.is_none() {
@@ -308,10 +313,6 @@ pub async fn create_event(
             other => other.to_string(),
         }));
     }
-
-    // --- verificação dentro da transação da escrita -------------------------------
-
-    let mut tx = pool.begin().await.map_err(ApiError::Storage)?;
 
     // Epoch não regressivo por namespace `(origem, tenant, stream, partição)` —
     // a mesma dimensão do prefixo contíguo. Depois que a stream reconheceu a
@@ -405,8 +406,8 @@ pub async fn create_event(
         }
     }
 
-    // `ON CONFLICT DO NOTHING` cobre a corrida entre duas conexões que passaram
-    // pela checagem: quem perde não duplica, vira replay.
+    // A escrita normal já está serializada. A restrição única continua
+    // protegendo a posição de uma escrita externa ao fluxo normal.
     let inserted = sqlx::query(
         "INSERT INTO event_position \
              (origin_node, tenant_id, stream_id, partition, authority_epoch, seq, \
@@ -667,6 +668,35 @@ pub(crate) async fn resolve_retention_class(
     .await
     .map_err(ApiError::Storage)?;
     found.ok_or(ApiError::RetentionPolicyMissing)
+}
+
+/// Transação comum ao ingest e ao Inbox, inclusive para namespaces vazios.
+/// A chave exclui o epoch para ordenar também transições de autoridade.
+pub(crate) async fn begin_event_write(
+    pool: &PgPool,
+    origin_node: &str,
+    tenant_id: &str,
+    stream_id: &str,
+    partition: i32,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, ApiError> {
+    // A primeira leitura após esperar pelo lock precisa de um snapshot novo.
+    let mut tx = pool
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .await
+        .map_err(ApiError::Storage)?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended( \
+            jsonb_build_array('godmesh.event_position'::text, $1::text, $2::text, \
+                              $3::text, $4::int)::text, 0))",
+    )
+    .bind(origin_node)
+    .bind(tenant_id)
+    .bind(stream_id)
+    .bind(partition)
+    .execute(&mut *tx)
+    .await
+    .map_err(ApiError::Storage)?;
+    Ok(tx)
 }
 
 /// Maior `p` tal que todo `1..=p` existe neste namespace — o prefixo contíguo.
