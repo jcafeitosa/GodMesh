@@ -11,7 +11,7 @@ use godmesh_identity::grant::GrantDecision;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::auth::{CredentialError, VerifiedGrant};
+use crate::auth::{AuthError, CredentialError, VerifiedGrant};
 
 /// Corpo do pedido de incidente.
 ///
@@ -52,6 +52,16 @@ pub enum ApiError {
     Unauthenticated,
     /// Credencial reconhecida, mas sem sujeito utilizável.
     InvalidCredential(CredentialError),
+    /// Credencial com `expires_at` no passado.
+    CredentialExpired,
+    /// Credencial com `not_before` no futuro.
+    CredentialNotYetValid,
+    /// Credencial revogada (na configuração ou em `grant_revocation`).
+    CredentialRevoked,
+    /// Grant válido, mas sem o escopo que a rota exige.
+    InsufficientScope,
+    /// Não foi possível consultar a revogação persistente: nega (falha fechada).
+    RevocationUnavailable,
     /// Pedido recusado na fronteira (corpo inválido ou tentativa de declarar tenancy).
     InvalidRequest(String),
     GrantDenied(GrantDecision),
@@ -82,6 +92,20 @@ pub enum ApiError {
     /// O contrato do incidente recusou a transição; nunca deveria sair do servidor.
     Invariant(IncidentError),
     Storage(sqlx::Error),
+}
+
+impl From<AuthError> for ApiError {
+    fn from(e: AuthError) -> Self {
+        match e {
+            AuthError::Unauthenticated => Self::Unauthenticated,
+            AuthError::CredentialExpired => Self::CredentialExpired,
+            AuthError::CredentialNotYetValid => Self::CredentialNotYetValid,
+            AuthError::CredentialRevoked => Self::CredentialRevoked,
+            AuthError::InsufficientScope => Self::InsufficientScope,
+            AuthError::RevocationUnavailable => Self::RevocationUnavailable,
+            AuthError::InvalidCredential(inner) => Self::InvalidCredential(inner),
+        }
+    }
 }
 
 /// Nome persistido do estado: espelha o CHECK de `sos_incident.state` em

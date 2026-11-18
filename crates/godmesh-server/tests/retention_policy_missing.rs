@@ -9,7 +9,7 @@
 
 use godmesh_identity::grant::{FreshnessSource, GrantPredicate, OfflineOp, RevocationState};
 use godmesh_server::api::{create_incident, ApiError, IncidentPayload};
-use godmesh_server::auth::{Subject, VerifiedGrant};
+use godmesh_server::auth::{Scope, Subject, VerifiedGrant};
 use sqlx::PgPool;
 
 const TENANT_CO: &str = "tenant-co-negative";
@@ -37,6 +37,9 @@ fn co_grant() -> VerifiedGrant {
             retention_class_known: true,
             action_enumerated: true,
         },
+        token_id: "test-grant".to_owned(),
+        scopes: Scope::ALL.to_vec(),
+        authority_epoch: 1,
     }
 }
 

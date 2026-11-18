@@ -22,7 +22,7 @@ use godmesh_identity::grant::{
     FreshnessSource, GrantDecision, GrantPredicate, OfflineOp, RevocationState,
 };
 use godmesh_server::api::{create_incident, ApiError, IncidentPayload};
-use godmesh_server::auth::{GrantRegistry, Subject, VerifiedGrant};
+use godmesh_server::auth::{GrantRegistry, Scope, Subject, VerifiedGrant};
 use sqlx::PgPool;
 
 const TENANT_BR: &str = "tenant-1";
@@ -77,6 +77,9 @@ fn grant(tenant_id: &str, predicate: GrantPredicate) -> VerifiedGrant {
             principal: "principal-42".to_owned(),
         },
         predicate,
+        token_id: "test-grant".to_owned(),
+        scopes: Scope::ALL.to_vec(),
+        authority_epoch: 1,
     }
 }
 
@@ -615,25 +618,41 @@ async fn tenant_without_declared_jurisdiction_fails_closed() {
 
 #[test]
 fn grant_registry_config_rejects_unknown_fields_and_duplicates() {
-    let valid = r#"{"grants":[{"token":"t1","tenant_id":"tenant-a","principal":"p1",
+    // Esquema completo: token_id, escopos, janela e authority_epoch são
+    // obrigatórios (grant sem prazo não é aceito em silêncio).
+    let valid = r#"{"grants":[{"token":"t1","token_id":"g1","tenant_id":"tenant-a",
+        "principal":"p1","scopes":["incident:write"],"not_before":0,
+        "expires_at":4102444800,"authority_epoch":1,
         "operation":"open_sos_incident","freshness":"f3_verified_online",
         "revocation":"absent","epoch_comparable":true,"action_enumerated":true,
         "retention_class_known":true}]}"#;
     assert_eq!(GrantRegistry::from_json(valid).expect("config válida").len(), 1);
 
-    let unknown_field = r#"{"grants":[{"token":"t1","tenant_id":"tenant-a","principal":"p1",
-        "operation":"open_sos_incident","freshness":"f3_verified_online",
-        "revocation":"absent","epoch_comparable":true,"action_enumerated":true,
-        "retention_class_known":true,"tenant":"outro"}]}"#;
-    assert!(GrantRegistry::from_json(unknown_field).is_err());
+    let unknown_field = valid.replace(
+        "\"tenant_id\":\"tenant-a\",",
+        "\"tenant_id\":\"tenant-a\",\"tenant\":\"outro\",",
+    );
+    assert!(GrantRegistry::from_json(&unknown_field).is_err());
+
+    let missing_window = valid.replace("\"expires_at\":4102444800,", "");
+    assert!(
+        GrantRegistry::from_json(&missing_window).is_err(),
+        "grant sem expires_at precisa falhar"
+    );
 
     let duplicate = r#"{"grants":[
-        {"token":"t1","tenant_id":"a","principal":"p","operation":"open_sos_incident",
-         "freshness":"f3_verified_online","revocation":"absent","epoch_comparable":true,
-         "action_enumerated":true,"retention_class_known":true},
-        {"token":"t1","tenant_id":"b","principal":"p","operation":"open_sos_incident",
-         "freshness":"f3_verified_online","revocation":"absent","epoch_comparable":true,
-         "action_enumerated":true,"retention_class_known":true}]}"#;
+        {"token":"t1","token_id":"g1","tenant_id":"a","principal":"p",
+         "scopes":["incident:write"],"not_before":0,"expires_at":4102444800,
+         "authority_epoch":1,"operation":"open_sos_incident",
+         "freshness":"f3_verified_online","revocation":"absent",
+         "epoch_comparable":true,"action_enumerated":true,
+         "retention_class_known":true},
+        {"token":"t1","token_id":"g2","tenant_id":"b","principal":"p",
+         "scopes":["incident:write"],"not_before":0,"expires_at":4102444800,
+         "authority_epoch":1,"operation":"open_sos_incident",
+         "freshness":"f3_verified_online","revocation":"absent",
+         "epoch_comparable":true,"action_enumerated":true,
+         "retention_class_known":true}]}"#;
     assert!(GrantRegistry::from_json(duplicate).is_err());
 }
 

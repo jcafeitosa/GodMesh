@@ -21,7 +21,7 @@ use std::time::Duration;
 use godmesh_identity::grant::{
     FreshnessSource, GrantPredicate, OfflineOp, RevocationState,
 };
-use godmesh_server::auth::{GrantRegistry, Subject, VerifiedGrant};
+use godmesh_server::auth::{GrantRegistry, Scope, Subject, VerifiedGrant};
 use serde_json::Value;
 use sqlx::PgPool;
 
@@ -65,6 +65,9 @@ fn grant(principal: &str) -> VerifiedGrant {
             principal: principal.to_owned(),
         },
         predicate: allow_predicate(),
+        token_id: "test-grant".to_owned(),
+        scopes: Scope::ALL.to_vec(),
+        authority_epoch: 1,
     }
 }
 

@@ -5,7 +5,7 @@
 //! O handler só recebe o grant pela extensão preenchida pelo middleware, logo
 //! não existe caminho de código que chame o caso de uso sem credencial.
 
-use std::time::Duration;
+use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, Request, State};
@@ -18,7 +18,7 @@ use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
 use crate::api::{create_incident, ApiError, IncidentPayload, IncidentResponse};
-use crate::auth::{bearer_token, GrantRegistry, VerifiedGrant};
+use crate::auth::{bearer_token, Authorization, GrantRegistry, Scope, VerifiedGrant};
 use crate::events::{create_event, list_events, EventAck, EventPage, EventPayload, EventQuery};
 use crate::lifecycle::{load_incident, transition, AcknowledgePayload, IncidentView, Transition};
 
@@ -26,23 +26,68 @@ use crate::lifecycle::{load_incident, transition, AcknowledgePayload, IncidentVi
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
-    pub grants: GrantRegistry,
+    pub authorization: Arc<Authorization>,
 }
 
-/// Rotas do servidor.
+/// Rotas do servidor com a composição de produção (relógio do sistema,
+/// revogação em Postgres).
 ///
-/// Toda rota sob `/v1` passa por `require_grant`. `/healthz` é público de
-/// propósito: não expõe dado de tenant e não tem efeito.
+/// Toda rota sob `/v1` passa por `require_grant` **e** pelo portão de escopo da
+/// própria rota. `/healthz` é público de propósito: não expõe dado de tenant e
+/// não tem efeito.
 pub fn router(pool: PgPool, grants: GrantRegistry) -> Router {
-    let state = AppState { pool, grants };
-    let protected = Router::new()
+    let authorization = Authorization::new(grants, pool.clone());
+    router_with(pool, authorization)
+}
+
+/// Rotas do servidor com autorização injetada (relógio e fonte de revogação).
+///
+/// Cada grupo de rotas declara o escopo que exige na própria construção do
+/// router: rota nova nasce com escopo explícito, em vez de herdá-lo por omissão.
+pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
+    let state = AppState {
+        pool,
+        authorization: Arc::new(authorization),
+    };
+
+    let incident_write = Router::new()
         .route("/v1/incidents", post(post_incident))
-        .route("/v1/incidents/{id}", get(get_incident))
         .route("/v1/incidents/{id}/replicate", post(post_replicate))
         .route("/v1/incidents/{id}/ack-technical", post(post_ack_technical))
         .route("/v1/incidents/{id}/acknowledge", post(post_acknowledge))
         .route("/v1/incidents/{id}/close", post(post_close))
-        .route("/v1/events", post(post_event).get(get_events))
+        .route_layer(middleware::from_fn_with_state(
+            ScopeGate(Scope::IncidentWrite),
+            require_scope,
+        ));
+
+    let incident_read = Router::new()
+        .route("/v1/incidents/{id}", get(get_incident))
+        .route_layer(middleware::from_fn_with_state(
+            ScopeGate(Scope::IncidentRead),
+            require_scope,
+        ));
+
+    let event_write = Router::new()
+        .route("/v1/events", post(post_event))
+        .route_layer(middleware::from_fn_with_state(
+            ScopeGate(Scope::EventWrite),
+            require_scope,
+        ));
+
+    let event_read = Router::new()
+        .route("/v1/events", get(get_events))
+        .route_layer(middleware::from_fn_with_state(
+            ScopeGate(Scope::EventRead),
+            require_scope,
+        ));
+
+    // O portão de autenticação é aplicado por último: ele roda antes dos portões
+    // de escopo, que leem o `VerifiedGrant` já injetado na extensão.
+    let protected = incident_write
+        .merge(incident_read)
+        .merge(event_write)
+        .merge(event_read)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
     Router::new()
@@ -51,36 +96,26 @@ pub fn router(pool: PgPool, grants: GrantRegistry) -> Router {
         .with_state(state)
 }
 
-/// Tempo máximo que `/healthz` espera pelo banco.
-///
-/// Curto de propósito: um health check que espera o timeout do pool responde
-/// depois do orquestrador já ter decidido que o processo está morto.
-const HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(500);
+/// Escopo que uma rota exige, carregado pelo middleware de escopo.
+#[derive(Clone, Copy, Debug)]
+struct ScopeGate(Scope);
 
-/// `/healthz` prova a dependência, não só o processo.
-///
-/// `200` só quando `SELECT 1` volta dentro de [`HEALTHCHECK_TIMEOUT`]. Banco
-/// fora, lento ou pool fechado → `503` nomeando a dependência. `ack_class` fica
-/// nas duas respostas: a taxonomia de ACK do ADR-058 vale para todo retorno.
 async fn healthz(State(state): State<AppState>) -> Response {
-    let probe = tokio::time::timeout(
-        HEALTHCHECK_TIMEOUT,
-        sqlx::query("SELECT 1").execute(&state.pool),
+    // Dependência real: 200 só com o pool respondendo. Um healthz estático fica
+    // `healthy` com o banco morto e esconde indisponibilidade.
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.pool),
     )
-    .await;
-
-    match probe {
-        Ok(Ok(_)) => (
-            StatusCode::OK,
-            Json(json!({ "status": "ok", "ack_class": "transport_accepted" })),
-        )
-            .into_response(),
+    .await
+    {
+        Ok(Ok(_)) => Json(json!({ "status": "ok", "ack_class": "transport_accepted" })).into_response(),
         Ok(Err(_)) | Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "unavailable",
                 "dependency": "postgres",
-                "ack_class": "transport_accepted",
+                "ack_class": "transport_accepted"
             })),
         )
             .into_response(),
@@ -90,19 +125,38 @@ async fn healthz(State(state): State<AppState>) -> Response {
 /// Portão único de autenticação das rotas `/v1`.
 ///
 /// Sem header, com esquema errado, com token desconhecido → 401 e o handler
-/// nunca roda (portanto nenhum INSERT). Token conhecido mas sem sujeito
-/// utilizável → 422 antes do handler.
+/// nunca roda (portanto nenhum INSERT). Credencial expirada, ainda não válida
+/// ou revogada → 401 com o motivo. Falha ao consultar revogação → 503 e o
+/// handler também não roda (falha fechada).
 async fn require_grant(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
     let Some(token) = bearer_token(request.headers()) else {
         return ApiErrorResponse::from(ApiError::Unauthenticated).into_response();
     };
-    let Some(grant) = state.grants.verify(token) else {
+    // O escopo exigido é declarado pela rota; este portão roda antes e por isso
+    // autentica sem julgar escopo. `require_scope` aplica o escopo da rota.
+    match state.authorization.authenticate(token).await {
+        Ok(grant) => {
+            request.extensions_mut().insert(grant);
+            next.run(request).await
+        }
+        Err(e) => ApiErrorResponse::from(ApiError::from(e)).into_response(),
+    }
+}
+
+/// Portão de escopo da rota: 403 `insufficient_scope` quando o grant verificado
+/// não contém o escopo exigido.
+async fn require_scope(
+    State(gate): State<ScopeGate>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(grant) = request.extensions().get::<VerifiedGrant>() else {
+        // Defesa em profundidade: sem grant verificado nenhuma rota de escopo roda.
         return ApiErrorResponse::from(ApiError::Unauthenticated).into_response();
     };
-    if let Err(e) = grant.validate() {
-        return ApiErrorResponse::from(ApiError::InvalidCredential(e)).into_response();
+    if !grant.has_scope(gate.0) {
+        return ApiErrorResponse::from(ApiError::InsufficientScope).into_response();
     }
-    request.extensions_mut().insert(grant.clone());
     next.run(request).await
 }
 
@@ -260,6 +314,33 @@ impl ApiErrorResponse {
                 "invalid_credential",
                 e.to_string(),
             ),
+            ApiError::CredentialExpired => (
+                StatusCode::UNAUTHORIZED,
+                "credential_expired",
+                "credencial expirada".to_owned(),
+            ),
+            ApiError::CredentialNotYetValid => (
+                StatusCode::UNAUTHORIZED,
+                "credential_not_yet_valid",
+                "credencial ainda não válida".to_owned(),
+            ),
+            ApiError::CredentialRevoked => (
+                StatusCode::UNAUTHORIZED,
+                "credential_revoked",
+                "credencial revogada".to_owned(),
+            ),
+            // 403: a credencial é válida; o que falta é autorização para esta rota.
+            ApiError::InsufficientScope => (
+                StatusCode::FORBIDDEN,
+                "insufficient_scope",
+                "grant sem o escopo exigido por esta rota".to_owned(),
+            ),
+            // Falha fechada: revogação ilegível não vira aceitação.
+            ApiError::RevocationUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "revocation_unavailable",
+                "não foi possível consultar a revogação; acesso negado".to_owned(),
+            ),
             ApiError::InvalidRequest(detail) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_request",
@@ -374,18 +455,12 @@ impl IntoResponse for ApiErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{created_status, HEALTHCHECK_TIMEOUT};
+    use super::created_status;
     use axum::http::StatusCode;
-    use std::time::Duration;
 
     #[test]
     fn replay_is_200_and_first_write_is_201() {
         assert_eq!(created_status(false), StatusCode::OK);
         assert_eq!(created_status(true), StatusCode::CREATED);
-    }
-
-    #[test]
-    fn healthcheck_espera_pouco_pelo_banco() {
-        assert!(HEALTHCHECK_TIMEOUT <= Duration::from_secs(1));
     }
 }
