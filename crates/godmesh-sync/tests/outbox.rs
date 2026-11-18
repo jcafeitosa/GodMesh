@@ -13,7 +13,16 @@ fn append_keeps_declaration_order() {
     ob.append(pos(1).5, EffectKind::Event).unwrap();
     ob.append(pos(2).5, EffectKind::Event).unwrap();
     assert_eq!(ob.pending(), 2);
-    assert_eq!(ob.last_contiguous(), 2);
+    // ADR-061: append enfileira, não confirma. O prefixo contíguo representa
+    // recebimento duravelmente reconhecido pelo destino (`confirmed`), então ele
+    // só avança em `confirm()` — nunca em `append()`. Ver
+    // `publish_advances_prefix_only_when_acknowledged`, que prova o mesmo para
+    // `publish_next()`. Asserir 2 aqui seria afirmar que enfileirar é confirmar.
+    assert_eq!(ob.last_contiguous(), 0, "append não avança prefixo; só confirm() avança");
+    // Ordem de declaração preservada: a publicação sai na ordem em que foi enfileirada.
+    assert_eq!(ob.publish_next(), Some(PublishOutcome::Published(1)));
+    assert_eq!(ob.publish_next(), Some(PublishOutcome::Published(2)));
+    assert_eq!(ob.last_contiguous(), 0, "publicar também não confirma");
 }
 
 #[test]
@@ -48,11 +57,16 @@ fn replay_never_reemits_irreversible_effect() {
     let mut ob = Outbox::new("node-a", "tenant-1", "stream-9", 1, 7);
     ob.append(1, EffectKind::Irreversible("bridge_tx")).unwrap();
     ob.publish_next();
-    ob.confirm(1).unwrap();
+    // A entrada irreversível precisa continuar NÃO confirmada. `replay_from(p)`
+    // considera apenas o que está depois do prefixo confirmado (`seq > p`);
+    // confirmar a entrada a excluiria do replay e o teste passaria sem exercitar
+    // a regra. O risco real da ADR-061 é reemitir efeito externo de uma entrada
+    // que ficou pendente — é exatamente esse caso que provamos aqui.
 
-    let plano = ob.replay_from(1);
+    let plano = ob.replay_from(0);
+    assert_eq!(ob.last_contiguous(), 0, "entrada irreversível segue pendente");
     assert_eq!(plano.entries, 0, "replay reconstrói projeção, não reenvia");
-    assert_eq!(plano.skipped_irreversible, 1);
+    assert_eq!(plano.skipped_irreversible, 1, "efeito irreversível é contado e pulado");
 }
 
 #[test]

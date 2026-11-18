@@ -61,3 +61,25 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 - Outbox e Inbox são em memória; nenhuma durabilidade real, nenhum WAL, nenhuma transação de banco.
 - Não há publicador, consumidor, broker, rede ou retry real.
 - A composição de ACK não é usada ainda pelo `godmesh-core`; falta ligar.
+
+## Correção de evidência (18/11/2026)
+
+O registro acima permanece como foi publicado. Ele está **errado** em dois pontos e a correção é esta seção.
+
+**O que estava errado**: a afirmação "62 testes, 62 aprovados, 0 falhas" não corresponde à execução. `cargo test -p godmesh-sync --test outbox` falhava de forma determinística, não intermitente:
+
+```
+append_keeps_declaration_order ... FAILED        (left: 0, right: 2)
+replay_never_reemits_irreversible_effect ... FAILED (left: 0, right: 1)
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+**Como o número errado foi produzido**: a saída colada acima termina em `Running tests/outbox.rs` sem a linha `test result` correspondente, e não contém o binário `tests/position.rs`. O total de 62 é a soma apenas dos blocos `test result: ok` que apareceram — ou seja, dos binários anteriores à falha. O `cargo test --workspace` para no primeiro binário que falha (fail-fast): `outbox` (7 testes) apareceu sem resultado porque falhou, e `position` (4 testes) nunca chegou a rodar. Somar as linhas "ok" e chamar de total foi o erro de método. Os dois arquivos já existiam no commit `3e63868`; nada foi omitido por ainda não existir.
+
+**Causa**: os dois testes contrariavam a ADR-061, não a implementação.
+1. `append_keeps_declaration_order` exigia `last_contiguous() == 2` após dois `append`, tratando enfileirar como confirmar. Pela ADR-061 o prefixo contíguo só avança em `confirm()`.
+2. `replay_never_reemits_irreversible_effect` confirmava a entrada irreversível antes de `replay_from`. Como `replay_from(p)` só olha `seq > p`, a entrada saía do replay e a asserção `skipped_irreversible == 1` era insatisfazível por construção — o teste não exercitava a regra que dizia provar.
+
+**Resultado após a correção** (somente os testes foram alterados; `crates/godmesh-sync/src/outbox.rs` não foi tocado): ver `2026-11-18-correcao-outbox.md`. Naquele commit o total correto seria **73** (62 + 7 de `outbox` + 4 de `position`). O workspace atual tem **76** porque o commit posterior `70f0a57` acrescentou `tests/contract.rs` do `godmesh-server` (3 testes). Hoje: `cargo test --workspace` → 76 aprovados, 0 falhas; `cargo clippy --workspace --all-targets` → 0 avisos.
+
+**Lição aplicada**: total de testes se lê do resultado por binário e do status de saída do comando, nunca da soma de linhas verdes; e quem publica evidência confere o exit code.
