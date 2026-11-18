@@ -189,6 +189,7 @@ Vetos emitidos na primeira rodada de revisão (17/11/2026). Aprovação de SPEC 
 
 ## 12. Limites de operação
 
+- Para federação, a [ADR-075](../06-planejamento/decisoes.md#adr-075--aprovação-por-fatia-da-federação) atualiza a regra de liberação. Cada fatia passa pelo fluxo de autoria, revisão e aprovação antes de implementar.
 - Sem implementação, teste de produto, infraestrutura, publicação ou integração real externa antes do gate; autorização vigente cobre documentação, análise e revisão.
 - Sem `commit`, `push`, PR ou alteração de remoto sem autorização específica.
 - Segredos nunca em documento, log ou parecer; caminhos locais de máquina não são fonte permanente.

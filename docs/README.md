@@ -90,6 +90,8 @@ Plataformas propostas: servidor em contêiner Linux; **cliente único em tecnolo
 - [Testes móveis, Guardian, CrowdFind e satélite](05-operacao/testes-mobile-guardian.md)
 
 ## Planejamento e histórico
+O desenvolvimento da federação segue [aprovação por fatia](06-planejamento/decisoes.md#adr-075--aprovação-por-fatia-da-federação).
+
 Documentos de decisões, rastreabilidade, roadmap, pendências, aceites comportamentais e referências estão publicados nesta árvore, em `06-planejamento/`. Eles registram propostas, decisões e estados observados; não comprovam implementação ou execução de testes. O histórico de versões está em [Changelog](CHANGELOG.md).
 
 ## Organização da equipe

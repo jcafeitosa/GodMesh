@@ -2,7 +2,7 @@
 
 Estado: rascunho central em elaboração. Data: 16/11/2026. Responsável: Ada Lovelace; coordenação e crítica recíproca: Ada e Alan Turing.
 
-Este documento organiza o catálogo e os critérios de conclusão das especificações do GodMesh completo. Não constitui aprovação das SPECs, implementação ou validação. A autoria avança em paralelo à resolução de pendências, conforme determinação do usuário; todas as SPECs devem ser aprovadas antes da implementação.
+Este documento organiza o catálogo e os critérios de conclusão das especificações do GodMesh completo. Não constitui aprovação das SPECs, implementação ou validação. A autoria avança em paralelo à resolução de pendências. A federação segue a [aprovação por fatia da ADR-075](docs/06-planejamento/decisoes.md#adr-075--aprovação-por-fatia-da-federação). Para os demais escopos, vale a liberação integral.
 
 ## Fontes e precedência
 

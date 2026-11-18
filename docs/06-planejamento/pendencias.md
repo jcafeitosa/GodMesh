@@ -53,6 +53,8 @@
 
 ## Transição do planejamento para SPECs — SDD + TDD
 
+Em 18/11/2026, o usuário aprovou a liberação por fatia para a federação. A [ADR-075](decisoes.md#adr-075--aprovação-por-fatia-da-federação) prevalece nesse escopo. Cada fatia exige planejamento concluído, revisão independente e aprovação da SPEC correspondente antes da implementação.
+
 Diretriz do usuário: adotar SDD (desenvolvimento orientado por especificações) e TDD (desenvolvimento orientado por testes). A autoria de SPECs pode ocorrer em paralelo à resolução das pendências. Planejamento concluído e aprovação de todas as SPECs continuam condições anteriores à implementação.
 
 Critérios para encerrar o planejamento:

@@ -376,3 +376,11 @@ ver a mesma evidência §6.
 | **Consequências** | OpenAPI gerado pode divergir do comportamento real se o handler não declarar tipo/erro; teste de contrato passa a comparar `router` real contra `openapi.json` (rota, método, escopo, status de erro). `Idempotency-Key` exige tabela e retenção própria. MCP expõe superfície de execução: cada tool declara escopo e limite, e o agente não recebe escopo que o humano não tenha. CLI e MCP **não** podem contornar autorização — são clientes, não atalhos. |
 | **Verificação** | Contrato: `openapi.json` gerado cobre todas as rotas do `router` (teste que falha se faltar rota ou status). Meta: `GET /v1/meta` lista exatamente as rotas registradas e os escopos exigidos. Idempotência: repetir POST com mesma chave devolve o mesmo resultado sem segundo efeito. Dry-run: não escreve linha em nenhuma tabela. MCP: tool sem escopo → erro de autorização, igual à API. Docs: quickstart executável que sobe o servidor local e faz o fluxo de 21 passos. |
 | **Versões resolvidas em 18/11/2026** | `utoipa` 6.0.0 e `utoipa-axum` 0.3.0 (OpenAPI derivado do axum) · `schemars` 1.2.3 (schemas) · `clap` 4.6.8 (CLI). Fonte: crates.io API, consulta em 18/11/2026. MCP: implementação própria sobre JSON-RPC 2.0 stdio, sem SDK, para não acoplar a versão de framework. |
+
+## ADR-075 — Aprovação por fatia da federação
+
+**Status:** aprovada pelo usuário em 18/11/2026.
+
+A federação pode avançar por fatias. Antes de implementar cada fatia, fechar o planejamento no escopo correspondente, concluir a revisão independente e registrar a aprovação da SPEC rastreável daquela fatia. A primeira frente é o ingresso e a confiança entre servidores, começando pela integração da M1B.
+
+Esta decisão substitui, para a federação, a exigência anterior de aprovar todas as SPECs do produto antes de iniciar qualquer fatia. O teste de ponta a ponta deve envolver pelo menos três servidores. O escopo integral do GodMesh e a ordem da ADR-072 ficam preservados.

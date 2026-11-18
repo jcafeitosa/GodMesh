@@ -1,5 +1,7 @@
 # Histórico da documentação
 
+- **18/11/2026 — ADR-075.** O usuário aprovou o planejamento, a revisão e a liberação da federação por fatia. O aceite de ponta a ponta deve envolver pelo menos três servidores.
+
 ## Porta do SEC1 concorrente: teto do extrator, `effect: unknown` e timeout 503 — 18/11/2026
 - Três melhorias de `1799e51` portadas **sem** substituir a implementação integrada: a arquitetura de dois portões, os limites e os defaults testados permanecem.
 - **Teto do extrator alinhado** (`DefaultBodyLimit::max(payload_ceiling())`): teto configurado acima de 2 MiB passa a valer de ponta a ponta; sem isto, o axum recusava corpo sozinho, fora do contrato `{error, detail, hint, ack_class}`.
