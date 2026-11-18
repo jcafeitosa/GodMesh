@@ -193,3 +193,5 @@ Vetos emitidos na primeira rodada de revisão (17/11/2026). Aprovação de SPEC 
 - Sem `commit`, `push`, PR ou alteração de remoto sem autorização específica.
 - Segredos nunca em documento, log ou parecer; caminhos locais de máquina não são fonte permanente.
 - Outros threads e o checkout do usuário não são sobrescritos; cada um escreve no seu escopo.
+- **Números de migração são reservados pelo CTO antes do despacho** (dois workers já criaram `0003` e `0006` em paralelo, exigindo renumeração manual).
+- **Nenhum worker toca `http.rs` sem que o CTO tenha dividido o roteador por domínio**; arquivo compartilhado por vários workers é fonte recorrente de conflito de merge.
