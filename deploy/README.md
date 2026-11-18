@@ -60,6 +60,10 @@ repontada.
 | `DATABASE_URL` | **sim** | obrigatória; ausente/vazia → exit 78 |
 | `BIND_ADDR` | **sim** | obrigatória fora de `GODMESH_ENV=dev|development` (exit 78, mensagem cita a variável); em dev o default é `127.0.0.1:8080` |
 | `GODMESH_ENV` | **sim** | ausente = `production` (falha fechada: exige `BIND_ADDR`) |
+| `GODMESH_NODE_KEY` | **sim** | obrigatória para servir: caminho da identidade Ed25519 do nó. Ausente/vazia → exit 78; arquivo mais aberto que `0600` → exit 78; arquivo ausente é criado `0600`. Persista em volume: identidade nova a cada deploy é outro nó |
+| `GODMESH_FEDERATION_BIND` | **sim** | opcional; **desligada por default**. Ligada, abre o listener QUIC/mTLS em `IP:porta` (UDP) e exige `GODMESH_FEDERATION_CLUSTER` e `GODMESH_FEDERATION_REGION` |
+| `GODMESH_FEDERATION_CLUSTER` / `_REGION` | **sim** | obrigatórias com o listener ligado (sem default silencioso) |
+| `GODMESH_FEDERATION_PEERS_REFRESH_MS` | **sim** | opcional; default `5000`. Intervalo de recarga da allowlist de pares a partir de `federation_peer` |
 | `GODMESH_MIGRATIONS_DIR` | **não** | definida no Dockerfile como reserva; o binário atual não aplica migração. **Não** conte com ela |
 | `RUST_BACKTRACE` | indireto | só afeta mensagem de panic; `0` na imagem |
 
@@ -81,6 +85,7 @@ docker run -d --name godmesh-server \
   -e DATABASE_URL='postgres://USUARIO:SENHA@HOST:5432/godmesh' \
   -e GODMESH_GRANTS="$(cat /caminho/grants.json)" \
   -e BIND_ADDR=127.0.0.1:8080 \
+  -v godmesh-node:/var/lib/godmesh \
   godmesh-server:1.0.0
 ```
 
@@ -96,6 +101,7 @@ Flags de execução e o que cada uma compra:
 | `-e DATABASE_URL` | obrigatória: ausente/vazia → mensagem clara, exit 78 |
 | `-e GODMESH_GRANTS` | obrigatória para servir: JSON de grants verificados; ausente/inválida → exit 78 |
 | `-e BIND_ADDR` | obrigatória fora de `GODMESH_ENV=dev`/`development` (exit 78 citando a variável) |
+| `-v godmesh-node:/var/lib/godmesh` | preserva a identidade do nó (`GODMESH_NODE_KEY`) entre execuções; sem volume, cada contêiner é um nó novo |
 
 O binário aplica as migrações na subida (`/migrations`, versionadas na imagem,
 idempotentes) antes de escutar. `--migrate-only` aplica e sai 0, para pipeline.

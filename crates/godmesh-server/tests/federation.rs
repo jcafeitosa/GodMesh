@@ -238,6 +238,7 @@ fn manifest_for(node: &Node, epoch: u64, issued_at: i64) -> SignedManifest {
         cluster: "cluster-br-sul".to_owned(),
         region: "br-sul".to_owned(),
         software_version: "0.1.0".to_owned(),
+        alpn: String::new(),
         capabilities: vec!["sync".to_owned(), "events".to_owned()],
         endpoints: vec!["quic://10.0.0.1:7000".to_owned()],
         epoch,

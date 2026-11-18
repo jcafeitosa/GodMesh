@@ -77,12 +77,28 @@ RUN chmod 0555 /usr/local/bin/healthcheck.sh
 # `0.0.0.0` é o que faz o serviço alcançável de fora do contêiner; o default de
 # loopback do binário só vale em GODMESH_ENV=dev.
 #
+# GODMESH_NODE_KEY: identidade Ed25519 do nó, obrigatória para servir (M1/M2 da
+# federação). O arquivo é criado com 0600 no primeiro boot e recusado se estiver
+# mais aberto que isso. Com `--read-only` o diretório precisa ser um volume
+# gravável: `-v godmesh-node:/var/lib/godmesh`.
+#
+# GODMESH_FEDERATION_BIND: listener QUIC/mTLS da malha, DESLIGADO por default.
+# Ligado (ex.: `0.0.0.0:7443/udp`), também exige GODMESH_FEDERATION_CLUSTER e
+# GODMESH_FEDERATION_REGION, e a porta UDP precisa ser publicada.
+#
 # GODMESH_MIGRATIONS_DIR: reservado; o binário atual NÃO lê esta variável (não
 # aplica migração). A imagem só carrega os .sql.
 ENV GODMESH_ENV=production \
     BIND_ADDR=0.0.0.0:8080 \
+    GODMESH_NODE_KEY=/var/lib/godmesh/node.key \
     GODMESH_MIGRATIONS_DIR=/migrations \
     RUST_BACKTRACE=0
+
+# Diretório da identidade de nó: existe na imagem e pertence ao uid que roda o
+# processo, para que o primeiro boot grave a chave 0600. Montar um volume aqui
+# (ou fornecer o arquivo) é o que sobrevive a `--read-only` e a recriação do
+# contêiner — identidade de nó que muda a cada deploy é outro nó.
+RUN install -d -o 10001 -g godmesh -m 0700 /var/lib/godmesh
 
 USER 10001:10001
 

@@ -1,5 +1,12 @@
 # Histórico da documentação
 
+## Federação reconciliada: M1 + M2 em um crate — 18/11/2026
+- `godmesh-federation` passa a ter **uma** definição de `NodeIdentity`, `SignedManifest` e `PeerRecord` — a de M1 (`gmn_` + `sha256(pubkey)`, forma assinada TLV, registro em `federation_peer`), já usada pela migração `0008` e pelas rotas de ingresso. O transporte de M2 (QUIC/mTLS, handshake, heartbeat, diagnóstico de enlace) foi adaptado a esses tipos; `registry.rs` de M2 foi absorvido por `peer.rs`.
+- `SignedManifest` ganhou o campo assinado `alpn` (extensão de M1, `serde(default)`) e o envelope de fio `to_frame`/`from_frame` com teto de 8 KiB. `trust_state` **saiu** do manifesto: nó não declara a própria autorização; quem decide é o registro (ADR-071 emenda §1/§5, ADR-072 §2 invariantes 6/8).
+- Servidor carrega a `NodeIdentity` no boot (`GODMESH_NODE_KEY`, `0600`, falha alta), abre o listener QUIC quando `GODMESH_FEDERATION_BIND` está definida (desligado por default) e mantém a allowlist e a discagem dos pares autorizados recarregadas de `federation_peer`.
+- Varredura: 306 testes passando, 0 falha; `clippy --workspace --all-targets` limpo; `migrations/tests/run_all.sh` com 44 invariantes (inclui `0008`); fumaça com dois processos e `ready` → `unknown`. Evidência em `docs/09-equipe/evidencias/2026-11-18-integracao-federacao.md`.
+- `deploy/`: `GODMESH_NODE_KEY` passa a ser obrigatória para servir e a imagem cria `/var/lib/godmesh` (`0700`); `GODMESH_FEDERATION_*` documentadas.
+
 ## Distribuição de configuração aprovada — 18/11/2026
 - Emenda à ADR-072: quatro namespaces com autoridades distintas, pull assinado com quórum e anti-rollback, fronteira do que nunca cruza, ordem M1→M5 vinculante.
 

@@ -16,6 +16,16 @@
 //!   responderia 401. Não é exigido em `--migrate-only`, que não serve rota.
 //! - `BIND_ADDR` (obrigatório para servir, exceto em `GODMESH_ENV=dev|development`,
 //!   onde o default é `127.0.0.1:8080`)
+//! - `GODMESH_NODE_KEY` (obrigatório para servir): caminho do arquivo da
+//!   identidade Ed25519 do nó. Ausente/vazio → exit 78; arquivo com permissão
+//!   mais aberta que `0600` → exit 78. Se o arquivo não existir, ele é criado
+//!   `0600` (primeiro boot de um nó novo).
+//! - `GODMESH_FEDERATION_BIND` (opcional; **desligado por default**): endereço
+//!   UDP do listener QUIC/mTLS da malha. Sem ela não há transporte de federação
+//!   e `/v1/federation/peers/{node_id}/link` responde `unknown` — o piso honesto.
+//!   Ligada, exige `GODMESH_FEDERATION_CLUSTER` e `GODMESH_FEDERATION_REGION`.
+//! - `GODMESH_FEDERATION_PEERS_REFRESH_MS` (opcional; default 5000): intervalo de
+//!   recarga da allowlist de pares a partir de `federation_peer`.
 //! - `GODMESH_ENV` (opcional; ausente é tratado como `production`)
 //! - `GODMESH_OUTBOX` (opcional; `off` desliga o publicador, default `on`)
 //! - `GODMESH_OUTBOX_INTERVAL_MS` (opcional; default 1000 ms)
@@ -32,12 +42,19 @@
 
 #![forbid(unsafe_code)]
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
-use godmesh_server::auth::GrantRegistry;
+use godmesh_federation::link::LinkState;
+use godmesh_federation::node::{FederationConfig, FederationNode};
+use godmesh_federation::peer::PeerRegistry;
+use godmesh_federation::NodeIdentity;
+use godmesh_server::auth::{Authorization, GrantRegistry};
 use godmesh_server::publisher::{OutboxConfig, Publisher};
-use godmesh_server::{migrate, runtime};
+use godmesh_server::{federation, migrate, runtime};
 use godmesh_sync::pg_outbox::{PgOutbox, PgSink};
 use sqlx::postgres::PgPoolOptions;
 
@@ -80,6 +97,30 @@ impl Args {
     }
 }
 
+/// Intervalo padrão de recarga da allowlist de pares, em milissegundos.
+const DEFAULT_FEDERATION_PEERS_REFRESH_MS: u64 = 5_000;
+
+/// Configuração do runtime de federação deste processo.
+///
+/// A identidade é carregada **no boot** (não no primeiro handshake): um nó sem
+/// identidade legível não sobe meio-vivo.
+#[derive(Debug)]
+struct FederationRuntime {
+    identity: NodeIdentity,
+    /// Listener QUIC. `None` é o default: transporte desligado, nenhum par
+    /// entra e o diagnóstico de enlace responde `unknown`.
+    listener: Option<FederationListener>,
+    /// Intervalo de recarga da allowlist a partir de `federation_peer`.
+    peers_refresh: Duration,
+}
+
+/// Listener QUIC efetivamente configurado.
+#[derive(Debug)]
+struct FederationListener {
+    config: FederationConfig,
+    bind: SocketAddr,
+}
+
 /// Configuração lida do ambiente.
 struct Config {
     database_url: String,
@@ -94,6 +135,9 @@ enum Mode {
         grants: GrantRegistry,
         bind_addr: String,
         outbox: OutboxConfig,
+        /// Em `Box` porque o runtime de federação é a maior parte do enum e
+        /// `MigrateOnly` não carrega nada.
+        federation: Box<FederationRuntime>,
     },
 }
 
@@ -136,7 +180,13 @@ impl Config {
                     .map_err(|e| format!("registro de grants indisponível: {e}"))?;
                 let outbox =
                     OutboxConfig::from_env().map_err(|e| format!("configuração do outbox: {e}"))?;
-                Mode::Serve { grants, bind_addr, outbox }
+                let federation = federation_runtime_from_env()?;
+                Mode::Serve {
+                    grants,
+                    bind_addr,
+                    outbox,
+                    federation: Box::new(federation),
+                }
             }
         };
 
@@ -173,6 +223,78 @@ fn resolve_bind_addr(bind_addr: Option<&str>, env: Option<&str>) -> Result<Strin
          (exemplo: BIND_ADDR=0.0.0.0:8080); o default {DEFAULT_BIND_ADDR} só vale em GODMESH_ENV=dev",
         env.unwrap_or("<ausente> = production")
     ))
+}
+
+/// Lê a configuração do runtime de federação do ambiente.
+///
+/// Ver [`federation_runtime_from`] para as regras e as falhas.
+fn federation_runtime_from_env() -> Result<FederationRuntime, String> {
+    federation_runtime_from(|name| std::env::var(name).ok())
+}
+
+/// Interpreta a configuração de federação a partir de um leitor de variáveis.
+///
+/// Falha **alto** e antes de qualquer efeito: identidade ausente, chave legível
+/// por outros, endereço inválido ou cluster/região ausentes com o listener
+/// ligado. Nenhuma dessas condições cai em default silencioso. Separado do
+/// ambiente para que o teste exercite exatamente essas falhas sem mexer em
+/// `std::env` (que é global e concorrente entre testes).
+///
+/// # Errors
+/// Mensagem que cita a variável culpada; nunca inclui o conteúdo da chave.
+fn federation_runtime_from(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<FederationRuntime, String> {
+    let identity =
+        NodeIdentity::from_env_with(&lookup).map_err(|e| format!("identidade de nó indisponível: {e}"))?;
+
+    let bind = match lookup("GODMESH_FEDERATION_BIND") {
+        Some(raw) if !raw.trim().is_empty() => raw.trim().parse::<SocketAddr>().map_err(|e| {
+            format!("GODMESH_FEDERATION_BIND inválida (esperado IP:porta): {e}")
+        })?,
+        _ => {
+            // Sem listener: nenhum nó entra, nenhum heartbeat existe e o
+            // diagnóstico de enlace responde `unknown`. Isso é explícito.
+            return Ok(FederationRuntime {
+                identity,
+                listener: None,
+                peers_refresh: Duration::ZERO,
+            });
+        }
+    };
+
+    let required = |name: &str| -> Result<String, String> {
+        match lookup(name) {
+            Some(v) if !v.trim().is_empty() => Ok(v.trim().to_owned()),
+            _ => Err(format!(
+                "{name} não definida; com GODMESH_FEDERATION_BIND ativo o cluster e a região \
+                 do nó são obrigatórios (sem default silencioso)"
+            )),
+        }
+    };
+    let cluster = required("GODMESH_FEDERATION_CLUSTER")?;
+    let region = required("GODMESH_FEDERATION_REGION")?;
+    let version = lookup("GODMESH_FEDERATION_VERSION")
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+
+    let peers_refresh = match lookup("GODMESH_FEDERATION_PEERS_REFRESH_MS") {
+        Some(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| format!("GODMESH_FEDERATION_PEERS_REFRESH_MS inválido: {e}"))?,
+        None => DEFAULT_FEDERATION_PEERS_REFRESH_MS,
+    };
+
+    Ok(FederationRuntime {
+        identity,
+        listener: Some(FederationListener {
+            config: FederationConfig::new(cluster, region, version),
+            bind,
+        }),
+        peers_refresh: Duration::from_millis(peers_refresh.max(1)),
+    })
 }
 
 fn main() -> ExitCode {
@@ -237,10 +359,21 @@ async fn run(config: Config) -> Result<(), String> {
         report.skipped.join(", "),
     );
 
-    let Mode::Serve { grants, bind_addr, outbox } = config.mode else {
+    let Mode::Serve {
+        grants,
+        bind_addr,
+        outbox,
+        federation,
+    } = config.mode
+    else {
         pool.close().await;
         return Ok(());
     };
+    let FederationRuntime {
+        identity,
+        listener: federation_listener,
+        peers_refresh,
+    } = *federation;
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
@@ -253,14 +386,71 @@ async fn run(config: Config) -> Result<(), String> {
         "godmesh-server: escutando em http://{local} ({} grant(s) configurado(s))",
         grants.len()
     );
+    // `public_key` é dado público (é o que verifica manifesto e o que o
+    // registro de pares do outro nó guarda); a semente nunca é impressa.
+    println!(
+        "godmesh-server: identidade de nó carregada: node_id={} public_key={}",
+        identity.node_id(),
+        identity.public_key_hex()
+    );
 
-    // Um único sinal de término alimenta o HTTP e o publicador.
+    // Um único sinal de término alimenta o HTTP, o publicador e a federação.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let sinal = runtime::shutdown_signal();
     tokio::spawn(async move {
         sinal.await;
         let _ = shutdown_tx.send(true);
     });
+
+    // Runtime de federação: allowlist carregada de `federation_peer` (a decisão
+    // administrativa é a autoridade) e recarregada periodicamente, para que
+    // aprovar/revogar pela API valha sem reiniciar o processo.
+    let runtime_federation = match federation_listener {
+        None => {
+            println!(
+                "godmesh-server: federação desligada (GODMESH_FEDERATION_BIND ausente); \
+                 diagnóstico de enlace responde unknown"
+            );
+            None
+        }
+        Some(listener) => {
+            let listener_config = listener.config;
+            let listener_bind = listener.bind;
+            let registry = Arc::new(PeerRegistry::new());
+            let peers = federation::list_peers(&pool)
+                .await
+                .map_err(|e| format!("registro de pares indisponível: {e:?}"))?;
+            registry.replace(peers);
+            let node = FederationNode::bind(
+                identity,
+                listener_config,
+                Arc::clone(&registry),
+                listener_bind,
+            )
+            .map_err(|e| format!("listener de federação não abriu: {e}"))?;
+            let addr = node
+                .local_addr()
+                .map(|addr| format!("quic://{addr}"))
+                .unwrap_or_else(|| format!("quic://{listener_bind}"));
+            println!(
+                "godmesh-server: federação escutando em {addr} ({} par(es) no registro, \
+                 ALPN godmesh/1)",
+                registry.len()
+            );
+            Some(Arc::new(node))
+        }
+    };
+
+    if let Some(node) = &runtime_federation {
+        // A manutenção usa o **mesmo** registro que o verificador de certificado
+        // do nó: `PeerRegistry` é compartilhado por `Arc`.
+        spawn_peers_maintenance(
+            pool.clone(),
+            Arc::clone(node),
+            peers_refresh,
+            shutdown_rx.clone(),
+        );
+    }
 
     let publisher = if outbox.enabled {
         println!(
@@ -282,16 +472,22 @@ async fn run(config: Config) -> Result<(), String> {
     };
 
     let mut encerrar = shutdown_rx;
-    let served = runtime::serve(
-        listener,
-        godmesh_server::http::router(pool.clone(), grants),
-        pool,
-        async move {
-            let _ = encerrar.changed().await;
-        },
-    )
+    let app = match &runtime_federation {
+        Some(node) => godmesh_server::http::router_with_federation(
+            pool.clone(),
+            Authorization::new(grants, pool.clone()),
+            node.links(),
+        ),
+        None => godmesh_server::http::router(pool.clone(), grants),
+    };
+    let served = runtime::serve(listener, app, pool.clone(), async move {
+        let _ = encerrar.changed().await;
+    })
     .await?;
 
+    if let Some(node) = &runtime_federation {
+        node.shutdown();
+    }
     if let Some(publisher) = publisher {
         let _ = publisher.await;
     }
@@ -304,11 +500,221 @@ async fn run(config: Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Recarrega a allowlist e mantém os enlaces de saída com os pares autorizados.
+///
+/// Duas responsabilidades, nesta ordem a cada ciclo:
+///
+/// 1. **Allowlist**: recarrega `federation_peer`. Aprovar/revogar pela API passa
+///    a valer sem reiniciar o processo. Falha de leitura **não** limpa o
+///    registro: erro de banco não pode virar "nenhum par" nem "todos os pares" —
+///    mantém-se o último snapshot conhecido e o erro vai para stderr.
+/// 2. **Enlace**: disca para cada par `authorized` que ainda não está `ready`,
+///    usando os `endpoints` que ele declarou no manifesto (formato `quic://IP:porta`).
+///    Sem esta etapa o nó só escutaria: a malha nunca fecharia handshake.
+///    Falha de discagem não promove nada — o estado só vira `ready` por
+///    handshake verificado (ADR-072 §2, invariante 6).
+fn spawn_peers_maintenance(
+    pool: sqlx::PgPool,
+    node: Arc<FederationNode>,
+    interval: Duration,
+    mut parar: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = parar.changed() => return,
+            }
+            match federation::list_peers(&pool).await {
+                Ok(peers) => node.registry().replace(peers),
+                Err(e) => eprintln!(
+                    "godmesh-server: recarga da allowlist de pares falhou; mantendo o último \
+                     snapshot conhecido: {e:?}"
+                ),
+            }
+            dial_pending_peers(&node).await;
+        }
+    });
+}
+
+/// Disca para os pares autorizados que não têm enlace `ready`.
+///
+/// `ready` observado é o único motivo para não discar de novo: `unknown` e
+/// `rejected` voltam a ser tentados no próximo ciclo, porque a decisão pode ter
+/// mudado (aprovação nova) — e a tentativa é barata.
+async fn dial_pending_peers(node: &FederationNode) {
+    for peer in node.registry().peers() {
+        if !peer.is_authorized() || peer.node_id == node.identity().node_id() {
+            continue;
+        }
+        if node
+            .links()
+            .snapshot(&peer.node_id)
+            .is_some_and(|snapshot| snapshot.state == LinkState::Ready)
+        {
+            continue;
+        }
+        for endpoint in &peer.endpoints {
+            let Some(addr) = parse_quic_endpoint(endpoint) else {
+                eprintln!(
+                    "godmesh-server: endpoint de {} ignorado (esperado quic://IP:porta): {endpoint}",
+                    peer.node_id
+                );
+                continue;
+            };
+            match node.dial(addr).await {
+                Ok(_) => break,
+                Err(e) => eprintln!(
+                    "godmesh-server: enlace com {} por {endpoint} não subiu: {e}",
+                    peer.node_id
+                ),
+            }
+        }
+    }
+}
+
+/// `quic://IP:porta` do manifesto → endereço de socket.
+///
+/// Esquema diferente é `None` (não se disca para o que não foi declarado como
+/// QUIC), e o chamador registra o motivo — endereço não é permissão (ADR-072 §2,
+/// invariante 8), então nada aqui autoriza nada.
+fn parse_quic_endpoint(endpoint: &str) -> Option<SocketAddr> {
+    endpoint
+        .trim()
+        .strip_prefix("quic://")
+        .and_then(|addr| addr.parse::<SocketAddr>().ok())
+}
+
 // Módulo de testes no fim do arquivo: `clippy::items-after-test-module`
 // (negado por `-D clippy::all`) exige que nenhum item venha depois dele.
 #[cfg(test)]
 mod tests {
-    use super::{Args, DEFAULT_BIND_ADDR, resolve_bind_addr};
+    use super::{
+        Args, DEFAULT_BIND_ADDR, federation_runtime_from, parse_quic_endpoint, resolve_bind_addr,
+    };
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    /// Diretório temporário próprio por teste (nenhum teste compartilha chave).
+    fn temp_key(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "godmesh-boot-federation-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir temporário");
+        dir.join("node.key")
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    #[test]
+    fn fed_sem_godmesh_node_key_falha_citando_a_variavel() {
+        let erro = federation_runtime_from(env(&[])).expect_err("sem identidade não sobe");
+        assert!(
+            erro.contains("GODMESH_NODE_KEY"),
+            "mensagem precisa citar GODMESH_NODE_KEY: {erro}"
+        );
+    }
+
+    #[test]
+    fn fed_com_arquivo_de_chave_aberto_falha_fechado() {
+        let path = temp_key("aberto");
+        let key = path.to_string_lossy().into_owned();
+        // Primeiro boot cria a chave 0600.
+        federation_runtime_from(env(&[("GODMESH_NODE_KEY", &key)])).expect("cria identidade");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let erro = federation_runtime_from(env(&[("GODMESH_NODE_KEY", &key)]))
+            .expect_err("chave legível por outros não é identidade confiável");
+        assert!(erro.contains("permissão"), "{erro}");
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn fed_desligada_por_default_e_carrega_a_identidade() {
+        let path = temp_key("desligada");
+        let key = path.to_string_lossy().into_owned();
+        let runtime = federation_runtime_from(env(&[("GODMESH_NODE_KEY", &key)]))
+            .expect("sem GODMESH_FEDERATION_BIND nada mais é exigido");
+        assert!(runtime.listener.is_none(), "transporte desligado por default");
+        assert!(runtime.identity.node_id().starts_with("gmn_"));
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn fed_com_bind_invalida_falha_citando_a_variavel() {
+        let path = temp_key("bind");
+        let key = path.to_string_lossy().into_owned();
+        let erro = federation_runtime_from(env(&[
+            ("GODMESH_NODE_KEY", &key),
+            ("GODMESH_FEDERATION_BIND", "nao-e-endereco"),
+        ]))
+        .expect_err("endereço inválido não vira default");
+        assert!(erro.contains("GODMESH_FEDERATION_BIND"), "{erro}");
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn fed_com_bind_exige_cluster_e_regiao() {
+        let path = temp_key("cluster");
+        let key = path.to_string_lossy().into_owned();
+        let erro = federation_runtime_from(env(&[
+            ("GODMESH_NODE_KEY", &key),
+            ("GODMESH_FEDERATION_BIND", "127.0.0.1:0"),
+        ]))
+        .expect_err("cluster ausente não tem default silencioso");
+        assert!(erro.contains("GODMESH_FEDERATION_CLUSTER"), "{erro}");
+
+        let erro = federation_runtime_from(env(&[
+            ("GODMESH_NODE_KEY", &key),
+            ("GODMESH_FEDERATION_BIND", "127.0.0.1:0"),
+            ("GODMESH_FEDERATION_CLUSTER", "cluster-br-sul"),
+        ]))
+        .expect_err("região ausente não tem default silencioso");
+        assert!(erro.contains("GODMESH_FEDERATION_REGION"), "{erro}");
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn fed_com_bind_completa_liga_o_listener() {
+        let path = temp_key("ok");
+        let key = path.to_string_lossy().into_owned();
+        let runtime = federation_runtime_from(env(&[
+            ("GODMESH_NODE_KEY", &key),
+            ("GODMESH_FEDERATION_BIND", "127.0.0.1:0"),
+            ("GODMESH_FEDERATION_CLUSTER", "cluster-br-sul"),
+            ("GODMESH_FEDERATION_REGION", "br-sul"),
+        ]))
+        .expect("configuração completa");
+        let listener = runtime.listener.expect("listener ligado");
+        assert_eq!(listener.config.cluster, "cluster-br-sul");
+        assert_eq!(listener.config.region, "br-sul");
+        assert_eq!(listener.bind.port(), 0);
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn endpoint_do_manifesto_so_vira_socket_em_quic() {
+        let esperado: std::net::SocketAddr = "127.0.0.1:7443".parse().expect("endereço");
+        assert_eq!(
+            parse_quic_endpoint("quic://127.0.0.1:7443"),
+            Some(esperado)
+        );
+        assert_eq!(parse_quic_endpoint("  quic://127.0.0.1:7443  "), Some(esperado));
+        // Esquema diferente ou endereço ilegível não são "quase certos".
+        assert_eq!(parse_quic_endpoint("https://127.0.0.1:7443"), None);
+        assert_eq!(parse_quic_endpoint("127.0.0.1:7443"), None);
+        assert_eq!(parse_quic_endpoint("quic://sem-porta"), None);
+    }
 
     #[test]
     fn bind_addr_ausente_em_producao_falha_citando_a_variavel() {

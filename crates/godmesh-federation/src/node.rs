@@ -222,6 +222,16 @@ impl FederationNode {
         Arc::clone(&self.shared.links)
     }
 
+    /// Allowlist de pares em uso por este nó.
+    ///
+    /// É o **mesmo** `Arc` que o verificador de certificado lê, então quem
+    /// recarrega a partir do banco (`PeerRegistry::replace`) muda a decisão do
+    /// TLS sem recriar o endpoint.
+    #[must_use]
+    pub fn registry(&self) -> Arc<PeerRegistry> {
+        Arc::clone(&self.shared.registry)
+    }
+
     /// Identidade deste nó.
     #[must_use]
     pub fn identity(&self) -> &NodeIdentity {

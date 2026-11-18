@@ -236,13 +236,26 @@ impl NodeIdentity {
     /// [`IdentityError::EnvMissing`] sem a variável; demais falhas de
     /// [`Self::load_or_create`].
     pub fn from_env() -> Result<Self, IdentityError> {
-        let path = std::env::var(NODE_KEY_ENV)
-            .map_err(|_| IdentityError::EnvMissing)?
-            .trim()
-            .to_owned();
-        if path.is_empty() {
-            return Err(IdentityError::EnvMissing);
-        }
+        Self::from_env_with(|name| std::env::var(name).ok())
+    }
+
+    /// Igual a [`Self::from_env`], com a leitura da variável injetada.
+    ///
+    /// Existe para que o boot do servidor seja testável sem mexer em
+    /// `std::env` (global e concorrente entre testes). A regra é a mesma:
+    /// variável ausente ou vazia é [`IdentityError::EnvMissing`], nunca um
+    /// caminho presumido.
+    ///
+    /// # Errors
+    /// [`IdentityError::EnvMissing`] sem o caminho; demais falhas de
+    /// [`Self::load_or_create`].
+    pub fn from_env_with(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, IdentityError> {
+        let path = lookup(NODE_KEY_ENV)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or(IdentityError::EnvMissing)?;
         Self::load_or_create(path)
     }
 
@@ -541,5 +554,31 @@ mod tests {
         assert_eq!(reloaded.verifying_key().to_bytes(), identity.public_key_bytes());
         // O DER carrega a semente: nunca pode aparecer no Debug.
         assert!(!format!("{identity:?}").contains(&hex::encode(&der)));
+    }
+
+    #[test]
+    fn from_env_sem_variavel_falha_alto() {
+        assert!(matches!(
+            NodeIdentity::from_env_with(|_| None),
+            Err(IdentityError::EnvMissing)
+        ));
+        // Variável presente mas vazia também é ausência: nenhum caminho é
+        // presumido (um default silencioso criaria identidade no lugar errado).
+        assert!(matches!(
+            NodeIdentity::from_env_with(|_| Some("   ".to_owned())),
+            Err(IdentityError::EnvMissing)
+        ));
+    }
+
+    #[test]
+    fn from_env_com_caminho_cria_arquivo_600() {
+        let dir = temp_dir("env");
+        let path = dir.join("node.key");
+        let identity =
+            NodeIdentity::from_env_with(|_| Some(path.to_string_lossy().into_owned())).expect("carrega");
+        let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, KEY_FILE_MODE);
+        assert_eq!(identity.path(), Some(path.as_path()));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
