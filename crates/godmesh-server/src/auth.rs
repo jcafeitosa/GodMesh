@@ -68,7 +68,9 @@ pub enum Scope {
     /// Escopo deliberadamente separado dos escopos de domínio.
     #[serde(rename = "admin:grants")]
     AdminGrants,
-    /// Leitura do estado de federação: pedidos de ingresso e pares registrados.
+    /// Leitura do estado de federação: pedidos de ingresso, pares registrados e
+    /// diagnóstico de enlace entre nós. Dado de operação: não é escopo de tenant
+    /// e não devolve conteúdo de dado.
     #[serde(rename = "federation:read")]
     FederationRead,
     /// Decisão sobre ingresso na federação: aprovar e rejeitar pedidos.

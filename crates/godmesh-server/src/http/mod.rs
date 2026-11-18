@@ -26,6 +26,7 @@ use crate::auth::{bearer_token, Authorization, GrantRegistry, Scope, VerifiedGra
 use crate::federation::JoinWindow;
 use crate::metrics::{Gauges, Metrics};
 use crate::observability::{observe, RequestContext, RequestLog, StderrRequestLog};
+use godmesh_federation::link::PeerLinks;
 
 mod admin;
 mod events;
@@ -43,6 +44,10 @@ pub struct AppState {
     /// Janela de frescor aceita no `issued_at` de manifesto de ingresso.
     /// Lida do ambiente na composição do router (padrão: 5 minutos).
     pub join_window: JoinWindow,
+    /// Enlaces de federação observados neste processo. `None` quando o runtime
+    /// de malha não está anexado: o diagnóstico responde `unknown`, que é o piso
+    /// honesto, em vez de fingir saúde.
+    pub federation: Option<Arc<PeerLinks>>,
 }
 
 /// Rotas do servidor com a composição de produção (relógio do sistema,
@@ -63,7 +68,7 @@ pub fn router_with_log(
     authorization: Authorization,
     log: Arc<dyn RequestLog>,
 ) -> Router {
-    build_router(pool, authorization, log)
+    build_router(pool, authorization, log, None)
 }
 
 /// Rotas do servidor com autorização injetada (relógio e fonte de revogação).
@@ -71,16 +76,37 @@ pub fn router_with_log(
 /// Cada grupo de rotas declara o escopo que exige na própria construção do
 /// router: rota nova nasce com escopo explícito, em vez de herdá-lo por omissão.
 pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
-    build_router(pool, authorization, Arc::new(StderrRequestLog))
+    build_router(pool, authorization, Arc::new(StderrRequestLog), None)
 }
 
-fn build_router(pool: PgPool, authorization: Authorization, log: Arc<dyn RequestLog>) -> Router {
+/// Rotas com o runtime de federação anexado: habilita o diagnóstico de enlace
+/// com estado real. Sem isto, `/v1/federation/**` responde `unknown`.
+pub fn router_with_federation(
+    pool: PgPool,
+    authorization: Authorization,
+    links: Arc<PeerLinks>,
+) -> Router {
+    build_router(
+        pool,
+        authorization,
+        Arc::new(StderrRequestLog),
+        Some(links),
+    )
+}
+
+fn build_router(
+    pool: PgPool,
+    authorization: Authorization,
+    log: Arc<dyn RequestLog>,
+    federation: Option<Arc<PeerLinks>>,
+) -> Router {
     let state = AppState {
         pool,
         authorization: Arc::new(authorization),
         metrics: Metrics::new(),
         log,
         join_window: JoinWindow::from_env(),
+        federation,
     };
 
     // Métricas operacionais: escopo próprio (`admin:metrics`). Ver a nota em

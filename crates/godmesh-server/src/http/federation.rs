@@ -1,16 +1,18 @@
-//! Rotas de federação: ingresso (público) e registro de pares (escopo).
+//! Rotas de federação: ingresso (público), registro de pares e diagnóstico de
+//! enlace entre nós.
 //!
 //! `POST /v1/federation/join-requests` é **público** de propósito: um nó que
 //! ainda não é par não tem credencial do cluster, e o pedido em si não autoriza
 //! nada — a autoridade é a assinatura do manifesto mais a decisão administrativa
 //! posterior. Todas as outras rotas exigem grant com escopo:
 //!
-//! * `federation:read` — listar pedidos e pares;
+//! * `federation:read` — listar pedidos e pares, e ler o estado do enlace de um
+//!   par (`GET /v1/federation/peers/{node_id}/link`);
 //! * `federation:admin` — aprovar e rejeitar.
 //!
 //! Auditoria registra `join_request_id`/`node_id` e quem agiu (`token_id`). O
 //! corpo do manifesto nunca é logado e a chave privada não existe no servidor
-//! nesta fatia.
+//! nesta fatia (a identidade de nó é do runtime, não do route handler).
 
 use std::collections::HashMap;
 
@@ -29,6 +31,8 @@ use crate::federation::{
     submit_join_request,
 };
 use godmesh_federation::SignedManifest;
+use godmesh_federation::identity::is_node_id;
+use godmesh_federation::link::LinkSnapshot;
 use godmesh_federation::peer::PeerRecord;
 
 /// Rotas públicas da federação. Montadas **fora** do portão `require_grant`.
@@ -41,6 +45,10 @@ pub(super) fn routes() -> Router<AppState> {
     let read = Router::new()
         .route("/v1/federation/join-requests", get(get_join_requests))
         .route("/v1/federation/peers", get(get_peers))
+        .route(
+            "/v1/federation/peers/{node_id}/link",
+            get(get_peer_link),
+        )
         .route_layer(middleware::from_fn_with_state(
             ScopeGate(Scope::FederationRead),
             require_scope,
@@ -176,4 +184,32 @@ async fn get_peers(
         .await
         .map(Json)
         .map_err(ApiErrorResponse::from)
+}
+
+/// Estado real do enlace com um par — ADR-072 §10 (`unknown` é estado de primeira
+/// classe) e ADR-071 §(3) (heartbeat por par).
+///
+/// Sem registro do par — inclusive quando este processo não tem runtime de
+/// federação — a resposta é `200` com `state: unknown` e os demais campos `null`.
+/// É a diferença entre "não sei" e "está tudo bem", e a resposta escolhe
+/// "não sei".
+///
+/// `node_id` fora da forma canônica (`gmn_` + 64 hex) é pedido inválido, não
+/// valor a normalizar: dois nós com identificador "quase igual" seriam o mesmo
+/// nó se aqui se aceitasse aproximação.
+async fn get_peer_link(
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<LinkSnapshot>, ApiErrorResponse> {
+    if !is_node_id(&node_id) {
+        return Err(ApiErrorResponse::from(ApiError::InvalidRequest(
+            "node_id deve ser gmn_ seguido de 64 hex minúsculos (sha256 da chave pública Ed25519)"
+                .to_owned(),
+        )));
+    }
+    let snapshot = match &state.federation {
+        Some(links) => links.snapshot_or_never_seen(&node_id),
+        None => LinkSnapshot::never_seen(),
+    };
+    Ok(Json(snapshot))
 }
