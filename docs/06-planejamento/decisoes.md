@@ -326,3 +326,14 @@ Decisão do usuário: "shadcn fica". Regras para não virar dois sistemas:
 | **Decisão** | Adotar o documento como **alvo de arquitetura de rede**. Ordem de implementação vinculante: identidade de nó → ingresso assinado → transporte QUIC/mTLS → sync escopado entre nós → mídia → borda. Cada mudança normativa derivada (topologia, SLO, residência, relay) exige ADR própria; o mapa não substitui a arquitetura de referência. |
 | **Consequências** | Fatias de federação passam a ser avaliadas contra os invariantes do §2 do documento (mídia fora do event bus, ingresso assinado, `unknown` não promovido, fencing no efetor etc.). Nenhuma fatia pode declarar "malha pronta" sem prova de nó não autorizado ficando isolado. |
 | **Verificação** | Cada invariante precisa de teste automatizado ou consulta SQL que o comprove; o mapa é considerado cumprido apenas quando os dez invariantes tiverem evidência registrada. |
+### Emenda à ADR-072 (18/11/2026) — distribuição de configuração e ordem das fatias
+
+**Aprovação do usuário:** "perfeito, vamos acatar". Normas derivadas:
+
+1. **Quatro namespaces com autoridades distintas**: `federation` (nossos control-voters, quórum) · `regional` (autoridade da região) · `tenant` (o tenant) · `local` (operador local, **nunca replicado**). No nó de terceiro, `federation` é somente leitura; divergência local → `degraded` com motivo e recusa das operações afetadas.
+2. **Distribuição por pull assinado**: `GET /v1/federation/config` devolve bundle com `version`, `epoch`, `cluster`, `applies_at`, `entries[]`, `hash`, `signatures[]`. O receptor verifica assinatura → quórum → anti-rollback (`version` ≥ piso) → compatibilidade (`min_version`) → aplica atômico por `effective_after` → audita.
+3. **Quórum obrigatório** para mudança que altera confiança (nó, raiz, piso de proteção); assinatura única com auditoria para configuração operacional não sensível. O bundle declara o quórum exigido e o nó não aceita menos.
+4. **Fronteira do que nunca cruza**: chaves privadas, dados de outro tenant, segredos operacionais (credenciais de bridge, DSN, topologia interna, custo/capacidade bruta) e telemetria de nó de terceiro sem contrato.
+5. **Ordem de implementação vinculante**: **M1** identidade/ingresso → **M2** transporte QUIC/mTLS → **M3** config bundle assinado (este §13) → **M4** replicação de eventos entre nós → **M5** borda/relay. Fatia fora de ordem exige justificativa registrada e não pode declarar prontidão sem os invariantes do §2 do documento de rede.
+
+**Estado:** desenho aprovado; implementação não iniciada para M3–M5.

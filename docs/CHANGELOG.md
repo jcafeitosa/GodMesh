@@ -1,5 +1,8 @@
 # Histórico da documentação
 
+## Distribuição de configuração aprovada — 18/11/2026
+- Emenda à ADR-072: quatro namespaces com autoridades distintas, pull assinado com quórum e anti-rollback, fronteira do que nunca cruza, ordem M1→M5 vinculante.
+
 ## Rede-alvo aprovada — 18/11/2026
 - ADR-072 adota o desenho de cinco planos (entrada, controle, dados, mídia, borda) como alvo de arquitetura de rede, com dez invariantes testáveis e ordem de implementação: identidade → ingresso assinado → transporte → sync escopado → mídia → borda.
 - Documento: `docs/09-equipe/rede-alvo-cto.md` promovido de proposta a direção aprovada; itens normativos derivados continuam exigindo ADR própria.
