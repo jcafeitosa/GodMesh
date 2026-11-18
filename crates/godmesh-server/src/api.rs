@@ -149,6 +149,8 @@ pub enum ApiError {
     /// nem par `authorized` no registro (422). Aprovar é impossível por
     /// construção, e é isso que a resposta diz.
     NoAuthorizedApprover,
+    /// O cluster do pedido não tem decisão local de ingresso habilitada.
+    FederationGovernanceDisabled,
     /// Pedido de ingresso inexistente (404).
     JoinRequestNotFound,
     /// Pedido de ingresso em estado que não aceita a decisão pedida (409).

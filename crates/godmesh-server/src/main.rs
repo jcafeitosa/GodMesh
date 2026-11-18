@@ -28,6 +28,8 @@
 //!   `<node_id>:<chave pública em hex>` dos primeiros nós do cluster, autorizados
 //!   por configuração (ADR-071 emenda §5). Entrada malformada derruba o processo
 //!   com EX_CONFIG: lista de confiança não tem item "ignorado".
+//! - `GODMESH_FEDERATION_GOVERNANCE` (opcional): `single_approver:<cluster>`
+//!   declara o cluster sem votantes. Ausente ou vazia desabilita decisões.
 //! - `GODMESH_FEDERATION_PEERS_REFRESH_MS` (opcional; default 5000): intervalo de
 //!   recarga da allowlist de pares a partir de `federation_peer`.
 //! - `GODMESH_ENV` (opcional; ausente é tratado como `production`)
@@ -165,10 +167,8 @@ enum Mode {
         /// Em `Box` para o enum não crescer por um campo de config (clippy
         /// `large_enum_variant`); o conteúdo é idêntico.
         admission: Box<AdmissionConfig>,
-        /// Bootstrap de confiança declarado pelo operador
-        /// (`GODMESH_FEDERATION_GENESIS`). Lido e validado no boot: entrada
-        /// malformada derruba o processo em vez de servir sem aprovador.
-        genesis: Arc<godmesh_federation::Genesis>,
+        /// Bootstrap de confiança e governança de ingresso validados no boot.
+        decisions: Arc<godmesh_server::federation::DecisionConfig>,
     },
 }
 
@@ -213,21 +213,13 @@ impl Config {
                     OutboxConfig::from_env().map_err(|e| format!("configuração do outbox: {e}"))?;
                 let host = godmesh_host::Config::from_env()
                     .map_err(|e| format!("configuração da telemetria de host: {e}"))?;
+                let decisions = Arc::new(godmesh_server::federation::DecisionConfig::from_env()?);
                 let federation = federation_runtime_from_env()?;
                 // O portão de abuso valida o ambiente na subida: tetos
                 // inválidos derrubam o processo (EX_CONFIG) em vez de virar
                 // default silencioso servindo tráfego.
                 let admission = AdmissionConfig::from_env()
                     .map_err(|e| format!("configuração de cotas/admissão: {e}"))?;
-                // ADR-071 emenda §5: os primeiros nós são autorizados **por
-                // configuração**, fora de banda. Uma lista malformada não vira
-                // "sem genesis" silencioso — cai em EX_CONFIG com a entrada
-                // nomeada. Lista ausente ou vazia é o estado declarado sem
-                // aprovador por bootstrap.
-                let genesis = Arc::new(
-                    godmesh_federation::Genesis::from_env()
-                        .map_err(|e| format!("bootstrap de federação inválido: {e}"))?,
-                );
                 Mode::Serve {
                     grants,
                     bind_addr,
@@ -235,7 +227,7 @@ impl Config {
                     host,
                     federation: Box::new(federation),
                     admission: Box::new(admission),
-                    genesis,
+                    decisions,
                 }
             }
         };
@@ -416,7 +408,7 @@ async fn run(config: Config) -> Result<(), String> {
         host,
         federation,
         admission,
-        genesis,
+        decisions,
     } = config.mode
     else {
         pool.close().await;
@@ -446,19 +438,10 @@ async fn run(config: Config) -> Result<(), String> {
         identity.node_id(),
         identity.public_key_hex()
     );
-    // Autoridade de ingresso (ADR-071 emenda): o que existe antes de qualquer
-    // aprovação assinada. Sem genesis, a afirmação honesta é "ninguém pode
-    // aprovar ainda", não um default confiável.
-    if genesis.is_empty() {
-        println!(
-            "godmesh-server: GODMESH_FEDERATION_GENESIS vazio; aprovar/rejeitar exige um par              já authorized em federation_peer (sem confiança por primeiro uso)"
-        );
-    } else {
-        println!(
-            "godmesh-server: bootstrap de federação declarado: {} nó(s) genesis autorizado(s)              por configuração",
-            genesis.len()
-        );
-    }
+    println!(
+        "godmesh-server: bootstrap de federação declarado: {} nó(s) genesis",
+        decisions.genesis_count()
+    );
 
     // Um único sinal de término alimenta o HTTP, o publicador e a federação.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -562,7 +545,7 @@ async fn run(config: Config) -> Result<(), String> {
         *admission,
         outbox.enabled,
         HostTelemetry::new(host_snapshot.clone(), host.stale_after()),
-        genesis,
+        decisions,
     );
     let served = runtime::serve(listener, app, pool.clone(), async move {
         let _ = encerrar.changed().await;

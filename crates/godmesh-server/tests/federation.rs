@@ -40,13 +40,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use godmesh_federation::identity::NodeIdentity;
 use godmesh_federation::manifest::SignedManifest;
 use godmesh_federation::peer::TrustState;
-use godmesh_federation::{ApprovalCertificate, Genesis, GenesisNode};
+use godmesh_federation::{ApprovalCertificate, DecisionAction, Genesis, GenesisNode};
 use godmesh_identity::grant::{FreshnessSource, GrantPredicate, OfflineOp, RevocationState};
 use godmesh_server::auth::{
     Authorization, CapturedAudit, GrantRecord, GrantRegistry, PgRevocationSource, Scope, Subject,
     SystemClock,
 };
-use godmesh_server::http::{router_with_log, router_with_log_and_genesis};
+use godmesh_server::federation::DecisionConfig;
+use godmesh_server::http::router_with_log_and_decisions;
 use godmesh_server::observability::CapturedLog;
 use serde_json::{Value, json};
 use sqlx::{AssertSqlSafe, PgPool, Row};
@@ -189,9 +190,7 @@ struct Server {
     log: Arc<CapturedLog>,
 }
 
-/// Servidor **sem genesis**: o estado declarado "nenhum nó autorizado por
-/// configuração". Usado pelos testes de ingresso e pelo caminho em que aprovar
-/// tem de ser impossível.
+/// Servidor com governança declarada para o cluster de teste e sem genesis.
 async fn serve(pool: PgPool) -> Server {
     serve_with_genesis(pool, Genesis::empty()).await
 }
@@ -200,6 +199,10 @@ async fn serve(pool: PgPool) -> Server {
 /// assinando. Injetado por parâmetro porque `GODMESH_FEDERATION_GENESIS` é
 /// ambiente global e concorrente entre testes.
 async fn serve_with_genesis(pool: PgPool, genesis: Genesis) -> Server {
+    serve_with_governance(pool, genesis, Some("single_approver:cluster-br-sul")).await
+}
+
+async fn serve_with_governance(pool: PgPool, genesis: Genesis, governance: Option<&str>) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind efêmero");
@@ -207,11 +210,8 @@ async fn serve_with_genesis(pool: PgPool, genesis: Genesis) -> Server {
     let audit = Arc::new(CapturedAudit::default());
     let log = Arc::new(CapturedLog::new());
     let authorization = authorization(&pool, audit.clone());
-    let app = if genesis.is_empty() {
-        router_with_log(pool, authorization, log.clone())
-    } else {
-        router_with_log_and_genesis(pool, authorization, log.clone(), genesis)
-    };
+    let config = DecisionConfig::new(genesis, governance).expect("governança de teste");
+    let app = router_with_log_and_decisions(pool, authorization, log.clone(), config);
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -596,6 +596,17 @@ async fn rejeitar_nao_cria_peer() {
     let cert = fresh_certificate(&approver, &pending);
 
     let res = reject_with(&server, &id, &cert);
+    assert_eq!(
+        res.status, 422,
+        "prova de aprovação na rejeição: {}",
+        res.body
+    );
+    assert_eq!(res.json()["error"], "approval_signature_invalid");
+    assert!(peer_state(&pool, node.identity.node_id()).await.is_none());
+
+    let mut rejection = cert.clone();
+    rejection.sign_for(&approver.identity, DecisionAction::Reject);
+    let res = reject_with(&server, &id, &rejection);
     assert_eq!(res.status, 200, "rejeição: {}", res.body);
     assert_eq!(res.json()["state"], "rejected");
 
@@ -617,7 +628,7 @@ async fn rejeitar_nao_cria_peer() {
     assert!(peer_state(&pool, node.identity.node_id()).await.is_none());
 
     // Rejeitar de novo também é conflito.
-    let res = reject_with(&server, &id, &cert);
+    let res = reject_with(&server, &id, &rejection);
     assert_eq!(res.status, 409, "rejeitar de novo: {}", res.body);
 
     // Pedido inexistente é 404 nas duas decisões, com certificado em mãos: a
@@ -626,7 +637,7 @@ async fn rejeitar_nao_cria_peer() {
     let res = approve_with(&server, inexistente, &cert);
     assert_eq!(res.status, 404, "approve inexistente: {}", res.body);
     assert_eq!(res.json()["error"], "join_request_not_found");
-    let res = reject_with(&server, inexistente, &cert);
+    let res = reject_with(&server, inexistente, &rejection);
     assert_eq!(res.status, 404, "reject inexistente: {}", res.body);
     assert_eq!(res.json()["error"], "join_request_not_found");
 }
@@ -1279,11 +1290,9 @@ async fn epoch_de_certificado_nao_pode_regredir() {
 async fn sem_genesis_e_sem_par_autorizado_aprovar_e_impossivel() {
     let Some(env) = env().await else { return };
     let pool = pool(env).await;
-    // Router sem genesis: nenhum aprovador por configuração.
-    let server = serve(pool.clone()).await;
-
-    // Cluster que ninguém habilitou: a autoridade zero é o estado testado.
     let cluster = format!("cluster-bootstrap-{}", std::process::id());
+    let governance = format!("single_approver:{cluster}");
+    let server = serve_with_governance(pool.clone(), Genesis::empty(), Some(&governance)).await;
     let candidate = node_with_key("m1b-bootstrap");
     let pending = join_pending_in(&server, &candidate, 1, &cluster);
     let id = pending["join_request_id"].as_str().expect("id").to_owned();
@@ -1305,14 +1314,16 @@ async fn sem_genesis_e_sem_par_autorizado_aprovar_e_impossivel() {
     assert_eq!(res.status, 422, "cluster sem aprovador: {}", res.body);
     assert_eq!(res.json()["error"], "no_authorized_approver");
     assert!(
-        res.body.contains("GODMESH_FEDERATION_GENESIS"),
-        "a resposta precisa dizer o que o operador tem de declarar: {}",
+        res.body.contains("sem genesis declarado"),
+        "a resposta informa que falta autoridade declarada: {}",
         res.body
     );
     assert!(peer_state(&pool, candidate.identity.node_id()).await.is_none());
 
     // Rejeitar também é impossível pelo mesmo motivo.
-    let res = reject_with(&server, &id, &cert);
+    let mut rejection = cert.clone();
+    rejection.sign_for(&alguem.identity, DecisionAction::Reject);
+    let res = reject_with(&server, &id, &rejection);
     assert_eq!(res.status, 422, "rejeição sem aprovador: {}", res.body);
     assert_eq!(res.json()["error"], "no_authorized_approver");
 
@@ -1322,7 +1333,8 @@ async fn sem_genesis_e_sem_par_autorizado_aprovar_e_impossivel() {
 
     // Declarado o bootstrap, a mesma decisão passa — o que faltava era
     // autoridade, não o pedido.
-    let server = serve_with_genesis(pool.clone(), genesis_of(&[&alguem])).await;
+    let server =
+        serve_with_governance(pool.clone(), genesis_of(&[&alguem]), Some(&governance)).await;
     let res = approve_with(&server, &id, &cert);
     assert_eq!(res.status, 200, "com genesis: {}", res.body);
     assert_eq!(
@@ -1446,4 +1458,243 @@ async fn par_revogado_nao_pode_aprovar() {
         res.body
     );
     assert_eq!(res.json()["error"], "approver_not_authorized");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn governanca_recusa_decisao_de_outro_cluster() {
+    let Some(env) = env().await else { return };
+    let pool = pool(env).await;
+    let approver = genesis_approver("governanca-cluster");
+    let candidate = node_with_key("governanca-cluster-candidato");
+    let server = serve_with_genesis(pool.clone(), genesis_of(&[&approver])).await;
+
+    let cluster = "cluster-independente";
+    let pending = join_pending_in(&server, &candidate, 1, cluster);
+    let id = pending["join_request_id"].as_str().unwrap();
+    let cert = certificate_for(
+        &approver,
+        &pending,
+        cluster,
+        now_unix(),
+        now_unix() + 300,
+        1,
+    );
+    let response = approve_with(&server, id, &cert);
+    assert_eq!(response.status, 422, "{}", response.body);
+    assert_eq!(response.json()["error"], "federation_governance_disabled");
+    assert_eq!(stored_approval(&pool, id).await, (None, None, None, None));
+    assert!(
+        peer_state(&pool, candidate.identity.node_id())
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_de_aprovacao_preserva_prova_e_configuracao_do_par() {
+    let Some(env) = env().await else { return };
+    let pool = pool(env).await;
+    let approver = genesis_approver("replay-config");
+    let candidate = node_with_key("replay-config-candidato");
+    let server = serve_with_genesis(pool.clone(), genesis_of(&[&approver])).await;
+    let pending = join_pending(&server, &candidate, 1);
+    let id = pending["join_request_id"].as_str().unwrap();
+    let cert = fresh_certificate(&approver, &pending);
+    let approved = approve_with(&server, id, &cert);
+    assert_eq!(approved.status, 200, "{}", approved.body);
+
+    sqlx::query("UPDATE federation_peer SET region = 'nova-regiao' WHERE node_id = $1")
+        .bind(candidate.identity.node_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let snapshot = "SELECT to_jsonb(p)::text FROM federation_peer p WHERE node_id = $1";
+    let before: String = sqlx::query_scalar(snapshot)
+        .bind(candidate.identity.node_id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let replay = approve_with(&server, id, &cert);
+    assert_eq!(replay.status, 200, "{}", replay.body);
+    assert_eq!(replay.json(), approved.json());
+    let after: String = sqlx::query_scalar(snapshot)
+        .bind(candidate.identity.node_id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before, "replay preserva o registro completo do par");
+
+    sqlx::query("UPDATE federation_peer SET trust_state = 'revoked' WHERE node_id = $1")
+        .bind(candidate.identity.node_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refused = approve_with(&server, id, &cert);
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(
+        peer_state(&pool, candidate.identity.node_id())
+            .await
+            .as_deref(),
+        Some("revoked")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn governanca_ausente_ou_vazia_mantem_pedido_pendente() {
+    let Some(env) = env().await else { return };
+    let pool = pool(env).await;
+    let approver = genesis_approver("governanca-vazia");
+    let candidate = node_with_key("governanca-vazia-candidato");
+
+    let join_server = serve(pool.clone()).await;
+    let pending = join_pending(&join_server, &candidate, 1);
+    let id = pending["join_request_id"].as_str().unwrap();
+    let cert = fresh_certificate(&approver, &pending);
+    for governance in [None, Some("")] {
+        let server =
+            serve_with_governance(pool.clone(), genesis_of(&[&approver]), governance).await;
+        let response = approve_with(&server, id, &cert);
+        assert_eq!(response.status, 422, "{}", response.body);
+        assert_eq!(response.json()["error"], "federation_governance_disabled");
+        let mut rejection = cert.clone();
+        rejection.sign_for(&approver.identity, DecisionAction::Reject);
+        let response = reject_with(&server, id, &rejection);
+        assert_eq!(response.status, 422, "{}", response.body);
+        assert_eq!(response.json()["error"], "federation_governance_disabled");
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM federation_join_request WHERE join_request_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "pending");
+    }
+    assert!(
+        peer_state(&pool, candidate.identity.node_id())
+            .await
+            .is_none()
+    );
+}
+
+async fn waiting_backend(pool: &PgPool, blocker: i32) -> Option<i32> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(pid) = sqlx::query_scalar(
+                "SELECT pid FROM pg_stat_activity
+                 WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))
+                 LIMIT 1",
+            )
+            .bind(blocker)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+            {
+                return pid;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .ok()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn decisoes_validas_do_mesmo_genesis_aguardam_commit() {
+    let Some(env) = env().await else { return };
+    let pool = pool(env).await;
+    let bootstrap = genesis_approver("serial-bootstrap");
+    let approver = genesis_approver("serial-aprovador");
+    let server =
+        Arc::new(serve_with_genesis(pool.clone(), genesis_of(&[&bootstrap, &approver])).await);
+    let first = node_with_key("serial-primeiro");
+    let second = node_with_key("serial-segundo");
+
+    // O primeiro par já existe. Uma nova geração produz outro pedido válido.
+    let prior = join_pending(&server, &first, 1);
+    let prior_id = prior["join_request_id"].as_str().unwrap();
+    let response = approve_with(&server, prior_id, &fresh_certificate(&bootstrap, &prior));
+    assert_eq!(response.status, 200, "{}", response.body);
+    let first_pending = join_pending(&server, &first, 2);
+    let second_pending = join_pending(&server, &second, 1);
+    assert!(
+        peer_state(&pool, approver.identity.node_id())
+            .await
+            .is_none()
+    );
+
+    let mut barrier = pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    sqlx::query("SELECT node_id FROM federation_peer WHERE node_id = $1 FOR UPDATE")
+        .bind(first.identity.node_id())
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+
+    let decide = |pending: Value| {
+        let server = Arc::clone(&server);
+        let cert = fresh_certificate(&approver, &pending);
+        tokio::task::spawn_blocking(move || {
+            approve_with(&server, pending["join_request_id"].as_str().unwrap(), &cert)
+        })
+    };
+    let first_response = decide(first_pending);
+    let first_backend = waiting_backend(&pool, blocker)
+        .await
+        .expect("primeira decisão aguardando a linha do candidato");
+    let second_response = decide(second_pending);
+    let second_waited = waiting_backend(&pool, first_backend).await.is_some();
+    barrier.commit().await.unwrap();
+
+    let first_response = first_response.await.unwrap();
+    let second_response = second_response.await.unwrap();
+    assert!(second_waited, "segunda decisão deve aguardar a primeira");
+    assert_eq!(first_response.status, 200, "{}", first_response.body);
+    assert_eq!(second_response.status, 200, "{}", second_response.body);
+    assert_eq!(first_response.json()["approval_epoch"], 1);
+    assert_eq!(second_response.json()["approval_epoch"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn falha_de_persistencia_reverte_par_e_permite_repetir_decisao() {
+    use godmesh_server::api::ApiError;
+    use godmesh_server::federation::approve_join_request;
+
+    let Some(env) = env().await else { return };
+    let pool = pool(env).await;
+    let approver = genesis_approver("retry-aprovador");
+    let candidate = node_with_key("retry-candidato");
+    let server = serve_with_genesis(pool.clone(), genesis_of(&[&approver])).await;
+    let pending = join_pending(&server, &candidate, 1);
+    let id = pending["join_request_id"].as_str().unwrap();
+    let config = DecisionConfig::new(
+        genesis_of(&[&approver]),
+        Some("single_approver:cluster-br-sul"),
+    )
+    .unwrap();
+
+    let cert = fresh_certificate(&approver, &pending);
+    // A CHECK de approved_by é avaliada na gravação da decisão, após inserir o par.
+    let failure = approve_join_request(&pool, &config, id, "", &cert, now_unix).await;
+    assert!(matches!(failure, Err(ApiError::Storage(_))), "{failure:?}");
+    assert!(
+        peer_state(&pool, candidate.identity.node_id())
+            .await
+            .is_none()
+    );
+    assert_eq!(stored_approval(&pool, id).await, (None, None, None, None));
+
+    let retry = approve_with(&server, id, &cert);
+    assert_eq!(retry.status, 200, "{}", retry.body);
+    assert_eq!(retry.json()["approval_signature"], cert.signature);
+    assert_eq!(
+        peer_state(&pool, candidate.identity.node_id())
+            .await
+            .as_deref(),
+        Some("authorized")
+    );
 }

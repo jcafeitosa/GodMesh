@@ -47,6 +47,27 @@ use crate::manifest::{MAX_FIELD_LEN, MAX_LIST_ITEMS, normalise, push_field};
 /// Domínio da assinatura do certificado de aprovação (versão 1).
 pub const APPROVAL_DOMAIN: &[u8] = b"godmesh.federation.approval.v1";
 
+/// Domínio exclusivo da assinatura de rejeição (versão 1).
+pub const REJECTION_DOMAIN: &[u8] = b"godmesh.federation.rejection.v1";
+
+/// Ação decidida pela rota, vinculada à assinatura.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionAction {
+    /// Autoriza o ingresso.
+    Approve,
+    /// Encerra o pedido.
+    Reject,
+}
+
+impl DecisionAction {
+    const fn domain(self) -> &'static [u8] {
+        match self {
+            Self::Approve => APPROVAL_DOMAIN,
+            Self::Reject => REJECTION_DOMAIN,
+        }
+    }
+}
+
 /// Prefixo do identificador de pedido de ingresso (`fjr_` + 32 hex).
 pub const JOIN_REQUEST_ID_PREFIX: &str = "fjr_";
 
@@ -182,8 +203,14 @@ impl ApprovalCertificate {
     /// Bytes canônicos assinados (sem `signature`).
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
+        self.canonical_bytes_for(DecisionAction::Approve)
+    }
+
+    /// Bytes canônicos para a ação assinada, sem o campo `signature`.
+    #[must_use]
+    pub fn canonical_bytes_for(&self, action: DecisionAction) -> Vec<u8> {
         let mut out = Vec::with_capacity(192);
-        out.extend_from_slice(APPROVAL_DOMAIN);
+        out.extend_from_slice(action.domain());
         push_field(&mut out, "join_request_id", self.join_request_id.as_bytes());
         push_field(&mut out, "node_id", self.node_id.as_bytes());
         push_field(&mut out, "public_key", self.public_key.as_bytes());
@@ -205,9 +232,14 @@ impl ApprovalCertificate {
     /// `node_id` — ele é sempre o derivado da chave que assina, o que elimina
     /// assinar em nome de outro nó (mesma regra de `SignedManifest::sign`).
     pub fn sign(&mut self, identity: &NodeIdentity) {
+        self.sign_for(identity, DecisionAction::Approve);
+    }
+
+    /// Assina a ação escolhida com a identidade do nó decisor.
+    pub fn sign_for(&mut self, identity: &NodeIdentity, action: DecisionAction) {
         self.node_id = identity.node_id().to_owned();
         self.public_key = identity.public_key_hex();
-        self.signature = identity.sign_hex(&self.canonical_bytes());
+        self.signature = identity.sign_hex(&self.canonical_bytes_for(action));
     }
 
     /// Verifica o certificado contra a chave **do registro** do aprovador.
@@ -222,6 +254,18 @@ impl ApprovalCertificate {
     /// [`ApprovalError`] para campo inválido, `node_id` não derivado da chave,
     /// chave divergente da registrada ou assinatura que não confere.
     pub fn verify_with_key(&self, trusted_public_key_hex: &str) -> Result<(), ApprovalError> {
+        self.verify_for(trusted_public_key_hex, DecisionAction::Approve)
+    }
+
+    /// Verifica a prova contra a chave confiável e o domínio da ação.
+    ///
+    /// # Errors
+    /// Os mesmos erros de [Self::verify_with_key], incluindo domínio divergente.
+    pub fn verify_for(
+        &self,
+        trusted_public_key_hex: &str,
+        action: DecisionAction,
+    ) -> Result<(), ApprovalError> {
         self.validate_fields()?;
         let key = identity::parse_public_key(trusted_public_key_hex)?;
         // A chave registrada e a declarada têm de ser a mesma: o certificado não
@@ -234,7 +278,7 @@ impl ApprovalCertificate {
         }
         Ok(identity::verify_signature(
             trusted_public_key_hex,
-            &self.canonical_bytes(),
+            &self.canonical_bytes_for(action),
             &self.signature,
         )?)
     }

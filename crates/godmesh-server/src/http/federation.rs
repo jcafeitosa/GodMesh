@@ -23,10 +23,10 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 
 use super::contract::{Access, ParamSpec, Registry, RouteDoc, Schema};
 use super::{ApiErrorResponse, AppState, created_status};
@@ -129,16 +129,18 @@ pub(super) fn register(reg: &mut Registry) {
         "/v1/federation/join-requests/{join_request_id}/approve",
         admin,
         RouteDoc {
-            summary: "Aprova pedido pendente e registra o par como authorized; exige certificado assinado por nó autorizado (ADR-071 emenda §2), decisão terminal",
+            summary: "Aprova ingresso ou confirma decisão existente; exige prova no domínio godmesh.federation.approval.v1",
             request: Some("ApprovalDecision"),
             success: &[(200, Schema::Ref("JoinRequestView"))],
             errors: &[
+                "invalid_request",
                 "approval_signature_invalid",
                 "approver_not_authorized",
                 "approval_expired",
                 "approval_not_yet_valid",
                 "approval_epoch_regressed",
                 "no_authorized_approver",
+                "federation_governance_disabled",
                 "join_request_not_found",
                 "join_request_state_conflict",
                 "illegal_trust_transition",
@@ -153,18 +155,21 @@ pub(super) fn register(reg: &mut Registry) {
         "/v1/federation/join-requests/{join_request_id}/reject",
         admin,
         RouteDoc {
-            summary: "Rejeita pedido pendente; nenhum par é criado. Também exige certificado assinado por nó autorizado (governança), decisão terminal",
+            summary: "Rejeita ingresso; exige prova no domínio godmesh.federation.rejection.v1",
             request: Some("ApprovalDecision"),
             success: &[(200, Schema::Ref("JoinRequestView"))],
             errors: &[
+                "invalid_request",
                 "approval_signature_invalid",
                 "approver_not_authorized",
                 "approval_expired",
                 "approval_not_yet_valid",
                 "approval_epoch_regressed",
                 "no_authorized_approver",
+                "federation_governance_disabled",
                 "join_request_not_found",
                 "join_request_state_conflict",
+                "federation_invariant_violation",
                 "storage_unavailable",
             ],
             params: &[JR_PARAM],
@@ -236,7 +241,6 @@ async fn post_join_request_approve(
             rejection.body_text()
         )))
     })?;
-    let now = state.authorization.now_unix();
     let approver = if grant.subject.principal.trim().is_empty() {
         grant.token_id.clone()
     } else {
@@ -244,11 +248,11 @@ async fn post_join_request_approve(
     };
     let result = approve_join_request(
         &state.pool,
-        &state.genesis,
+        &state.decisions,
         &join_request_id,
         &approver,
         &decision.approval,
-        now,
+        || state.authorization.now_unix(),
     )
     .await;
     match result {
@@ -283,9 +287,8 @@ async fn post_join_request_approve(
 
 /// Rejeita um pedido pendente. Nenhum par é criado.
 ///
-/// Rejeitar é ação de governança: exige o mesmo certificado assinado por nó
-/// autorizado que aprovar. O banco não guarda prova de aprovação em pedido
-/// rejeitado (CHECK da migração 0009) — quem rejeitou fica na auditoria.
+/// A assinatura usa o domínio exclusivo de rejeição. A autoria da rejeição
+/// fica na auditoria.
 async fn post_join_request_reject(
     State(state): State<AppState>,
     Extension(grant): Extension<VerifiedGrant>,
@@ -294,18 +297,17 @@ async fn post_join_request_reject(
 ) -> Result<Json<JoinRequestView>, ApiErrorResponse> {
     let Json(decision) = payload.map_err(|rejection| {
         ApiErrorResponse::from(ApiError::InvalidRequest(format!(
-            "rejeitar exige o certificado de aprovação assinado por nó autorizado no corpo \
+            "rejeitar exige o certificado de rejeição assinado por nó autorizado no corpo \
              (campo approval): {}",
             rejection.body_text()
         )))
     })?;
-    let now = state.authorization.now_unix();
     let result = reject_join_request(
         &state.pool,
-        &state.genesis,
+        &state.decisions,
         &join_request_id,
         &decision.approval,
-        now,
+        || state.authorization.now_unix(),
     )
     .await;
     match result {

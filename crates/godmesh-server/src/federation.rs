@@ -34,11 +34,11 @@
 //! sem nenhum par autorizado, **não existe caminho para aprovar** — a resposta
 //! diz exatamente isso, em vez de aceitar a primeira chave que aparecer.
 
-use godmesh_federation::ApprovalCertificate;
 use godmesh_federation::Genesis;
 use godmesh_federation::SignedManifest;
-use godmesh_federation::manifest::ManifestError;
+use godmesh_federation::manifest::{MAX_FIELD_LEN, ManifestError};
 use godmesh_federation::peer::{PeerRecord, TrustState};
+use godmesh_federation::{ApprovalCertificate, DecisionAction};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 
@@ -90,6 +90,76 @@ impl JoinWindow {
                 Err(_) => Self::default(),
             },
             Err(_) => Self::default(),
+        }
+    }
+}
+
+/// Declaração do operador para o cluster sem votantes.
+pub const GOVERNANCE_ENV: &str = "GODMESH_FEDERATION_GOVERNANCE";
+
+/// Configuração local de confiança e governança para decidir ingressos.
+#[derive(Debug, Default)]
+pub struct DecisionConfig {
+    genesis: Genesis,
+    single_approver_cluster: Option<String>,
+}
+
+impl DecisionConfig {
+    /// Valida a declaração explícita do cluster sem votantes.
+    ///
+    /// # Errors
+    /// Modo não suportado ou identificador de cluster malformado.
+    pub fn new(genesis: Genesis, governance: Option<&str>) -> Result<Self, String> {
+        let single_approver_cluster = match governance {
+            None | Some("") => None,
+            Some(value) => {
+                let cluster = value
+                    .strip_prefix("single_approver:")
+                    .filter(|cluster| {
+                        !cluster.is_empty()
+                            && cluster.len() <= MAX_FIELD_LEN
+                            && !cluster
+                                .contains(|c: char| c == ':' || c.is_control() || c.is_whitespace())
+                    })
+                    .ok_or_else(|| {
+                        format!("{GOVERNANCE_ENV} inválida; esperado single_approver:<cluster>")
+                    })?;
+                Some(cluster.to_owned())
+            }
+        };
+        Ok(Self {
+            genesis,
+            single_approver_cluster,
+        })
+    }
+
+    /// Lê as declarações de confiança do ambiente de serviço.
+    ///
+    /// # Errors
+    /// Genesis ou governança inválida.
+    pub fn from_env() -> Result<Self, String> {
+        let governance = match std::env::var(GOVERNANCE_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(format!("{GOVERNANCE_ENV} contém bytes não-UTF8"));
+            }
+        };
+        let genesis = Genesis::from_env().map_err(|e| e.to_string())?;
+        Self::new(genesis, governance.as_deref())
+    }
+
+    /// Quantos nós genesis foram declarados no processo.
+    #[must_use]
+    pub fn genesis_count(&self) -> usize {
+        self.genesis.len()
+    }
+
+    fn require_enabled(&self, cluster: &str) -> Result<(), ApiError> {
+        if self.single_approver_cluster.as_deref() == Some(cluster) {
+            Ok(())
+        } else {
+            Err(ApiError::FederationGovernanceDisabled)
         }
     }
 }
@@ -379,6 +449,16 @@ async fn approver_authority(
     )))
 }
 
+/// Serializa decisões e a criação de registro para o mesmo nó, inclusive
+/// quando o genesis ainda não tem uma linha a travar.
+async fn lock_decision_node(tx: &mut sqlx::PgConnection, node_id: &str) -> Result<(), ApiError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('federation.decision:' || $1, 0))")
+        .bind(node_id)
+        .execute(tx)
+        .await?;
+    Ok(())
+}
+
 /// Verifica a prova de nó que toda decisão de ingresso exige.
 ///
 /// Ordem das checagens — cada uma recusa **antes** de qualquer escrita, e um
@@ -401,8 +481,9 @@ async fn verify_approval_certificate(
     genesis: &Genesis,
     request: &JoinRequestView,
     certificate: &ApprovalCertificate,
-    now: i64,
-) -> Result<(), ApiError> {
+    action: DecisionAction,
+    clock: impl FnOnce() -> i64,
+) -> Result<i64, ApiError> {
     // Primeiro a autoridade e a assinatura, depois o que os campos dizem: um
     // campo de um certificado não verificado não é evidência, é alegação. E
     // nada acima disto escreveu no banco — as recusas saem da transação.
@@ -428,7 +509,7 @@ async fn verify_approval_certificate(
     // Assinatura contra a chave **registrada**. Declarar chave diferente da
     // registrada é identidade emprestada, não aprovação.
     certificate
-        .verify_with_key(&trusted_key)
+        .verify_for(&trusted_key, action)
         .map_err(|e| match e {
             godmesh_federation::ApprovalError::NodeIdMismatch => {
                 ApiError::ApproverNotAuthorized(format!(
@@ -446,6 +527,7 @@ async fn verify_approval_certificate(
         )));
     }
 
+    let now = clock();
     if let Err(e) = certificate.check_validity(now) {
         return Err(match e {
             godmesh_federation::ApprovalError::Expired { expires_at, .. } => {
@@ -497,7 +579,19 @@ async fn verify_approval_certificate(
         }
     }
 
-    Ok(())
+    Ok(now)
+}
+
+macro_rules! peer_query {
+    ($tail:expr) => {
+        concat!(
+            "SELECT node_id, peer_id, public_key, cluster, region, trust_state, endpoints, ",
+            "software_version, capabilities, epoch, ",
+            "extract(epoch from last_seen_at)::bigint AS last_seen_at ",
+            "FROM federation_peer ",
+            $tail
+        )
+    };
 }
 
 /// Aprova um pedido pendente e cria/atualiza o par como `authorized`.
@@ -511,36 +605,47 @@ async fn verify_approval_certificate(
 /// ([`verify_approval_certificate`]). Recusa de certificado não transiciona
 /// estado nenhum: a transação é descartada.
 ///
-/// Concorrência: a transação trava o pedido, depois o par aprovador, depois o
-/// par candidato. Dois nós se aprovando mutuamente ao mesmo tempo podem
-/// deadlockar — o Postgres mata uma das transações e a resposta é `503`
-/// `storage_unavailable` (retryável, com o mesmo certificado). Nada fica
-/// parcialmente escrito: ou o pedido decide com prova, ou nada muda.
+/// O pedido, o aprovador e o candidato ficam protegidos até o commit.
+/// Os locks por nó são obtidos em ordem estável para aprovações cruzadas.
 ///
 /// # Errors
 /// `404` pedido inexistente; `409` estado que não aceita aprovação; `422`
 /// certificado inválido/não autorizado/expirado/regressivo; `503` banco.
 pub async fn approve_join_request(
     pool: &PgPool,
-    genesis: &Genesis,
+    config: &DecisionConfig,
     join_request_id: &str,
     approved_by: &str,
     certificate: &ApprovalCertificate,
-    now: i64,
+    clock: impl FnOnce() -> i64,
 ) -> Result<(JoinRequestView, PeerRecord), ApiError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .await?;
 
     let row = sqlx::query(join_query!("WHERE join_request_id = $1 FOR UPDATE"))
         .bind(join_request_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(ApiError::JoinRequestNotFound)?;
-    let mut request = join_view(&row)?;
+    let request = join_view(&row)?;
+    config.require_enabled(&request.manifest.cluster)?;
 
-    // A prova de nó vem antes de qualquer efeito: sem ela, o escopo humano
-    // sozinho seria suficiente para decidir quem entra na malha — exatamente o
-    // que a emenda à ADR-071 proíbe.
-    verify_approval_certificate(&mut tx, genesis, &request, certificate, now).await?;
+    let mut nodes = [certificate.node_id.as_str(), request.node_id.as_str()];
+    nodes.sort_unstable();
+    lock_decision_node(&mut tx, nodes[0]).await?;
+    if nodes[0] != nodes[1] {
+        lock_decision_node(&mut tx, nodes[1]).await?;
+    }
+    let now = verify_approval_certificate(
+        &mut tx,
+        &config.genesis,
+        &request,
+        certificate,
+        DecisionAction::Approve,
+        clock,
+    )
+    .await?;
 
     if request.state != "pending" && request.state != "approved" {
         return Err(ApiError::JoinRequestStateConflict {
@@ -548,33 +653,42 @@ pub async fn approve_join_request(
         });
     }
 
-    let existing: Option<String> =
-        sqlx::query_scalar("SELECT trust_state FROM federation_peer WHERE node_id = $1 FOR UPDATE")
-            .bind(&request.manifest.node_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let existing = sqlx::query(peer_query!("WHERE node_id = $1 FOR UPDATE"))
+        .bind(&request.node_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .as_ref()
+        .map(peer_record)
+        .transpose()?;
 
-    let mut peer = PeerRecord::from_manifest(&request.manifest, now);
-    if let Some(current_name) = existing {
-        let current = TrustState::from_name(&current_name).ok_or_else(|| {
+    if request.state == "approved" {
+        let peer = existing.ok_or_else(|| {
             ApiError::FederationInvariant(format!(
-                "par {} com trust_state ilegível: {current_name}",
-                request.manifest.node_id
+                "pedido {} aprovado sem par",
+                request.join_request_id
             ))
         })?;
-        peer.trust_state = current;
-        peer.transition_to(TrustState::Authorized)
-            .map_err(|e| ApiError::TrustTransition {
-                current: e.current.as_str().to_owned(),
-                next: e.next.as_str().to_owned(),
-            })?;
-    } else {
-        peer.transition_to(TrustState::Authorized)
-            .map_err(|e| ApiError::TrustTransition {
-                current: e.current.as_str().to_owned(),
-                next: e.next.as_str().to_owned(),
-            })?;
+        if !peer.is_authorized() {
+            return Err(ApiError::TrustTransition {
+                current: peer.trust_state.as_str().to_owned(),
+                next: TrustState::Authorized.as_str().to_owned(),
+            });
+        }
+        tx.commit().await?;
+        return Ok((request, peer));
     }
+
+    let approval_epoch = i64::try_from(certificate.epoch)
+        .map_err(|_| ApiError::InvalidRequest("epoch de aprovação excede bigint".to_owned()))?;
+    let mut peer = PeerRecord::from_manifest(&request.manifest, now);
+    if let Some(existing) = existing {
+        peer.trust_state = existing.trust_state;
+    }
+    peer.transition_to(TrustState::Authorized)
+        .map_err(|e| ApiError::TrustTransition {
+            current: e.current.as_str().to_owned(),
+            next: e.next.as_str().to_owned(),
+        })?;
 
     sqlx::query(
         "INSERT INTO federation_peer \
@@ -609,38 +723,33 @@ pub async fn approve_join_request(
     .execute(&mut *tx)
     .await?;
 
-    // Aprovar de novo não reescreve o carimbo original: a evidência da primeira
-    // decisão é o que se preserva.
-    if request.state == "pending" {
-        sqlx::query(
-            "UPDATE federation_join_request \
-                SET state = 'approved', \
-                    approved_at = to_timestamp($2::double precision), \
-                    approved_by = $3, \
-                    approved_by_node = $4, \
-                    approval_signature = $5, \
-                    approval_epoch = $6, \
-                    approval_expires_at = to_timestamp($7::double precision) \
-              WHERE join_request_id = $1 AND state = 'pending'",
-        )
-        .bind(join_request_id)
-        .bind(now as f64)
-        .bind(approved_by)
-        .bind(&certificate.node_id)
-        .bind(&certificate.signature)
-        .bind(i64::try_from(certificate.epoch).unwrap_or(i64::MAX))
-        .bind(certificate.expires_at as f64)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    tx.commit().await?;
+    sqlx::query(
+        "UPDATE federation_join_request
+            SET state = 'approved',
+                approved_at = to_timestamp($2::double precision),
+                approved_by = $3,
+                approved_by_node = $4,
+                approval_signature = $5,
+                approval_epoch = $6,
+                approval_expires_at = to_timestamp($7::double precision)
+          WHERE join_request_id = $1 AND state = 'pending'",
+    )
+    .bind(join_request_id)
+    .bind(now as f64)
+    .bind(approved_by)
+    .bind(&certificate.node_id)
+    .bind(&certificate.signature)
+    .bind(approval_epoch)
+    .bind(certificate.expires_at as f64)
+    .execute(&mut *tx)
+    .await?;
 
     let row = sqlx::query(join_query!("WHERE join_request_id = $1"))
         .bind(join_request_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
-    request = join_view(&row)?;
+    let request = join_view(&row)?;
+    tx.commit().await?;
     Ok((request, peer))
 }
 
@@ -657,12 +766,14 @@ pub async fn approve_join_request(
 /// inválido/não autorizado/expirado/regressivo; `503` banco.
 pub async fn reject_join_request(
     pool: &PgPool,
-    genesis: &Genesis,
+    config: &DecisionConfig,
     join_request_id: &str,
     certificate: &ApprovalCertificate,
-    now: i64,
+    clock: impl FnOnce() -> i64,
 ) -> Result<JoinRequestView, ApiError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .await?;
 
     let row = sqlx::query(join_query!("WHERE join_request_id = $1 FOR UPDATE"))
         .bind(join_request_id)
@@ -674,7 +785,17 @@ pub async fn reject_join_request(
     };
     let request = join_view(&row)?;
 
-    verify_approval_certificate(&mut tx, genesis, &request, certificate, now).await?;
+    config.require_enabled(&request.manifest.cluster)?;
+    lock_decision_node(&mut tx, &certificate.node_id).await?;
+    verify_approval_certificate(
+        &mut tx,
+        &config.genesis,
+        &request,
+        certificate,
+        DecisionAction::Reject,
+        clock,
+    )
+    .await?;
 
     if request.state != "pending" {
         return Err(ApiError::JoinRequestStateConflict {
@@ -690,48 +811,42 @@ pub async fn reject_join_request(
     .execute(&mut *tx)
     .await?;
 
-    tx.commit().await?;
-
     let row = sqlx::query(join_query!("WHERE join_request_id = $1"))
         .bind(join_request_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
-    join_view(&row)
+    let request = join_view(&row)?;
+    tx.commit().await?;
+    Ok(request)
 }
 
-/// Lista pares registrados. `public_key` é dado público; não há segredo aqui.
+fn peer_record(row: &sqlx::postgres::PgRow) -> Result<PeerRecord, ApiError> {
+    let state_name: String = row.try_get("trust_state")?;
+    let trust_state = TrustState::from_name(&state_name).ok_or_else(|| {
+        ApiError::FederationInvariant(format!("trust_state ilegível no registro: {state_name}"))
+    })?;
+    Ok(PeerRecord {
+        peer_id: row.try_get("peer_id")?,
+        node_id: row.try_get("node_id")?,
+        public_key: row.try_get("public_key")?,
+        cluster: row.try_get("cluster")?,
+        region: row.try_get("region")?,
+        trust_state,
+        endpoints: row.try_get("endpoints")?,
+        software_version: row.try_get("software_version")?,
+        capabilities: row.try_get("capabilities")?,
+        epoch: row.try_get::<i64, _>("epoch")? as u64,
+        last_seen_at: row.try_get("last_seen_at")?,
+    })
+}
+
+/// Lista pares registrados. `public_key` é dado público.
 ///
 /// # Errors
 /// `503` banco, ou estado de confiança persistido ilegível (invariante).
 pub async fn list_peers(pool: &PgPool) -> Result<Vec<PeerRecord>, ApiError> {
-    let rows = sqlx::query(
-        "SELECT node_id, peer_id, public_key, cluster, region, trust_state, endpoints, \
-                software_version, capabilities, epoch, \
-                extract(epoch from last_seen_at)::bigint AS last_seen_at \
-           FROM federation_peer ORDER BY node_id",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    rows.iter()
-        .map(|row| {
-            let state_name: String = row.try_get("trust_state")?;
-            let trust_state = TrustState::from_name(&state_name).ok_or_else(|| {
-                ApiError::FederationInvariant(format!("trust_state ilegível: {state_name}"))
-            })?;
-            Ok(PeerRecord {
-                peer_id: row.try_get("peer_id")?,
-                node_id: row.try_get("node_id")?,
-                public_key: row.try_get("public_key")?,
-                cluster: row.try_get("cluster")?,
-                region: row.try_get("region")?,
-                trust_state,
-                endpoints: row.try_get("endpoints")?,
-                software_version: row.try_get("software_version")?,
-                capabilities: row.try_get("capabilities")?,
-                epoch: row.try_get::<i64, _>("epoch")? as u64,
-                last_seen_at: row.try_get("last_seen_at")?,
-            })
-        })
-        .collect()
+    let rows = sqlx::query(peer_query!("ORDER BY node_id"))
+        .fetch_all(pool)
+        .await?;
+    rows.iter().map(peer_record).collect()
 }

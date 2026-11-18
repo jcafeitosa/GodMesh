@@ -746,3 +746,26 @@ async fn m1bi_legacy_approval_blocks_0009_without_partial_changes() {
     .unwrap();
     assert_eq!(index, None);
 }
+
+#[test]
+fn m1bi_governance_malformada_impede_boot_do_servico() {
+    for value in [
+        "quorum:cluster",
+        "single_approver:",
+        "single_approver:a:b",
+        " ",
+    ] {
+        let result = Command::new(binario())
+            .env("DATABASE_URL", "not-a-postgres-url")
+            .env("GODMESH_GRANTS", "{\"grants\":[]}")
+            .env("BIND_ADDR", "127.0.0.1:0")
+            .env("GODMESH_FEDERATION_GOVERNANCE", value)
+            .env_remove("GODMESH_FEDERATION_GENESIS")
+            .env_remove("GODMESH_FEDERATION_BIND")
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(78), "{}", stderr_of(&result));
+        let error = stderr_of(&result);
+        assert!(error.contains("GODMESH_FEDERATION_GOVERNANCE"), "{value:?}: {error}");
+    }
+}

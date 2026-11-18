@@ -44,8 +44,8 @@ pub mod node;
 pub mod peer;
 pub mod transport;
 
+pub use approval::{ApprovalCertificate, ApprovalError, DecisionAction};
 pub use event::{EventPositionClaim, SignedEvent, SignedEventError, signed_event};
-pub use approval::{ApprovalCertificate, ApprovalError};
 pub use genesis::{Genesis, GenesisError, GenesisNode, GENESIS_ENV};
 pub use identity::{IdentityError, NodeIdentity, node_id_for, verify_node_id};
 pub use manifest::{DEFAULT_MAX_AGE_SECONDS, ManifestError, SignedManifest};

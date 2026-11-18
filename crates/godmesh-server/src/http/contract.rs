@@ -511,6 +511,11 @@ const fn advice(e: &ApiError) -> (&'static str, bool, &'static str) {
             false,
             "assine com a geração atual da identidade do nó; decisão velha não reescreve decisão nova",
         ),
+        ApiError::FederationGovernanceDisabled => (
+            "governança local de ingresso desabilitada para o cluster do pedido",
+            false,
+            "confira GODMESH_FEDERATION_GOVERNANCE no servidor",
+        ),
         ApiError::NoAuthorizedApprover => (
             "não existe nenhum nó autorizado no cluster: sem genesis declarado e sem par authorized, aprovar é impossível",
             false,
@@ -631,6 +636,7 @@ fn probes() -> Vec<ApiError> {
                 presented: 2,
             },
             ApiError::NoAuthorizedApprover,
+            ApiError::FederationGovernanceDisabled,
             ApiError::JoinRequestNotFound,
             ApiError::JoinRequestStateConflict {
                 state: "approved".to_owned(),
@@ -833,6 +839,11 @@ pub(crate) fn error_parts(e: &ApiError) -> (StatusCode, &'static str, String) {
             format!(
                 "epoch do certificado ({presented}) é regressivo; este nó já assinou epoch {recorded}"
             ),
+        ),
+        ApiError::FederationGovernanceDisabled => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "federation_governance_disabled",
+            "governança local de ingresso desabilitada para o cluster do pedido".to_owned(),
         ),
         ApiError::NoAuthorizedApprover => (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1055,7 +1066,7 @@ pub(crate) async fn capabilities(state: &AppState) -> Value {
         // nós o operador declarou como aprovadores antes de existir par
         // autorizado. `0` não é "não medido" — é "sem genesis", e então aprovar
         // exige um par já autorizado.
-        "federation_genesis_nodes": state.genesis.len(),
+        "federation_genesis_nodes": state.decisions.genesis_count(),
         "retention_classes": retention_classes,
         "outbox_enabled": state.outbox_enabled,
         "host_metrics_available": state.host_metrics_available,
