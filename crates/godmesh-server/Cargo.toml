@@ -11,6 +11,7 @@ godmesh-emergency = { path = "../godmesh-emergency" }
 godmesh-identity = { path = "../godmesh-identity", features = ["serde"] }
 godmesh-policy = { path = "../godmesh-policy" }
 godmesh-protocol = { path = "../godmesh-protocol" }
+godmesh-sync = { path = "../godmesh-sync" }
 
 axum = "0.8.9"
 serde = { version = "1.0.229", features = ["derive"] }

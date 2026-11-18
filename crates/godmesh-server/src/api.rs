@@ -57,6 +57,14 @@ pub enum ApiError {
     GrantDenied(GrantDecision),
     /// Classe sem política efetiva para a jurisdição do tenant (ADR-062).
     RetentionPolicyMissing,
+    /// Salto em relação ao prefixo contíguo da stream (ADR-057): nenhuma lacuna
+    /// é saltada; o chamador precisa enviar a posição esperada.
+    SequenceGap { expected: u64, got: u64 },
+    /// Cursor ilegível, de versão desconhecida, sem partição ou de outro
+    /// principal. Distinto de cursor ausente, que começa do início.
+    CursorInvalid(String),
+    /// Cursor de outra partição/epoch/tenant/filtro: recusado, nunca traduzido.
+    CursorIncomparable(String),
     /// Tenant sem jurisdição declarada: não há como resolver a política (ADR-066).
     RetentionScopeUnresolved,
     /// O `incident_id` já pertence a outro tenant.

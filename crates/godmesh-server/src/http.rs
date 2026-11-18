@@ -6,7 +6,7 @@
 //! não existe caminho de código que chame o caso de uso sem credencial.
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Extension, Path, Request, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -17,9 +17,8 @@ use sqlx::PgPool;
 
 use crate::api::{create_incident, ApiError, IncidentPayload, IncidentResponse};
 use crate::auth::{bearer_token, GrantRegistry, VerifiedGrant};
-use crate::lifecycle::{
-    load_incident, transition, AcknowledgePayload, IncidentView, Transition,
-};
+use crate::events::{create_event, list_events, EventAck, EventPage, EventPayload, EventQuery};
+use crate::lifecycle::{load_incident, transition, AcknowledgePayload, IncidentView, Transition};
 
 /// Estado compartilhado.
 #[derive(Clone)]
@@ -41,6 +40,7 @@ pub fn router(pool: PgPool, grants: GrantRegistry) -> Router {
         .route("/v1/incidents/{id}/ack-technical", post(post_ack_technical))
         .route("/v1/incidents/{id}/acknowledge", post(post_acknowledge))
         .route("/v1/incidents/{id}/close", post(post_close))
+        .route("/v1/events", post(post_event).get(get_events))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
     Router::new()
@@ -164,6 +164,36 @@ async fn post_close(
         .map_err(ApiErrorResponse::from)
 }
 
+async fn post_event(
+    State(state): State<AppState>,
+    Extension(grant): Extension<VerifiedGrant>,
+    payload: Result<Json<EventPayload>, JsonRejection>,
+) -> Result<(StatusCode, Json<EventAck>), ApiErrorResponse> {
+    let Json(payload) = payload.map_err(|rejection| {
+        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
+    })?;
+    // 201 na posição nova, 200 na repetição idempotente da mesma posição. O ACK
+    // nunca passa de `persisted_local` (ADR-058).
+    match create_event(&state.pool, &grant, payload).await {
+        Ok(outcome) => Ok((created_status(outcome.created), Json(outcome.response))),
+        Err(e) => Err(ApiErrorResponse::from(e)),
+    }
+}
+
+async fn get_events(
+    State(state): State<AppState>,
+    Extension(grant): Extension<VerifiedGrant>,
+    query: Result<Query<EventQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<EventPage>, ApiErrorResponse> {
+    let Query(query) = query.map_err(|rejection| {
+        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
+    })?;
+    list_events(&state.pool, &grant, query)
+        .await
+        .map(Json)
+        .map_err(ApiErrorResponse::from)
+}
+
 /// 201 na primeira gravação, 200 no replay idempotente do mesmo tenant.
 const fn created_status(created: bool) -> StatusCode {
     if created {
@@ -209,7 +239,26 @@ impl ApiErrorResponse {
             ApiError::RetentionPolicyMissing => (
                 StatusCode::CONFLICT,
                 "retention_policy_missing",
-                "classe incidente_sos sem política aplicável à jurisdição do tenant".to_owned(),
+                "classe de retenção sem política aplicável à jurisdição do tenant".to_owned(),
+            ),
+            // Lacuna não é aceita nem completada: a resposta nomeia a posição que
+            // a stream espera, e nada é gravado.
+            ApiError::SequenceGap { expected, got } => (
+                StatusCode::CONFLICT,
+                "sequence_gap",
+                format!("posição {got} salta a lacuna: a stream espera {expected}"),
+            ),
+            // Cursor ilegível/expirado e cursor vazio são recusados de forma
+            // distinta de cursor ausente (que começa a leitura do início).
+            ApiError::CursorInvalid(detail) => (
+                StatusCode::BAD_REQUEST,
+                "cursor_invalid",
+                detail.clone(),
+            ),
+            ApiError::CursorIncomparable(detail) => (
+                StatusCode::BAD_REQUEST,
+                "cursor_incomparable",
+                detail.clone(),
             ),
             ApiError::RetentionScopeUnresolved => (
                 StatusCode::CONFLICT,

@@ -34,3 +34,45 @@ fn cursor_of_gap_requires_rebootstrap_instead_of_silent_skip() {
     let seguinte = EventPosition::new("node-a", "tenant-1", "stream-9", 1, 7, 43).unwrap();
     assert!(!seguinte.needs_rebootstrap_from(&esperado));
 }
+
+// --- admissão contra o prefixo contíguo (servidor POST /v1/events) -----------
+
+use godmesh_sync::position::Admission;
+
+#[test]
+fn only_the_position_after_the_contiguous_prefix_is_new() {
+    let proxima = EventPosition::new("node-a", "tenant-1", "stream-9", 1, 7, 43).unwrap();
+    assert_eq!(proxima.admit(42), Admission::Next);
+    assert_eq!(
+        EventPosition::new("node-a", "tenant-1", "stream-9", 1, 7, 1)
+            .unwrap()
+            .admit(0),
+        Admission::Next,
+        "primeira posição da stream é 1"
+    );
+}
+
+#[test]
+fn position_inside_the_prefix_is_a_duplicate_not_a_new_event() {
+    let antiga = EventPosition::new("node-a", "tenant-1", "stream-9", 1, 7, 42).unwrap();
+    assert_eq!(antiga.admit(42), Admission::Duplicate);
+    assert_eq!(
+        EventPosition::new("node-a", "tenant-1", "stream-9", 1, 7, 7)
+            .unwrap()
+            .admit(42),
+        Admission::Duplicate
+    );
+}
+
+#[test]
+fn jump_ahead_of_the_prefix_is_a_gap_and_names_the_expected_position() {
+    let salto = EventPosition::new("node-a", "tenant-1", "stream-9", 1, 7, 45).unwrap();
+    assert_eq!(salto.admit(42), Admission::Gap { expected: 43 });
+    assert_eq!(
+        EventPosition::new("node-a", "tenant-1", "stream-9", 1, 7, 2)
+            .unwrap()
+            .admit(0),
+        Admission::Gap { expected: 1 },
+        "stream vazia só aceita a sequência 1"
+    );
+}

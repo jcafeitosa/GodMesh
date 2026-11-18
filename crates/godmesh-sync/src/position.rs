@@ -58,6 +58,26 @@ impl EventPosition {
         self.seq
     }
 
+    /// Decide a admissão desta posição contra o prefixo contíguo da stream.
+    ///
+    /// O prefixo contíguo é a maior sequência `p` tal que todo `1..=p` já está
+    /// durável neste namespace. A regra é a mesma do Inbox (ADR-057): a única
+    /// posição aceitável como novidade é `p + 1`; qualquer sequência acima disso
+    /// é lacuna e **nunca** é saltada — o chamador deve pedir rebootstrap. Uma
+    /// sequência já coberta pelo prefixo é repetição, não novidade.
+    #[must_use]
+    pub fn admit(&self, contiguous_prefix: u64) -> Admission {
+        if self.seq <= contiguous_prefix {
+            Admission::Duplicate
+        } else if self.seq == contiguous_prefix.saturating_add(1) {
+            Admission::Next
+        } else {
+            Admission::Gap {
+                expected: contiguous_prefix.saturating_add(1),
+            }
+        }
+    }
+
     /// Indica que chegou um evento com lacuna em relação ao esperado.
     ///
     /// O chamador deve pedir rebootstrap; **nunca** saltar a lacuna em silêncio.
@@ -91,6 +111,17 @@ impl PartialOrd for EventPosition {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+/// Resultado da admissão de uma posição contra o prefixo contíguo da stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// É exatamente a próxima posição do prefixo: pode ser persistida.
+    Next,
+    /// Já coberta pelo prefixo: repetição, sem nova gravação.
+    Duplicate,
+    /// Salto em relação ao prefixo: recusar e pedir o intervalo ausente.
+    Gap { expected: u64 },
 }
 
 /// Erros de contrato de posição.
