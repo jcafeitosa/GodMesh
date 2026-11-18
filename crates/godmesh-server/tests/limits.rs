@@ -13,7 +13,10 @@
 //!  * bucket por *(tenant, token, classe)*: um tenant não esgota o outro, e o
 //!    flood de uma classe não consome a cota de SOS;
 //!  * requisição não autenticada limitada por IP (com `ConnectInfo`);
-//!  * timeout por rota → **504 `request_timeout`** com corpo estável.
+//!  * timeout por rota → **503 `request_timeout`** com `effect: unknown` e
+//!    reenvio com a mesma idempotência (leitura da RFC 9110 em `gate`);
+//!  * teto configurado acima de 2 MiB é respeitado também pelo extrator do
+//!    axum (`DefaultBodyLimit` alinhado) — nenhuma recusa vem do framework.
 //!
 //! O que NÃO é provado aqui (declarado na evidência): cota é **por processo**,
 //! não distribuída; não há teste de carga real.
@@ -465,6 +468,74 @@ async fn corpo_chunked_acima_do_teto_e_413_sem_content_length() {
     assert_eq!(reply.error(), "payload_too_large");
 }
 
+/// O teto **configurado** acima de 2 MiB tem que valer de ponta a ponta. O axum
+/// impõe 2 MiB por conta própria aos extratores `Json`/`Bytes` (`DefaultBodyLimit`)
+/// e responde com corpo **dele**, fora do contrato — o portão alinha o teto do
+/// framework ao teto declarado (`extractor_body_limit`). Prova no fio:
+///  * corpo de 2,5 MiB **dentro** do teto de 3 MiB chega ao handler (a recusa
+///    que vem é de domínio — `retention_policy_missing` — nunca de tamanho);
+///  * corpo **acima** do teto de 3 MiB cai no portão, ainda em chunked, e a
+///    recusa continua no formato do contrato `{error, detail, hint, ack_class}`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn teto_acima_de_2_mib_e_respeitado_e_a_recusa_continua_no_formato_do_contrato() {
+    let Some(pool) = common::pool_com_conexoes(4).await else {
+        eprintln!("SKIP: DATABASE_URL ausente");
+        return;
+    };
+    let (grants, tokens) = registry();
+    let config = AdmissionConfig {
+        max_inbox_body_bytes: 3 * 1024 * 1024,
+        ..AdmissionConfig::default()
+    };
+    let addr = serve(pool.clone(), grants, config).await;
+
+    // 2,5 MiB: acima do teto silencioso do axum, dentro do teto declarado.
+    // A classe de retenção do envelope é um padding de 2,5 MiB: a recusa de
+    // domínio `retention_policy_missing` (409) só existe DEPOIS do `Json` do
+    // axum ter desserializado o corpo inteiro — prova de que o extrator aceitou
+    // o tamanho. Se o teto silencioso de 2 MiB do framework ainda valesse, a
+    // resposta seria uma rejeição de corpo do próprio axum, nunca 409.
+    let mut corpo_2m5 = inbox_body(&unique("stream-2mib"), "node-limits", &[1]);
+    corpo_2m5 = corpo_2m5.replace(
+        &format!("\"retention_class\":\"{CLASS}\""),
+        &format!("\"retention_class\":\"{}\"", "r".repeat(2_600_000)),
+    );
+    assert!(corpo_2m5.len() > 2 * 1024 * 1024 && corpo_2m5.len() < 3 * 1024 * 1024);
+    let reply = send_async(
+        addr,
+        "POST",
+        "/v1/sync/inbox",
+        Some(&tokens.sync),
+        None,
+        Some(corpo_2m5),
+    )
+    .await;
+    assert_ne!(reply.status, 413, "dentro do teto declarado não pode haver 413: {:?}", reply.body);
+    assert_eq!(
+        reply.error(),
+        "retention_policy_missing",
+        "o corpo tem que chegar ao handler, não ser recusado pelo extrator do axum: {:?}",
+        reply.body
+    );
+
+    // 3 MiB + 1 declarado: acima do teto configurado — recusa do portão, no
+    // formato do contrato, com `hint` acionável (ADR-074). `declared_oversized`
+    // evita o RST engolir a resposta quando o corpo ainda estaria por vir.
+    let reply = send(
+        addr,
+        declared_oversized("POST", "/v1/sync/inbox", &tokens.sync, 3 * 1024 * 1024 + 1),
+    );
+    assert_eq!(reply.status, 413, "acima do teto de 3 MiB: {:?}", reply.body);
+    assert_eq!(reply.error(), "payload_too_large");
+    assert!(reply.body["detail"].is_string(), "detail presente: {:?}", reply.body);
+    assert!(
+        reply.body["hint"].as_str().is_some_and(|h| !h.is_empty()),
+        "hint acionável no corpo da recusa: {:?}",
+        reply.body
+    );
+    assert_eq!(reply.body["ack_class"], "transport_accepted");
+}
+
 // ---------------------------------------------------------------------------
 // 2. Cotas
 // ---------------------------------------------------------------------------
@@ -758,11 +829,15 @@ async fn sem_credencial_a_cota_e_por_ip_com_connectinfo() {
 // ---------------------------------------------------------------------------
 
 /// Com o banco ocupado (pool de 1 conexão retida pelo teste), o handler não
-/// termina dentro do teto declarado: 504 com corpo estável, e nada foi
-/// confirmado. A prova é a resposta do portão, não a ausência do efeito — o
-/// contrato de timeout **nunca promete** que nada aconteceu.
+/// termina dentro do teto declarado: **503** `request_timeout` com corpo
+/// estável — não 504 (RFC 9110 §15.6.5 reserva 504 para gateway/proxy sem
+/// resposta de upstream; aqui o atraso é do próprio servidor) nem 408 (§15.5.9
+/// pressupõe requisição incompleta, o que não é o caso). A prova é a resposta
+/// do portão, não a ausência do efeito: o corpo declara `effect: unknown`,
+/// manda reenviar com a mesma idempotência e traz `Retry-After` (autorizado
+/// pela §15.6.4 para o 503).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn handler_lento_alcanca_o_teto_e_recebe_504_request_timeout() {
+async fn handler_lento_alcanca_o_teto_e_recebe_503_request_timeout_com_effect_unknown() {
     let Some(pool) = common::pool_com_conexoes(1).await else {
         eprintln!("SKIP: DATABASE_URL ausente");
         return;
@@ -786,11 +861,23 @@ async fn handler_lento_alcanca_o_teto_e_recebe_504_request_timeout() {
         Some(json!({"incident_id": unique("inc-timeout")}).to_string()),
     )
     .await;
-    assert_eq!(reply.status, 504, "{:?}", reply.body);
+    assert_eq!(reply.status, 503, "{:?}", reply.body);
     assert_eq!(reply.error(), "request_timeout");
     assert_eq!(reply.body["ack_class"], "transport_accepted");
+    assert_eq!(
+        reply.body["effect"], "unknown",
+        "timeout deve declarar efeito desconhecido: {:?}",
+        reply.body
+    );
+    assert!(
+        reply.body["hint"].as_str().is_some_and(|h| h.contains("idempot")),
+        "hint deve mandar reenviar com a mesma idempotência: {:?}",
+        reply.body
+    );
+    assert_eq!(reply.retry_after(), Some(1), "503 com Retry-After (§15.6.4)");
 
     drop(amarra);
-    // O timeout em si não é o que se prova; provamos o corpo estável e o
-    // status. O reenvio idempotente é a estratégia declarada ao cliente.
+    // O timeout em si não é o que se prova; provamos o corpo estável, o status
+    // e a declaração de efeito desconhecido. O reenvio com a mesma
+    // idempotência é a estratégia declarada ao cliente.
 }

@@ -1,5 +1,12 @@
 # Histórico da documentação
 
+## Porta do SEC1 concorrente: teto do extrator, `effect: unknown` e timeout 503 — 18/11/2026
+- Três melhorias de `1799e51` portadas **sem** substituir a implementação integrada: a arquitetura de dois portões, os limites e os defaults testados permanecem.
+- **Teto do extrator alinhado** (`DefaultBodyLimit::max(payload_ceiling())`): teto configurado acima de 2 MiB passa a valer de ponta a ponta; sem isto, o axum recusava corpo sozinho, fora do contrato `{error, detail, hint, ack_class}`.
+- **Timeout declara `effect: unknown`** + `timeout_ms` + hint de reenvio com a mesma idempotência; todas as recusas do portão ganharam `hint` acionável (ADR-074).
+- **Status do timeout redecidido 504 → 503** com citação da RFC 9110 §15.5.9/§15.6.4/§15.6.5: 504 exige papel de gateway/proxy com upstream (não é o caso); 408 pressupõe requisição incompleta (a nossa chegou inteira); 503 é a única definição que descreve incapacidade temporária de tratar a requisição e autoriza `Retry-After`. Emenda registrada na evidência anterior.
+- Verificações: **331** testes (329 anteriores + 2 novos), 0 falha; clippy limpo; `run_all.sh` com 44 invariantes. Evidência: `docs/09-equipe/evidencias/2026-11-18-sec-porta-teto-extrator-e-timeout-503.md`.
+
 ## SEC1 integrada à malha: cotas, payload e admissão por classe sobre federação — 18/11/2026
 - `6b21211` (cotas/admissão) foi reaplicado sobre o main **depois** da federação M1+M2 e do roteador dividido por domínio: `AppState` agora carrega `federation: Option<Arc<PeerLinks>>` **e** `admission: Arc<Admission>`, e `build_router` recebe os dois anexos.
 - Novo construtor do binário: `http::router_with_federation_and_admission(pool, grants, federation, admission)`. Os cinco construtores públicos existentes (`router`, `router_with`, `router_with_log`, `router_with_federation`, `router_with_admission`) mantiveram a assinatura que os testes e o `--migrate-only` já usam.

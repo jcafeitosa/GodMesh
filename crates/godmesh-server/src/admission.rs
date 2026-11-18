@@ -284,6 +284,21 @@ impl Default for AdmissionConfig {
 }
 
 impl AdmissionConfig {
+    /// Maior teto de corpo configurado entre todas as famílias de rota.
+    ///
+    /// É o valor com que o teto interno do extrator do axum (2 MiB por padrão,
+    /// `DefaultBodyLimit`) precisa ser alinhado: acima dele o axum recusaria
+    /// corpo sozinho, com resposta fora do contrato da fronteira. `max(1)`
+    /// porque `DefaultBodyLimit::max(0)` recusaria qualquer corpo lido por
+    /// extrator, inclusive onde o portão já mediu.
+    #[must_use]
+    pub fn payload_ceiling(&self) -> usize {
+        self.max_body_bytes
+            .max(self.max_event_body_bytes)
+            .max(self.max_inbox_body_bytes)
+            .max(1)
+    }
+
     /// Nomes de ambiente, defaults e validação em uma só tabela (fonte única).
     const ENV_MAX_BODY: &'static str = "GODMESH_MAX_BODY_BYTES";
     const ENV_MAX_EVENT_BODY: &'static str = "GODMESH_MAX_EVENT_BODY_BYTES";
@@ -693,6 +708,28 @@ mod tests {
 
     fn config() -> AdmissionConfig {
         AdmissionConfig::default()
+    }
+
+    #[test]
+    fn teto_maior_configurado_alinha_o_extrator_do_axum() {
+        // Default: o maior teto é o do inbox (256 KiB) — bem abaixo dos 2 MiB
+        // silenciosos do framework, que portanto nunca contraria o portão.
+        assert_eq!(AdmissionConfig::default().payload_ceiling(), 256 * 1024);
+        // Operador acima de 2 MiB: o teto do extrator tem que acompanhar.
+        let config = AdmissionConfig {
+            max_event_body_bytes: 3 * 1024 * 1024,
+            ..AdmissionConfig::default()
+        };
+        assert_eq!(config.payload_ceiling(), 3 * 1024 * 1024);
+        // Teto zero em tudo não desliga o extrator para 0 (recusaria qualquer
+        // corpo lido por extrator, inclusive o que o portão já mediu).
+        let config = AdmissionConfig {
+            max_body_bytes: 0,
+            max_event_body_bytes: 0,
+            max_inbox_body_bytes: 0,
+            ..AdmissionConfig::default()
+        };
+        assert_eq!(config.payload_ceiling(), 1);
     }
 
     #[test]

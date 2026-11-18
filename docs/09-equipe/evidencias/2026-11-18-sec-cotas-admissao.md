@@ -39,7 +39,7 @@ cota (limitar o healthcheck do LB seria tiro no pé; 404 não tem efeito a limit
 | Corpo geral | 64 KiB (`GODMESH_MAX_BODY_BYTES`) | `POST/… /v1/incidents*`, `/v1/admin/*`, `/v1/federation/*` | **413 `payload_too_large`** | antes de ler/desserializar (Content-Length) ou lendo com teto (chunked) |
 | Corpo de evento | 64 KiB (`GODMESH_MAX_EVENT_BODY_BYTES`) | `POST /v1/events` | **413 `payload_too_large`** | idem |
 | Corpo de lote inbox | 256 KiB (`GODMESH_MAX_INBOX_BODY_BYTES`) | `POST /v1/sync/inbox` | **413 `payload_too_large`** | idem (o teto de 100 posições por lote continua sendo do handler, 422) |
-| Timeout | 10 s (`GODMESH_REQUEST_TIMEOUT_MS`) | toda rota com política | **504 `request_timeout`** | corpo estável, sem promessa de ausência de efeito; reenvio idempotente é a estratégia declarada |
+| Timeout | 10 s (`GODMESH_REQUEST_TIMEOUT_MS`) | toda rota com política | **504 `request_timeout`** ~~emendado para 503~~ (ver `2026-11-18-sec-porta-teto-extrator-e-timeout-503.md`) | corpo estável, sem promessa de ausência de efeito; reenvio idempotente é a estratégia declarada |
 | Cota de requisições | 1000 rps / burst 1000 por *(tenant, token, classe)* (`GODMESH_LIMIT_REQUESTS_PER_SEC`/`_BURST`, override `GODMESH_LIMIT_<ESCOPO>_RPS/_RBUCKET`) | todas com política | **429 `rate_limited`** + `Retry-After` | antes do handler; sem efeito |
 | Cota de eventos | 1000 eps / burst 1000 por *(tenant, token, classe)* (`GODMESH_LIMIT_EVENTS_PER_SEC`/`_BURST`, override `..._EPS/_EBUCKET`) | `POST /v1/events` (custo 1), `POST /v1/sync/inbox` (custo = nº de posições) | **429 `rate_limited`** + `Retry-After` | custo lido do corpo **antes** da desserialização; lote recusado por inteiro, nunca parcial |
 | Cota por IP (sem credencial) | 500 rps / burst 1000 (`GODMESH_LIMIT_IP_RPS/_BURST`) | rotas com política, pedido sem `Authorization` | **429 `rate_limited`** + `Retry-After` | requer `ConnectInfo` (produção); ausente, o teto é do edge — declarado |
@@ -120,9 +120,10 @@ RESULTADO: OK — 44 invariantes verificados em banco criado do zero.
   do 413 (comportamento HTTP padrão de recusa por tamanho — nginx idem; um cliente real
   interrompe o upload ao receber a resposta). Os testes provam o caminho chunked (corpo
   realmente fluindo) e o caminho declarado.
-* **Timeout não garante ausência de efeito.** 504 cancela o futuro do handler; uma transação
+* **Timeout não garante ausência de efeito.** ~~504~~ 503 (emenda:
+  `2026-11-18-sec-porta-teto-extrator-e-timeout-503.md`) cancela o futuro do handler; uma transação
   já enviada ao Postgres pode ter cometido depois do cancelamento. O corpo diz exatamente
-  isso e manda reenviar com a mesma idempotência — nenhuma promessa forte é feita.
+  isso (`effect: unknown`) e manda reenviar com a mesma idempotência — nenhuma promessa forte é feita.
 * **Poda de buckets é aproximada:** acima de 8192 chaves, entradas ociosas (>5 min) são
   removidas; perder bucket só reinicia a janela daquela chave. Sem teste de esgotamento do
   mapa.
@@ -137,7 +138,7 @@ RESULTADO: OK — 44 invariantes verificados em banco criado do zero.
 | Requisito | Decisão/registrado em | Código | Teste |
 |---|---|---|---|
 | Payload por rota, 413 antes de desserializar | docs do módulo `admission` §1; envs §1 acima | `gate::http_gate` | `corpo_acima_do_teto…413…sem_insert`, `teto_de_payload_e_por_rota…`, `corpo_chunked…` |
-| Timeout por rota, 504 estável | docs `AdmissionConfig::request_timeout` | `http_gate` (tokio::time::timeout) | `handler_lento_alcanca_o_teto_e_recebe_504…` |
+| Timeout por rota, ~~504~~ 503 estável (emenda: `2026-11-18-sec-porta-teto-extrator-e-timeout-503.md`) | docs `AdmissionConfig::request_timeout` | `http_gate` (tokio::time::timeout) | `handler_lento_alcanca_o_teto_e_recebe_503_request_timeout_com_effect_unknown` |
 | Cotas req/s e eventos/s por escopo, 429+Retry-After | `ScopeLimits`, envs por escopo | `grant_gate` + `Admission::check_*` | `rajada_acima_da_cota…`, `lote_grande_esgota_a_cota_de_eventos…` |
 | Chave tenant+token; não autenticado por IP | docs do módulo; `ConnectInfo` em `runtime::serve` | `BucketKey`, `check_anonymous` | `cota_de_um_tenant_nao_afeta_outro_tenant`, `sem_credencial_a_cota_e_por_ip…` |
 | Classes `sos>ptt>incident>event>sync>metrics`; guarda antes do handler; SOS nunca recusada por cota alheia | docs §3; tabela `route_class` | `grant_gate` (pressão+buckets por classe) | `sob_pressao_classe_baixa_e_503_enquanto_sos_continua_201`, `flood_de_evento_nao_consome_a_cota_de_sos`, `classes_are_ordered_…` (unit) |

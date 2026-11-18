@@ -304,6 +304,10 @@ fn build_router(
     // dia divergir, o teste de contrato sonda rota por rota e falha.
     let openapi_json = Arc::new(openapi::document(&route_specs));
     let host_metrics_available = route_specs.iter().any(|spec| spec.path == "/metrics");
+    // Teto dos extratores do axum alinhado ao teto efetivo: sem isso, o padrão
+    // de 2 MiB recusaria em nosso lugar, com corpo fora do contrato, quando o
+    // operador configura teto maior.
+    let body_limit = gate::extractor_body_limit(admission.config());
 
     let state = AppState {
         pool,
@@ -339,6 +343,7 @@ fn build_router(
     Router::new()
         .merge(out.public)
         .merge(protected)
+        .layer(body_limit)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             gate::http_gate,

@@ -7,7 +7,7 @@
 //!
 //! * [`http_gate`] — camada mais externa com estado: classifica pela URL, aplica
 //!   o teto de corpo (413 antes de desserializar), a cota **por IP** para pedidos
-//!   sem credencial (429) e o timeout de requisição (504).
+//!   sem credencial (429) e o timeout de requisição (503 `request_timeout`).
 //! * [`grant_gate`] — roda depois de `require_grant`: conhece o grant verificado,
 //!   então aplica a cota por *(tenant, token, classe)* (429), a cota de eventos
 //!   por escopo (429) e a recusa por pressão para classes baixas (503).
@@ -15,28 +15,50 @@
 //! Ordem resultante em uma rota `/v1`: `observe → http_gate → require_grant →
 //! grant_gate → portão de escopo → handler`. Todas as recusas acontecem antes
 //! de qualquer INSERT e devolvem o mesmo formato de erro do resto da API.
+//!
+//! [`extractor_body_limit`] alinha o teto interno dos extratores do axum (2 MiB
+//! por padrão, com corpo de erro **do axum**, fora do contrato) ao maior teto
+//! configurado: quem recusa por tamanho é sempre o portão, nunca o framework.
+
+use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::AppState;
-use crate::admission::{CLASS_HEADER, RequestClass, RoutePolicy, inbox_event_cost, route_class};
+use crate::admission::{
+    AdmissionConfig, CLASS_HEADER, RequestClass, RoutePolicy, inbox_event_cost, route_class,
+};
 use crate::auth::VerifiedGrant;
 
 /// Formato estável de recusa do portão — os mesmos campos de todo erro da API
-/// (`error`, `detail`, `ack_class`), mais `Retry-After` quando o cliente tem
-/// o que esperar. `ack_class` é o piso honesto: nada foi confirmado.
-fn refusal(status: StatusCode, code: &str, detail: &str, retry_after: Option<u64>) -> Response {
-    let body = json!({
+/// (`error`, `detail`, `hint`, `ack_class`), mais campos extras quando o
+/// cliente precisa deles, e `Retry-After` quando tem o que esperar.
+/// `ack_class` é o piso honesto: nada foi confirmado.
+fn refusal(
+    status: StatusCode,
+    code: &str,
+    detail: &str,
+    hint: &str,
+    retry_after: Option<u64>,
+    extra: &[(&str, Value)],
+) -> Response {
+    let mut body = json!({
         "error": code,
         "detail": detail,
+        "hint": hint,
         "ack_class": "transport_accepted",
     });
+    for (key, value) in extra {
+        body.as_object_mut()
+            .expect("json! acima é objeto")
+            .insert((*key).to_owned(), value.clone());
+    }
     let mut response = (status, axum::Json(body)).into_response();
     if let Some(secs) = retry_after
         && let Ok(value) = HeaderValue::from_str(&secs.to_string())
@@ -51,7 +73,9 @@ fn payload_too_large(limit: usize) -> Response {
         StatusCode::PAYLOAD_TOO_LARGE,
         "payload_too_large",
         &format!("corpo acima do teto declarado de {limit} bytes; nada foi lido ou gravado"),
+        "divida o corpo em pedidos menores, dentro do teto da rota",
         None,
+        &[],
     )
 }
 
@@ -60,7 +84,9 @@ fn rate_limited(retry_after: u64) -> Response {
         StatusCode::TOO_MANY_REQUESTS,
         "rate_limited",
         "cota do grant excedida; nenhuma escrita foi tentada",
+        "aguarde o Retry-After e reenvie; nada foi gravado neste pedido",
         Some(retry_after),
+        &[],
     )
 }
 
@@ -69,17 +95,43 @@ fn admission_shed(retry_after: u64) -> Response {
         StatusCode::SERVICE_UNAVAILABLE,
         "admission_control",
         "servidor sob pressão; esta classe de tráfego foi recusada agora",
+        "aguarde o Retry-After e reenvie; classes prioritárias seguem admitidas",
         Some(retry_after),
+        &[],
     )
 }
 
-fn request_timeout() -> Response {
+/// 503 — não 504, não 408 — para timeout de processamento próprio, com a
+/// leitura literal da RFC 9110:
+///  * §15.6.5: o 504 vale quando o servidor, "while acting as a gateway or
+///    proxy", não recebeu resposta de "an upstream server" — aqui não há
+///    upstream: o atraso é do nosso próprio handler.
+///  * §15.5.9: o 408 vale quando o servidor "did not receive a complete
+///    request" — aqui a requisição chegou inteira; o que estourou foi o tempo
+///    de processá-la, e repetir "sem modificação" só é seguro com a mesma
+///    chave de idempotência, o que o 408 não presume.
+///  * §15.6.4: o 503 descreve o servidor "currently unable to handle the
+///    request due to a temporary overload", condição que "will likely be
+///    alleviated after some delay", e é a seção que autoriza `Retry-After`.
+///
+/// O corpo declara `effect: "unknown"`: o futuro do handler foi cancelado no
+/// meio e uma transação pode ter cometido. `ack_class` fica no piso honesto
+/// (`transport_accepted`, ADR-058), e o `hint` manda reenviar com a mesma
+/// idempotência — é o que torna o reenvio seguro apesar do efeito ignorado.
+fn request_timeout(timeout: Duration) -> Response {
     refusal(
-        StatusCode::GATEWAY_TIMEOUT,
+        StatusCode::SERVICE_UNAVAILABLE,
         "request_timeout",
-        "a requisição excedeu o timeout declarado; nada foi confirmado — reenvie \
-         com a mesma idempotência",
-        None,
+        &format!(
+            "a requisição excedeu o timeout declarado de {} ms e foi interrompida; \
+             o efeito no banco é desconhecido — uma transação pode ter cometido",
+            timeout.as_millis()
+        ),
+        "reenvie com a mesma chave de idempotência: o replay resolve, não duplica",
+        // 1 s: o mesmo degrau honesto da recusa por pressão; o servidor não
+        // sabe quanto o pedido lento levaria, então sugere o mínimo.
+        Some(1),
+        &[("effect", json!("unknown")), ("timeout_ms", json!(timeout.as_millis()))],
     )
 }
 
@@ -91,8 +143,20 @@ fn invalid_class(raw: &str) -> Response {
             "classe de tráfego {raw:?} desconhecida; valores: \
              sos, ptt, incident, event, sync, metrics"
         ),
+        "declare uma classe da taxonomia ou omita o header e use a tabela de rotas",
         None,
+        &[],
     )
+}
+
+/// Alinhamento do teto dos extratores do axum (`DefaultBodyLimit`, 2 MiB por
+/// padrão) ao maior teto configurado. Sem isto, um teto operacional acima de
+/// 2 MiB seria respeitado pelo portão e furado pelo framework: o `Json`
+/// respondia com rejeição **do axum**, fora do contrato `{error, detail,
+/// hint, ack_class}`. O portão continua sendo quem recusa por tamanho; aqui
+/// só se impede o segundo guardião silencioso de discordar do primeiro.
+pub(super) fn extractor_body_limit(config: &AdmissionConfig) -> DefaultBodyLimit {
+    DefaultBodyLimit::max(config.payload_ceiling())
 }
 
 /// Classe efetiva do pedido: header declarado se presente, senão a tabela de
@@ -165,10 +229,12 @@ pub async fn http_gate(State(state): State<AppState>, request: Request, next: Ne
     }
 
     // 3) Timeout por rota. O futuro do handler é cancelado no estouro; a
-    //    resposta não promete ausência de efeito — só 504 com corpo estável.
-    match tokio::time::timeout(table.timeout(config), next.run(request)).await {
+    //    resposta não promete ausência de efeito — declara `effect: unknown`
+    //    e manda reenviar com a mesma idempotência (ver `request_timeout`).
+    let timeout = table.timeout(config);
+    match tokio::time::timeout(timeout, next.run(request)).await {
         Ok(response) => response,
-        Err(_) => request_timeout(),
+        Err(_) => request_timeout(timeout),
     }
 }
 
