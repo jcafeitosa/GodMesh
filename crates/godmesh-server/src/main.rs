@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use godmesh_server::auth::GrantRegistry;
-use godmesh_server::{lifecycle, migrate};
+use godmesh_server::{migrate, runtime};
 use sqlx::postgres::PgPoolOptions;
 
 /// Endereço padrão aceito **apenas** em ambiente de desenvolvimento: só loopback.
@@ -243,11 +243,11 @@ async fn run(config: Config) -> Result<(), String> {
         grants.len()
     );
 
-    let served = lifecycle::serve(
+    let served = runtime::serve(
         listener,
         godmesh_server::http::router(pool.clone(), grants),
         pool,
-        lifecycle::shutdown_signal(),
+        runtime::shutdown_signal(),
     )
     .await?;
 
