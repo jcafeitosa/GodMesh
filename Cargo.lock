@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "godmesh-core"
+version = "0.1.0"
+dependencies = [
+ "godmesh-emergency",
+ "godmesh-identity",
+ "godmesh-policy",
+ "godmesh-protocol",
+ "godmesh-sync",
+]
+
+[[package]]
 name = "godmesh-emergency"
 version = "0.1.0"
 

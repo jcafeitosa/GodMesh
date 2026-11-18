@@ -6,6 +6,7 @@ members = [
     "crates/godmesh-sync",
     "crates/godmesh-policy",
     "crates/godmesh-emergency",
+    "crates/godmesh-core",
 ]
 
 [workspace.package]

@@ -1,0 +1,16 @@
+[package]
+name = "godmesh-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+godmesh-protocol = { path = "../godmesh-protocol" }
+godmesh-sync = { path = "../godmesh-sync" }
+godmesh-identity = { path = "../godmesh-identity" }
+godmesh-policy = { path = "../godmesh-policy" }
+godmesh-emergency = { path = "../godmesh-emergency" }
+
+[lints]
+workspace = true
