@@ -429,7 +429,7 @@ fn invalid_position(error: PositionError) -> ApiError {
 
 /// Jurisdição declarada do tenant autenticado (ADR-066). Ausência de linha falha
 /// fechado; o corpo do pedido nunca escolhe jurisdição.
-async fn resolve_jurisdiction(
+pub(crate) async fn resolve_jurisdiction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
 ) -> Result<String, ApiError> {
@@ -445,7 +445,7 @@ async fn resolve_jurisdiction(
 /// Classe de retenção **com cópia primária** na jurisdição do tenant. Sem classe
 /// ou sem cópia autorizada, nada é persistido (ADR-062). A FK de `event_position`
 /// fecha a corrida com uma remoção posterior.
-async fn resolve_retention_class(
+pub(crate) async fn resolve_retention_class(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     class: &str,
     jurisdiction: &str,
@@ -474,7 +474,7 @@ async fn resolve_retention_class(
 /// O menor buraco da sequência define o prefixo: `primeiro_ausente - 1`, ou o
 /// máximo quando não há buraco. Não é `max(seq)`: um buraco deixado por escrita
 /// fora desta API não pode fazer a API aceitar o que vem depois dele.
-async fn contiguous_prefix(
+pub(crate) async fn contiguous_prefix(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     origin_node: &str,
     tenant_id: &str,

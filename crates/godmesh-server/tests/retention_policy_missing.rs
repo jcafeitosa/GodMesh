@@ -5,7 +5,9 @@
 //! da chamada — por isso roda sozinho, com `--ignored`:
 //!   DATABASE_URL=… cargo test -p godmesh-server --test retention_policy_missing -- --ignored --nocapture
 //!
-//! Exige as migrações 0001 e 0002 aplicadas.
+//! O esquema é aplicado pelo runner oficial (`tests/common/mod.rs`).
+
+mod common;
 
 use godmesh_identity::grant::{FreshnessSource, GrantPredicate, OfflineOp, RevocationState};
 use godmesh_server::api::{create_incident, ApiError, IncidentPayload};
@@ -79,11 +81,7 @@ async fn restore_co_authorized_copy(pool: &PgPool) {
 #[ignore = "altera o registro de política de CO; roda isolado com --ignored"]
 async fn colombian_tenant_without_policy_is_refused_with_retention_policy_missing() {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL obrigatório com --ignored");
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await
-        .expect("conexão");
+    let pool = common::pool_para(&url, 2).await;
 
     sqlx::query("INSERT INTO tenant_region (tenant_id, jurisdiction) VALUES ($1, 'CO') ON CONFLICT (tenant_id) DO UPDATE SET jurisdiction = 'CO'")
         .bind(TENANT_CO)

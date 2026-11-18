@@ -6,8 +6,10 @@
 //!
 //! Os testes que só exercitam recusa (401/403) usam um pool *lazy*: a recusa
 //! acontece antes de qualquer consulta. Os testes de aceitação e de revogação em
-//! banco exigem `DATABASE_URL` com as migrações 0001, 0002 e 0004; sem ela são
-//! ignorados (não fingem sucesso).
+//! banco exigem `DATABASE_URL` e aplicam as migrações pelo runner oficial
+//! (`tests/common/mod.rs`); sem ela são ignorados (não fingem sucesso).
+
+mod common;
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -109,13 +111,9 @@ fn lazy_pool() -> PgPool {
         .expect("URL de pool lazy")
 }
 
+/// Banco de teste migrado pelo runner oficial (`tests/common/mod.rs`).
 async fn pool() -> Option<PgPool> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await
-        .ok()
+    common::pool_com_conexoes(4).await
 }
 
 async fn serve(pool: PgPool, authorization: Authorization) -> SocketAddr {

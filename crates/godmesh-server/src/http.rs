@@ -20,6 +20,9 @@ use sqlx::PgPool;
 use crate::api::{create_incident, ApiError, IncidentPayload, IncidentResponse};
 use crate::auth::{bearer_token, Authorization, GrantRegistry, Scope, VerifiedGrant};
 use crate::events::{create_event, list_events, EventAck, EventPage, EventPayload, EventQuery};
+use crate::inbox::{
+    read_state, receive_batch, InboxBatchPayload, InboxBatchResponse, InboxState, InboxStateQuery,
+};
 use crate::lifecycle::{load_incident, transition, AcknowledgePayload, IncidentView, Transition};
 
 /// Estado compartilhado.
@@ -82,12 +85,31 @@ pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
             require_scope,
         ));
 
+    // Inbox de sync: lote de posições (escrita) e leitura do checkpoint do
+    // prefixo contíguo (leitura). Escopos separados porque ler o prefixo não é
+    // aceitar posição.
+    let sync_write = Router::new()
+        .route("/v1/sync/inbox", post(post_sync_inbox))
+        .route_layer(middleware::from_fn_with_state(
+            ScopeGate(Scope::SyncWrite),
+            require_scope,
+        ));
+
+    let sync_read = Router::new()
+        .route("/v1/sync/state", get(get_sync_state))
+        .route_layer(middleware::from_fn_with_state(
+            ScopeGate(Scope::SyncRead),
+            require_scope,
+        ));
+
     // O portão de autenticação é aplicado por último: ele roda antes dos portões
     // de escopo, que leem o `VerifiedGrant` já injetado na extensão.
     let protected = incident_write
         .merge(incident_read)
         .merge(event_write)
         .merge(event_read)
+        .merge(sync_write)
+        .merge(sync_read)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
     Router::new()
@@ -282,6 +304,49 @@ async fn get_events(
         .map_err(ApiErrorResponse::from)
 }
 
+/// Recebe um lote de posições do Inbox do tenant autenticado.
+///
+/// Corpo inválido (JSON ilegível, campo desconhecido, lote vazio ou acima de
+/// `MAX_INBOX_BATCH`) é recusado na fronteira, antes de qualquer efeito. O teto é
+/// limite desta fatia, declarado e recusado — nunca truncado em silêncio.
+///
+/// 200 com `{accepted, duplicates, contiguous_prefix, ack_class}` quando nada
+/// falta; 409 `sequence_gap` com `{expected, received, accepted, duplicates,
+/// contiguous_prefix}` quando o lote salta posição — o trecho contíguo antes da
+/// lacuna é persistido e o resto não é aceito.
+async fn post_sync_inbox(
+    State(state): State<AppState>,
+    Extension(grant): Extension<VerifiedGrant>,
+    payload: Result<Json<InboxBatchPayload>, JsonRejection>,
+) -> Result<Json<InboxBatchResponse>, ApiErrorResponse> {
+    let Json(payload) = payload.map_err(|rejection| {
+        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
+    })?;
+    receive_batch(&state.pool, &grant, payload)
+        .await
+        .map(Json)
+        .map_err(ApiErrorResponse::from)
+}
+
+/// Estado do Inbox: prefixo contíguo, instante do último avanço e lacunas.
+///
+/// Stream desconhecida devolve prefixo 0, `last_recorded_at` nulo e `gaps` vazio:
+/// ausência de evento não é erro, e distinguir "stream inexistente" de "stream
+/// sem evento" exigiria uma lista de streams que este servidor não tem.
+async fn get_sync_state(
+    State(state): State<AppState>,
+    Extension(grant): Extension<VerifiedGrant>,
+    query: Result<Query<InboxStateQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<InboxState>, ApiErrorResponse> {
+    let Query(query) = query.map_err(|rejection| {
+        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
+    })?;
+    read_state(&state.pool, &grant, query)
+        .await
+        .map(Json)
+        .map_err(ApiErrorResponse::from)
+}
+
 /// 201 na primeira gravação, 200 no replay idempotente do mesmo tenant.
 const fn created_status(created: bool) -> StatusCode {
     if created {
@@ -363,6 +428,22 @@ impl ApiErrorResponse {
                 "sequence_gap",
                 format!("posição {got} salta a lacuna: a stream espera {expected}"),
             ),
+            // Mesmo código de lacuna no lote de Inbox: o prefixo aceito antes da
+            // lacuna ficou durável, e a resposta diz onde reenviar e o que já foi
+            // confirmado.
+            ApiError::InboxGap {
+                expected,
+                received,
+                accepted,
+                ..
+            } => (
+                StatusCode::CONFLICT,
+                "sequence_gap",
+                format!(
+                    "posição {received} salta a lacuna: a stream espera {expected}; \
+                     {accepted} posição(ões) antes da lacuna foram persistidas"
+                ),
+            ),
             // Cursor ilegível/expirado e cursor vazio são recusados de forma
             // distinta de cursor ausente (que começa a leitura do início).
             ApiError::CursorInvalid(detail) => (
@@ -417,14 +498,28 @@ impl ApiErrorResponse {
 }
 
 impl ApiErrorResponse {
-    /// Campo extra do corpo de erro, quando o cliente precisa dele para agir.
-    /// Hoje só `illegal_transition` devolve o estado atual.
-    fn extra(&self) -> Option<(&'static str, Value)> {
+    /// Campos extras do corpo de erro, quando o cliente precisa deles para agir.
+    /// `illegal_transition` devolve o estado atual; lacuna de Inbox devolve a
+    /// posição esperada, a recebida e o que já ficou durável.
+    fn extra(&self) -> Vec<(&'static str, Value)> {
         match &self.0 {
             ApiError::IllegalTransition { current } => {
-                Some(("state", Value::String(current.clone())))
+                vec![("state", Value::String(current.clone()))]
             }
-            _ => None,
+            ApiError::InboxGap {
+                expected,
+                received,
+                accepted,
+                duplicates,
+                contiguous_prefix,
+            } => vec![
+                ("expected", json!(expected)),
+                ("received", json!(received)),
+                ("accepted", json!(accepted)),
+                ("duplicates", json!(duplicates)),
+                ("contiguous_prefix", json!(contiguous_prefix)),
+            ],
+            _ => Vec::new(),
         }
     }
 }
@@ -440,7 +535,7 @@ impl IntoResponse for ApiErrorResponse {
             "ack_class".to_owned(),
             Value::String("transport_accepted".to_owned()),
         );
-        if let Some((key, value)) = self.extra() {
+        for (key, value) in self.extra() {
             body.insert(key.to_owned(), value);
         }
         let mut response = (status, Json(Value::Object(body))).into_response();

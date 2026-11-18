@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Verificação dos invariantes de banco contra um banco DESCARTÁVEL.
 #
-# Cria um banco próprio, aplica `migrations/0001_core.sql` +
-# `migrations/0002_incident_tenancy.sql` + `migrations/0003_outbox_publisher.sql`,
-# Cria um banco próprio, aplica as migrações `migrations/0001_core.sql`,
-# `migrations/0002_incident_tenancy.sql` e `migrations/0004_grant_revocation.sql`,
-# roda todos os `*_invariants.sql` e
-# falha (exit != 0) se algum bloco `NOTICE: OK` esperado não aparecer.
+# Cria um banco próprio e aplica, nesta ordem:
+#   migrations/0001_core.sql
+#   migrations/0002_incident_tenancy.sql
+#   migrations/0003_outbox_publisher.sql
+#   migrations/0004_grant_revocation.sql
+#   migrations/0005_sync_inbox.sql
+# depois roda todos os `*_invariants.sql` e falha (exit != 0) se algum bloco
+# `NOTICE: OK` esperado não aparecer.
 #
 # Por que não basta rodar psql e olhar a saída: os scripts usam
 # `\set ON_ERROR_STOP off` (um bloco que falha não deve derrubar os demais) e,
@@ -38,7 +40,7 @@ while [ $# -gt 0 ]; do
         --sabotage)
             [ $# -ge 2 ] || { echo "erro: --sabotage exige um arquivo" >&2; exit 2; }
             sabotagem="$2"; shift ;;
-        -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "erro: argumento desconhecido: $1" >&2; exit 2 ;;
     esac
     shift
@@ -69,6 +71,7 @@ aplicar "$raiz/migrations/0001_core.sql"
 aplicar "$raiz/migrations/0002_incident_tenancy.sql"
 aplicar "$raiz/migrations/0003_outbox_publisher.sql"
 aplicar "$raiz/migrations/0004_grant_revocation.sql"
+aplicar "$raiz/migrations/0005_sync_inbox.sql"
 
 if [ -n "$sabotagem" ]; then
     [ -f "$sabotagem" ] || { echo "erro: sabotagem inexistente: $sabotagem" >&2; exit 2; }
@@ -102,11 +105,20 @@ esperado_0003=(
     "OK 4: apagar published_at de linha confirmada recusado"
     "OK 5: attempts inicia em 0 e recusa negativo"
     "OK 6: entrega duplicada da mesma posição recusada"
+)
 esperado_0004=(
     "OK 1: token_id duplicado recusado (PK)"
     "OK 2: motivo vazio recusado (CHECK)"
     "OK 3: revoked_at preenchido por default"
     "OK 4: consulta distingue ausente de revogado"
+)
+esperado_0005=(
+    "OK 1: namespace de Inbox duplicado recusado (PK)"
+    "OK 2: contiguous_prefix negativo recusado"
+    "OK 3: partição negativa recusada"
+    "OK 4: authority_epoch zero recusado"
+    "OK 5: partição, epoch e origem são dimensões do namespace (4)"
+    "OK 6: prefixo persiste a avançar no mesmo namespace (3 -> 4)"
 )
 
 saida="$(mktemp)"
@@ -143,6 +155,7 @@ verificar "$tests/0001_invariants.sql" "${esperado_0001[@]}"
 verificar "$tests/0002_invariants.sql" "${esperado_0002[@]}"
 verificar "$tests/0003_invariants.sql" "${esperado_0003[@]}"
 verificar "$tests/0004_invariants.sql" "${esperado_0004[@]}"
+verificar "$tests/0005_invariants.sql" "${esperado_0005[@]}"
 
 rm -f "$saida"
 

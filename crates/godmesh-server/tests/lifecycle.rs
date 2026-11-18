@@ -7,14 +7,15 @@
 //! (exatamente uma sucesso e uma 409) e a trilha `sos_ack` append-only com
 //! `at_unix` real.
 //!
-//! Banco próprio (não o de dev compartilhado), criado do zero com as migrações:
-//!   createdb godmesh_sc && \
-//!   psql -d godmesh_sc -v ON_ERROR_STOP=1 -f migrations/0001_core.sql \
-//!                                  -f migrations/0002_incident_tenancy.sql
+//! Banco próprio (não o de dev compartilhado). O esquema é aplicado pelo runner
+//! oficial (`tests/common/mod.rs`), não por psql manual:
+//!   createdb godmesh_sc
 //!   DATABASE_URL=postgres://godmesh:godmesh_dev_only@localhost:55432/godmesh_sc \
 //!     cargo test -p godmesh-server --test lifecycle
 //!
 //! Sem DATABASE_URL os testes são ignorados (não fingem sucesso).
+
+mod common;
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -75,13 +76,9 @@ fn registry() -> GrantRegistry {
     ])
 }
 
+/// Banco de teste migrado pelo runner oficial (`tests/common/mod.rs`).
 async fn pool() -> Option<PgPool> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(8)
-        .connect(&url)
-        .await
-        .ok()
+    common::pool_com_conexoes(8).await
 }
 
 /// Declara jurisdição e política do tenant de teste (a API não cria nenhuma).

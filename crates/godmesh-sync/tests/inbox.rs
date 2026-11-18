@@ -45,3 +45,32 @@ fn event_from_other_epoch_is_refused() {
     let antigo = EventPosition::new("node-a", "tenant-1", "stream-9", 1, 6, 1).unwrap();
     assert_eq!(ib.accept(antigo), Err(InboxError::EpochIncomparable));
 }
+
+// --- retomada a partir do prefixo durável (POST /v1/sync/inbox) --------------
+
+#[test]
+fn resuming_from_a_durable_prefix_treats_covered_positions_as_duplicates() {
+    let mut ib = Inbox::resuming("node-a", "tenant-1", "stream-9", 1, 7, 42);
+    assert_eq!(ib.accept(p(42)), Ok(InboxOutcome::Duplicate), "já coberta pelo prefixo");
+    assert_eq!(ib.accept(p(7)), Ok(InboxOutcome::Duplicate), "muito atrás do prefixo");
+    assert_eq!(ib.contiguous_prefix(), 42, "repetição nunca regride o prefixo");
+}
+
+#[test]
+fn resuming_only_accepts_the_position_right_after_the_durable_prefix() {
+    let mut ib = Inbox::resuming("node-a", "tenant-1", "stream-9", 1, 7, 42);
+    assert_eq!(ib.accept(p(44)), Ok(InboxOutcome::Gap { expected: 43 }));
+    assert_eq!(
+        ib.accept(p(43)),
+        Ok(InboxOutcome::Accepted { ack_class: "persisted_local", contiguous_prefix: 43 })
+    );
+    assert_eq!(ib.contiguous_prefix(), 43);
+}
+
+#[test]
+fn resuming_from_zero_behaves_like_a_fresh_inbox() {
+    let mut retomada = Inbox::resuming("node-a", "tenant-1", "stream-9", 1, 7, 0);
+    let mut nova = Inbox::new("node-a", "tenant-1", "stream-9", 1, 7);
+    assert_eq!(retomada.accept(p(1)), nova.accept(p(1)));
+    assert_eq!(retomada.contiguous_prefix(), nova.contiguous_prefix());
+}

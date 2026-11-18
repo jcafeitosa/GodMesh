@@ -3,15 +3,16 @@
 //! Os testes falam HTTP/1.1 cru de propósito: status de transporte e código de
 //! erro nomeado são o contrato observável, e precisam ser provados no fio.
 //!
-//! Banco próprio desta suíte, nunca o de desenvolvimento compartilhado:
+//! Banco próprio desta suíte, nunca o de desenvolvimento compartilhado. O
+//! esquema é aplicado pelo runner oficial (`tests/common/mod.rs`):
 //!   psql postgres://godmesh:godmesh_dev_only@localhost:55432/postgres \
 //!        -c 'CREATE DATABASE godmesh_sb'
-//!   psql postgres://godmesh:godmesh_dev_only@localhost:55432/godmesh_sb \
-//!        -f migrations/0001_core.sql -f migrations/0002_incident_tenancy.sql
 //!   DATABASE_URL=postgres://godmesh:godmesh_dev_only@localhost:55432/godmesh_sb \
 //!     cargo test -p godmesh-server --test events -- --nocapture
 //!
 //! Sem `DATABASE_URL` os testes são ignorados (não fingem sucesso).
+
+mod common;
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -71,13 +72,9 @@ fn grant(principal: &str) -> VerifiedGrant {
     }
 }
 
+/// Banco de teste migrado pelo runner oficial (`tests/common/mod.rs`).
 async fn pool() -> Option<PgPool> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await
-        .ok()
+    common::pool_com_conexoes(4).await
 }
 
 /// Declara a jurisdição do tenant de teste (ADR-066) e garante a semente de

@@ -11,6 +11,7 @@ pub mod api;
 pub mod auth;
 pub mod events;
 pub mod http;
+pub mod inbox;
 pub mod lifecycle;
 pub mod migrate;
 pub mod publisher;

@@ -8,10 +8,13 @@
 //!  * **retenção** — a política vem da jurisdição declarada do tenant
 //!    (ADR-062/066) e o replay é idempotente por tenant.
 //!
-//! Exige um Postgres com as migrações 0001 e 0002 aplicadas:
+//! O esquema é aplicado pelo runner oficial (`tests/common/mod.rs`); nenhum
+//! teste assume migração aplicada na mão:
 //!   DATABASE_URL=postgres://godmesh:godmesh_dev_only@localhost:55432/godmesh
 //!
 //! Sem DATABASE_URL os testes são ignorados (não fingem sucesso).
+
+mod common;
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -87,13 +90,9 @@ fn allow_grant(tenant_id: &str) -> VerifiedGrant {
     grant(tenant_id, allow_predicate(OfflineOp::OpenSosIncident))
 }
 
+/// Banco de teste migrado pelo runner oficial (`tests/common/mod.rs`).
 async fn pool() -> Option<PgPool> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await
-        .ok()
+    common::pool_com_conexoes(4).await
 }
 
 /// Registra a jurisdição declarada do tenant (ADR-066) e garante a semente da

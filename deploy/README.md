@@ -25,10 +25,12 @@ PGHOST=127.0.0.1 PGPORT=55432 PGUSER=godmesh PGPASSWORD=godmesh_dev_only \
 
 O script cria um banco descartável (`godmesh_inv_*`), aplica
 `migrations/0001_core.sql` + `migrations/0002_incident_tenancy.sql` +
-`migrations/0003_outbox_publisher.sql`, roda `migrations/tests/0001_invariants.sql`,
-`0002_invariants.sql` e `0003_invariants.sql` e falha com exit != 0 se qualquer
+`migrations/0003_outbox_publisher.sql` + `migrations/0004_grant_revocation.sql` +
+`migrations/0005_sync_inbox.sql`, roda `migrations/tests/0001_invariants.sql`,
+`0002_invariants.sql`, `0003_invariants.sql`, `0004_invariants.sql` e
+`0005_invariants.sql` e falha com exit != 0 se qualquer
 bloco `NOTICE: OK` esperado faltar. Esperado:
-`RESULTADO: OK — 20 invariantes verificados em banco criado do zero.`
+`RESULTADO: OK — 30 invariantes verificados em banco criado do zero.`
 
 O banco de desenvolvimento compartilhado não é tocado — nada de `DROP`/`TRUNCATE`
 nele. Só o banco descartável do próprio script é removido ao final (`--keep`

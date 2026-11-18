@@ -36,6 +36,34 @@ impl Inbox {
         }
     }
 
+    /// Retoma uma Inbox a partir do prefixo contíguo já durável.
+    ///
+    /// O servidor não pode recomeçar do zero a cada lote: o prefixo é o
+    /// checkpoint persistido, e uma posição já coberta por ele é repetição, não
+    /// novidade. `contiguous_prefix == 0` equivale a [`Inbox::new`] (namespace
+    /// sem evento durável), e o construtor não aceita prefixo inicial por outra
+    /// via — não existe Inbox que "salte" para um prefixo inventado pelo
+    /// chamador: o valor tem de ser o mesmo que está gravado.
+    #[must_use]
+    pub fn resuming(
+        origin: &str,
+        tenant: &str,
+        stream: &str,
+        partition: u32,
+        epoch: u64,
+        contiguous_prefix: u64,
+    ) -> Self {
+        Self {
+            origin: origin.to_owned(),
+            tenant: tenant.to_owned(),
+            stream: stream.to_owned(),
+            partition,
+            epoch,
+            seen: Vec::new(),
+            contiguous: contiguous_prefix,
+        }
+    }
+
     /// # Errors
     /// `PartitionMismatch` / `EpochIncomparable` quando o evento não pertence a esta Inbox.
     pub fn accept(&mut self, position: EventPosition) -> Result<InboxOutcome, InboxError> {
@@ -46,11 +74,17 @@ impl Inbox {
             return Err(InboxError::EpochIncomparable);
         }
         let seq = position.seq();
-        if self.seen.contains(&seq) {
+        // Repetição é decidida contra o **prefixo durável** e contra o que já
+        // entrou neste lote. Sem a primeira checagem, retomar de um prefixo > 0
+        // trataria uma posição já durável como novidade e poderia regredir o
+        // prefixo ao aceitá-la.
+        if seq <= self.contiguous || self.seen.contains(&seq) {
             return Ok(InboxOutcome::Duplicate);
         }
-        if seq > self.contiguous + 1 {
-            return Ok(InboxOutcome::Gap { expected: self.contiguous + 1 });
+        if seq > self.contiguous.saturating_add(1) {
+            return Ok(InboxOutcome::Gap {
+                expected: self.contiguous.saturating_add(1),
+            });
         }
         self.seen.push(seq);
         self.contiguous = seq;

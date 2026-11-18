@@ -69,7 +69,23 @@ pub enum ApiError {
     RetentionPolicyMissing,
     /// Salto em relação ao prefixo contíguo da stream (ADR-057): nenhuma lacuna
     /// é saltada; o chamador precisa enviar a posição esperada.
-    SequenceGap { expected: u64, got: u64 },
+    SequenceGap {
+        expected: u64,
+        got: u64,
+    },
+    /// Lacuna dentro de um lote de Inbox (`POST /v1/sync/inbox`).
+    ///
+    /// Distinto de [`ApiError::SequenceGap`] porque o lote pode ter aceito o
+    /// trecho contíguo antes da lacuna: a resposta precisa nomear a posição
+    /// esperada **e** o que ficou durável, senão o cliente não sabe se reenviar
+    /// o lote inteiro ou só a partir de `expected`.
+    InboxGap {
+        expected: u64,
+        received: u64,
+        accepted: u64,
+        duplicates: u64,
+        contiguous_prefix: u64,
+    },
     /// Cursor ilegível, de versão desconhecida, sem partição ou de outro
     /// principal. Distinto de cursor ausente, que começa do início.
     CursorInvalid(String),
