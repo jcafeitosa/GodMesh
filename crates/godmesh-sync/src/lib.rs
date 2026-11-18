@@ -6,4 +6,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod inbox;
+pub mod outbox;
 pub mod position;

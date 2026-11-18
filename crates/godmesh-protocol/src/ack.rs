@@ -86,9 +86,58 @@ impl AckEvidence {
     }
 }
 
+/// Coletor de evidências de várias camadas.
+///
+/// A classe composta é a **menor** entre as evidências: agregar nunca promove.
+#[derive(Debug, Default, Clone)]
+pub struct AckComposer {
+    evidence: Vec<AckEvidence>,
+}
+
+impl AckComposer {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add(&mut self, evidence: AckEvidence) {
+        self.evidence.push(evidence);
+    }
+
+    /// # Errors
+    /// `AckError::NoEvidence` quando nada foi coletado.
+    pub fn try_composed(&self) -> Result<AckClass, AckError> {
+        self.evidence
+            .iter()
+            .map(AckEvidence::class)
+            .min()
+            .ok_or(AckError::NoEvidence)
+    }
+
+    /// Chama a composição assumindo que existe evidência.
+    ///
+    /// # Panics
+    /// Se o coletor estiver vazio; use `try_composed` em código que pode estar vazio.
+    #[must_use]
+    pub fn composed(&self) -> AckClass {
+        self.try_composed().expect("coletor vazio não tem classe composta")
+    }
+
+    /// # Errors
+    /// `AckError::PromotionRefused` quando `target` supera a classe composta.
+    pub fn claim(&self, target: AckClass) -> Result<AckClass, AckError> {
+        let composed = self.try_composed()?;
+        if target > composed {
+            return Err(AckError::PromotionRefused { from: composed, to: target });
+        }
+        Ok(target)
+    }
+}
+
 /// Erros de contrato de ACK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AckError {
+    NoEvidence,
     MissingClass,
     UnknownClass,
     PromotionRefused { from: AckClass, to: AckClass },
