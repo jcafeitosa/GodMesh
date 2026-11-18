@@ -192,6 +192,10 @@ pub static LOCAL_NODE: LazyLock<NodeIdentity> = LazyLock::new(|| {
     NodeIdentity::generate_in_memory().expect("identidade de nó em memória")
 });
 
+// Upserts simultâneos da fixture podem colidir no UNIQUE de peer_id antes
+// de o ON CONFLICT (node_id) resolver a disputa.
+static LOCAL_NODE_REGISTRATION: Mutex<()> = Mutex::const_new(());
+
 /// Registro o nó em `federation_peer` com o estado pedido (idempotente por
 /// `node_id`, como o ingresso). `public_key` é a chave do arquivo do nó —
 /// dado público; a privada nunca sai do processo.
@@ -228,7 +232,10 @@ pub async fn conceder_escopo(pool: &PgPool, node_id: &str, tenant_id: &str, stre
 /// Nó local autorizado + escopo para `(tenant, stream)`: a preparação mínima
 /// de um caminho feliz. Idempotente para testes que chamam mais de uma vez.
 pub async fn no_local_pronto(pool: &PgPool, tenant_id: &str, stream_id: &str) {
-    registrar_no(pool, &LOCAL_NODE, "authorized").await;
+    {
+        let _registration = LOCAL_NODE_REGISTRATION.lock().await;
+        registrar_no(pool, &LOCAL_NODE, "authorized").await;
+    }
     conceder_escopo(pool, LOCAL_NODE.node_id(), tenant_id, stream_id).await;
 }
 
