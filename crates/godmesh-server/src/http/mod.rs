@@ -4,29 +4,32 @@
 //! router nasce protegida, em vez de depender de alguém lembrar do middleware.
 //! O handler só recebe o grant pela extensão preenchida pelo middleware, logo
 //! não existe caminho de código que chame o caso de uso sem credencial.
+//!
+//! O roteador é dividido por domínio (`incidents`, `events`, `sync`, `admin`);
+//! cada módulo declara as rotas e o escopo que exige. Este módulo mantém só a
+//! composição, os portões de autenticação/escopo, `healthz`, `/metrics` e o
+//! formato de erro.
 
 use std::sync::Arc;
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{Extension, Path, Query, Request, State};
+use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
-use crate::api::{create_incident, ApiError, IncidentPayload, IncidentResponse};
+use crate::api::ApiError;
 use crate::auth::{bearer_token, Authorization, GrantRegistry, Scope, VerifiedGrant};
-use crate::events::{create_event, list_events, EventAck, EventPage, EventPayload, EventQuery};
-use crate::inbox::{
-    read_state, receive_batch, InboxBatchPayload, InboxBatchResponse, InboxState, InboxStateQuery,
-};
-use crate::incidents::{list_incidents, IncidentListQuery, IncidentPage};
-use crate::lifecycle::{load_incident, transition, AcknowledgePayload, IncidentView, Transition};
 use crate::metrics::{Gauges, Metrics};
 use crate::observability::{observe, RequestContext, RequestLog, StderrRequestLog};
+
+mod admin;
+mod events;
+mod incidents;
+mod sync;
 
 /// Estado compartilhado.
 #[derive(Clone)]
@@ -74,58 +77,8 @@ fn build_router(pool: PgPool, authorization: Authorization, log: Arc<dyn Request
         log,
     };
 
-    let incident_write = Router::new()
-        .route("/v1/incidents", post(post_incident))
-        .route("/v1/incidents/{id}/replicate", post(post_replicate))
-        .route("/v1/incidents/{id}/ack-technical", post(post_ack_technical))
-        .route("/v1/incidents/{id}/acknowledge", post(post_acknowledge))
-        .route("/v1/incidents/{id}/close", post(post_close))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::IncidentWrite),
-            require_scope,
-        ));
-
-    let incident_read = Router::new()
-        .route("/v1/incidents", get(get_incidents))
-        .route("/v1/incidents/{id}", get(get_incident))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::IncidentRead),
-            require_scope,
-        ));
-
-    let event_write = Router::new()
-        .route("/v1/events", post(post_event))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::EventWrite),
-            require_scope,
-        ));
-
-    let event_read = Router::new()
-        .route("/v1/events", get(get_events))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::EventRead),
-            require_scope,
-        ));
-
-    // Inbox de sync: lote de posições (escrita) e leitura do checkpoint do
-    // prefixo contíguo (leitura). Escopos separados porque ler o prefixo não é
-    // aceitar posição.
-    let sync_write = Router::new()
-        .route("/v1/sync/inbox", post(post_sync_inbox))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::SyncWrite),
-            require_scope,
-        ));
-
-    let sync_read = Router::new()
-        .route("/v1/sync/state", get(get_sync_state))
-        .route_layer(middleware::from_fn_with_state(
-            ScopeGate(Scope::SyncRead),
-            require_scope,
-        ));
-
-    // Métricas operacionais: escopo próprio (`admin:metrics`). Ver a nota de
-    // composição em `build_router` sobre por que não é só loopback.
+    // Métricas operacionais: escopo próprio (`admin:metrics`). Ver a nota em
+    // `get_metrics` sobre por que não é só loopback.
     let metrics_read = Router::new()
         .route("/metrics", get(get_metrics))
         .route_layer(middleware::from_fn_with_state(
@@ -135,12 +88,10 @@ fn build_router(pool: PgPool, authorization: Authorization, log: Arc<dyn Request
 
     // O portão de autenticação é aplicado por último: ele roda antes dos portões
     // de escopo, que leem o `VerifiedGrant` já injetado na extensão.
-    let protected = incident_write
-        .merge(incident_read)
-        .merge(event_write)
-        .merge(event_read)
-        .merge(sync_write)
-        .merge(sync_read)
+    let protected = incidents::routes()
+        .merge(events::routes())
+        .merge(sync::routes())
+        .merge(admin::routes())
         .merge(metrics_read)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
@@ -155,7 +106,7 @@ fn build_router(pool: PgPool, authorization: Authorization, log: Arc<dyn Request
 
 /// Escopo que uma rota exige, carregado pelo middleware de escopo.
 #[derive(Clone, Copy, Debug)]
-struct ScopeGate(Scope);
+pub(super) struct ScopeGate(pub(super) Scope);
 
 async fn healthz(State(state): State<AppState>) -> Response {
     // Dependência real: 200 só com o pool respondendo. Um healthz estático fica
@@ -221,42 +172,6 @@ async fn require_scope(
     next.run(request).await
 }
 
-async fn post_incident(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    payload: Result<Json<IncidentPayload>, JsonRejection>,
-) -> Result<(StatusCode, Json<IncidentResponse>), ApiErrorResponse> {
-    // Corpo inválido é recusado na fronteira, antes de qualquer efeito.
-    let Json(payload) = payload.map_err(|rejection| {
-        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
-    })?;
-    // O grant vem da extensão preenchida por `require_grant`; 201 na criação e
-    // 200 no replay idempotente do mesmo tenant (ADR-058).
-    match create_incident(&state.pool, &grant, payload).await {
-        Ok(outcome) => Ok((created_status(outcome.created), Json(outcome.response))),
-        Err(e) => Err(ApiErrorResponse::from(e)),
-    }
-}
-
-/// Lista os incidentes do tenant autenticado, paginado por cursor.
-///
-/// `limit` ausente, `0` ou acima de 100 → 422 `invalid_request`; `state`
-/// desconhecido → 422; cursor de outro tenant/filtro → 400 `cursor_incomparable`;
-/// cursor ilegível → 400 `cursor_invalid`.
-async fn get_incidents(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    query: Result<Query<IncidentListQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<IncidentPage>, ApiErrorResponse> {
-    let Query(query) = query.map_err(|rejection| {
-        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
-    })?;
-    list_incidents(&state.pool, &grant, query)
-        .await
-        .map(Json)
-        .map_err(ApiErrorResponse::from)
-}
-
 /// Métricas no formato de texto do Prometheus.
 ///
 /// Escopo `admin:metrics` em vez de "só loopback" porque a proteção precisa ser
@@ -292,156 +207,7 @@ async fn get_metrics(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// Leitura do incidente do tenant autenticado.
-///
-/// Incidente de outro tenant e incidente inexistente devolvem o **mesmo** 404:
-/// distinguir os dois confirmaria a existência do identificador alheio.
-async fn get_incident(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    Path(id): Path<String>,
-) -> Result<Json<IncidentView>, ApiErrorResponse> {
-    load_incident(&state.pool, &grant, &id)
-        .await
-        .map(Json)
-        .map_err(ApiErrorResponse::from)
-}
-
-async fn post_replicate(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    Path(id): Path<String>,
-) -> Result<Json<IncidentView>, ApiErrorResponse> {
-    transition(&state.pool, &grant, &id, Transition::Replicate, None)
-        .await
-        .map(Json)
-        .map_err(ApiErrorResponse::from)
-}
-
-async fn post_ack_technical(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    Path(id): Path<String>,
-) -> Result<Json<IncidentView>, ApiErrorResponse> {
-    transition(&state.pool, &grant, &id, Transition::AcknowledgeTechnical, None)
-        .await
-        .map(Json)
-        .map_err(ApiErrorResponse::from)
-}
-
-/// Reconhecimento humano exige corpo com `responder`.
-///
-/// Corpo ausente, vazio ou ilegível é tratado como **ausência de prova**
-/// (`422 missing_human_proof`), não como erro genérico: sem pessoa identificada a
-/// transição não existe, e o código de erro diz exatamente isso.
-async fn post_acknowledge(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    Path(id): Path<String>,
-    payload: Result<Json<AcknowledgePayload>, JsonRejection>,
-) -> Result<Json<IncidentView>, ApiErrorResponse> {
-    let responder = match payload {
-        Ok(Json(payload)) => payload.responder,
-        Err(_) => None,
-    };
-    transition(
-        &state.pool,
-        &grant,
-        &id,
-        Transition::AcknowledgeHuman,
-        responder.as_deref(),
-    )
-    .await
-    .map(Json)
-    .map_err(ApiErrorResponse::from)
-}
-
-async fn post_close(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    Path(id): Path<String>,
-) -> Result<Json<IncidentView>, ApiErrorResponse> {
-    transition(&state.pool, &grant, &id, Transition::Close, None)
-        .await
-        .map(Json)
-        .map_err(ApiErrorResponse::from)
-}
-
-async fn post_event(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    payload: Result<Json<EventPayload>, JsonRejection>,
-) -> Result<(StatusCode, Json<EventAck>), ApiErrorResponse> {
-    let Json(payload) = payload.map_err(|rejection| {
-        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
-    })?;
-    // 201 na posição nova, 200 na repetição idempotente da mesma posição. O ACK
-    // nunca passa de `persisted_local` (ADR-058).
-    match create_event(&state.pool, &grant, payload).await {
-        Ok(outcome) => Ok((created_status(outcome.created), Json(outcome.response))),
-        Err(e) => Err(ApiErrorResponse::from(e)),
-    }
-}
-
-async fn get_events(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    query: Result<Query<EventQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<EventPage>, ApiErrorResponse> {
-    let Query(query) = query.map_err(|rejection| {
-        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
-    })?;
-    list_events(&state.pool, &grant, query)
-        .await
-        .map(Json)
-        .map_err(ApiErrorResponse::from)
-}
-
-/// Recebe um lote de posições do Inbox do tenant autenticado.
-///
-/// Corpo inválido (JSON ilegível, campo desconhecido, lote vazio ou acima de
-/// `MAX_INBOX_BATCH`) é recusado na fronteira, antes de qualquer efeito. O teto é
-/// limite desta fatia, declarado e recusado — nunca truncado em silêncio.
-///
-/// 200 com `{accepted, duplicates, contiguous_prefix, ack_class}` quando nada
-/// falta; 409 `sequence_gap` com `{expected, received, accepted, duplicates,
-/// contiguous_prefix}` quando o lote salta posição — o trecho contíguo antes da
-/// lacuna é persistido e o resto não é aceito.
-async fn post_sync_inbox(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    payload: Result<Json<InboxBatchPayload>, JsonRejection>,
-) -> Result<Json<InboxBatchResponse>, ApiErrorResponse> {
-    let Json(payload) = payload.map_err(|rejection| {
-        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
-    })?;
-    receive_batch(&state.pool, &grant, payload)
-        .await
-        .map(Json)
-        .map_err(ApiErrorResponse::from)
-}
-
-/// Estado do Inbox: prefixo contíguo, instante do último avanço e lacunas.
-///
-/// Stream desconhecida devolve prefixo 0, `last_recorded_at` nulo e `gaps` vazio:
-/// ausência de evento não é erro, e distinguir "stream inexistente" de "stream
-/// sem evento" exigiria uma lista de streams que este servidor não tem.
-async fn get_sync_state(
-    State(state): State<AppState>,
-    Extension(grant): Extension<VerifiedGrant>,
-    query: Result<Query<InboxStateQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<InboxState>, ApiErrorResponse> {
-    let Query(query) = query.map_err(|rejection| {
-        ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
-    })?;
-    read_state(&state.pool, &grant, query)
-        .await
-        .map(Json)
-        .map_err(ApiErrorResponse::from)
-}
-
-/// 201 na primeira gravação, 200 no replay idempotente do mesmo tenant.
-const fn created_status(created: bool) -> StatusCode {
+pub(super) const fn created_status(created: bool) -> StatusCode {
     if created {
         StatusCode::CREATED
     } else {
@@ -450,7 +216,7 @@ const fn created_status(created: bool) -> StatusCode {
 }
 
 /// Erro HTTP com corpo estável e sem promessa de efeito.
-pub struct ApiErrorResponse(ApiError);
+pub(super) struct ApiErrorResponse(ApiError);
 
 impl From<ApiError> for ApiErrorResponse {
     fn from(e: ApiError) -> Self {
@@ -498,6 +264,23 @@ impl ApiErrorResponse {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "revocation_unavailable",
                 "não foi possível consultar a revogação; acesso negado".to_owned(),
+            ),
+            // Mesma regra para o registro de grants emitidos: falha fechada.
+            ApiError::IssuanceUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "issuance_unavailable",
+                "não foi possível consultar grants emitidos; acesso negado".to_owned(),
+            ),
+            // 404 também aqui: token_id desconhecido não confirma nada além de si.
+            ApiError::GrantNotFound => (
+                StatusCode::NOT_FOUND,
+                "grant_not_found",
+                "grant não encontrado".to_owned(),
+            ),
+            ApiError::RandomnessUnavailable(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "randomness_unavailable",
+                "RNG do sistema indisponível; nenhuma credencial foi emitida".to_owned(),
             ),
             ApiError::InvalidRequest(detail) => (
                 StatusCode::UNPROCESSABLE_ENTITY,

@@ -15,6 +15,12 @@
 //! Segredos: o token nunca aparece em `Debug`, em erro, em auditoria ou em log.
 //! O `Debug` do registro é escrito à mão para redigir o token, e a auditoria
 //! externa só recebe `token_id` e o motivo.
+//!
+//! Grants emitidos pela API administrativa (migração 0007) vivem em banco e
+//! chegam por um caminho diferente do registro em configuração: o token
+//! apresentado é reduzido a `sha256` hex e comparado com `grant_issued`
+//! (comparação de hash em tempo constante), sem cifra própria (ADR-026/ADR-031).
+//! O token em claro não é persistido em lugar nenhum.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -27,7 +33,8 @@ use godmesh_identity::grant::{
     FreshnessSource, GrantPredicate, OfflineOp, RevocationState,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 
 /// Sujeito autenticado: a única fonte de tenancy aceita pelo servidor.
@@ -57,11 +64,15 @@ pub enum Scope {
     /// é credencial de operação, e o endpoint não devolve dado de tenant.
     #[serde(rename = "admin:metrics")]
     AdminMetrics,
+    /// Administração de grants: emitir, consultar e revogar credenciais.
+    /// Escopo deliberadamente separado dos escopos de domínio.
+    #[serde(rename = "admin:grants")]
+    AdminGrants,
 }
 
 impl Scope {
     /// Conjunto completo, usado apenas por composição de teste (`from_entries`).
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::IncidentWrite,
         Self::IncidentRead,
         Self::EventWrite,
@@ -69,6 +80,7 @@ impl Scope {
         Self::SyncWrite,
         Self::SyncRead,
         Self::AdminMetrics,
+        Self::AdminGrants,
     ];
 
     /// Nome estável do escopo no contrato JSON e nos corpos de erro.
@@ -82,7 +94,18 @@ impl Scope {
             Self::SyncWrite => "sync:write",
             Self::SyncRead => "sync:read",
             Self::AdminMetrics => "admin:metrics",
+            Self::AdminGrants => "admin:grants",
         }
+    }
+
+    /// Resolve o nome estável de volta para o escopo. Desconhecido é `None`, e
+    /// quem lê do banco trata isso como erro em vez de inventar permissão.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|scope| scope.as_str() == name)
     }
 }
 
@@ -196,6 +219,8 @@ pub enum AuthError {
     InsufficientScope,
     /// Não foi possível consultar a revogação: nega (falha fechada).
     RevocationUnavailable,
+    /// Não foi possível consultar os grants emitidos: nega (falha fechada).
+    IssuanceUnavailable,
     /// Sujeito verificado incompleto.
     InvalidCredential(CredentialError),
 }
@@ -209,6 +234,7 @@ impl fmt::Display for AuthError {
             Self::CredentialRevoked => "credencial revogada",
             Self::InsufficientScope => "escopo insuficiente",
             Self::RevocationUnavailable => "revogação indisponível; acesso negado",
+            Self::IssuanceUnavailable => "registro de grants emitidos indisponível; acesso negado",
             Self::InvalidCredential(e) => return e.fmt(f),
         };
         f.write_str(reason)
@@ -292,6 +318,186 @@ impl RevocationSource for PgRevocationSource {
 /// no máximo 5 s por processo, e [`Authorization::invalidate_revocation`] permite
 /// invalidar explicitamente quando o operador quer efeito imediato.
 pub const REVOCATION_CACHE_TTL_SECONDS: i64 = 5;
+
+// --- grants emitidos pela API administrativa ---------------------------------
+
+/// `authority_epoch` atribuído a grants emitidos por esta rota.
+///
+/// A emissão desta fatia não negocia epoch (o corpo não tem esse campo); um
+/// valor fixo e declarado é mais honesto do que derivar de um grant alheio.
+/// Subir epoch continua sendo operação de autoridade, fora desta rota.
+pub const ISSUED_AUTHORITY_EPOCH: u64 = 1;
+
+/// Bytes de entropia do token opaco. 256 bits: acima do necessário para que
+/// adivinhar o token não seja um caminho viável, e barato de gerar.
+pub const TOKEN_BYTES: usize = 32;
+
+/// Bytes de entropia do `token_id` público. Não é segredo, mas é imprevisível
+/// para que um `token_id` não revele ordem de emissão nem permita enumeração.
+pub const TOKEN_ID_BYTES: usize = 16;
+
+/// Predicado aplicado a grants emitidos pela API.
+///
+/// O predicado do ADR-059/ADR-064 é sobre operações offline; o grant emitido
+/// aqui é o mesmo grant de domínio e precisa de um predicado que permita. Os
+/// campos são declarados, não herdados de configuração.
+pub const ISSUED_PREDICATE: GrantPredicate = GrantPredicate {
+    operation: OfflineOp::OpenSosIncident,
+    epoch_comparable: true,
+    revocation: RevocationState::Absent,
+    freshness: FreshnessSource::F3VerifiedOnline,
+    retention_class_known: true,
+    action_enumerated: true,
+};
+
+/// `sha256` hex do token: o único derivado do segredo que o banco vê.
+///
+/// Usa a crate auditada `sha2` (RustCrypto) em vez de função caseira
+/// (ADR-026/ADR-031). O valor é 64 caracteres hexadecimais minúsculos.
+#[must_use]
+pub fn token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Gera um token opaco e o `token_id` público correspondentes.
+///
+/// A entropia vem de `getrandom` (RNG do sistema operacional), nunca de relógio,
+/// contador ou configuração. Devolve o par já no formato de fio: token com
+/// prefixo `gm_` e 64 caracteres hex; `token_id` com prefixo `gtr_` e 32 hex.
+///
+/// # Errors
+/// Falha do RNG do sistema. Sem entropia confiável não se emite credencial, e
+/// o erro sobe em vez de degradar para algo previsível.
+pub fn generate_credential() -> Result<(String, String), String> {
+    let mut token_bytes = [0u8; TOKEN_BYTES];
+    getrandom::fill(&mut token_bytes)
+        .map_err(|e| format!("falha ao obter entropia do sistema: {e}"))?;
+    let mut id_bytes = [0u8; TOKEN_ID_BYTES];
+    getrandom::fill(&mut id_bytes)
+        .map_err(|e| format!("falha ao obter entropia do sistema: {e}"))?;
+    Ok((
+        format!("gm_{}", hex::encode(token_bytes)),
+        format!("gtr_{}", hex::encode(id_bytes)),
+    ))
+}
+
+/// Grant emitido, como carregado do banco: identidade, escopos e janela.
+///
+/// Não carrega token nem hash: quem consulta este tipo nunca tem o segredo em
+/// mãos, e o `Debug` derivado não pode vazar o que não existe no tipo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedGrant {
+    pub token_id: String,
+    pub subject: Subject,
+    pub scopes: Vec<Scope>,
+    pub not_before: i64,
+    pub expires_at: i64,
+    pub authority_epoch: u64,
+}
+
+impl IssuedGrant {
+    /// Materializa o grant no mesmo formato que o registro em configuração usa,
+    /// para que janela, revogação, escopo e sujeito tenham um caminho só.
+    #[must_use]
+    pub fn into_record(self) -> GrantRecord {
+        GrantRecord {
+            token_id: self.token_id,
+            subject: self.subject,
+            scopes: self.scopes,
+            not_before: self.not_before,
+            expires_at: self.expires_at,
+            revoked_at: None,
+            authority_epoch: self.authority_epoch,
+            predicate: ISSUED_PREDICATE,
+        }
+    }
+}
+
+/// Resultado assíncrono da consulta de grant emitido.
+pub type IssuedFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<IssuedGrant>, String>> + Send + 'a>>;
+
+/// Fonte de grants emitidos. A produção consulta `grant_issued`; os testes
+/// podem injetar uma fonte em memória.
+pub trait IssuedGrantSource: Send + Sync + fmt::Debug {
+    /// Busca pelo `sha256` hex do token apresentado. Recebe hash, nunca o token.
+    fn find_by_hash<'a>(&'a self, token_hash: &'a str) -> IssuedFuture<'a>;
+}
+
+/// Grants emitidos persistidos em Postgres (`grant_issued`, migração 0007).
+#[derive(Debug, Clone)]
+pub struct PgIssuedGrantSource {
+    pool: PgPool,
+}
+
+impl PgIssuedGrantSource {
+    #[must_use]
+    pub const fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+/// Comparação de hashes em tempo constante.
+///
+/// Comprimentos diferentes respondem `false` sem curto-circuito por posição; o
+/// laço percorre todos os bytes, para que a posição da diferença não vire sinal.
+fn hash_matches(candidate: &str, expected: &str) -> bool {
+    let left = candidate.as_bytes();
+    let right = expected.as_bytes();
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+impl IssuedGrantSource for PgIssuedGrantSource {
+    fn find_by_hash<'a>(&'a self, token_hash: &'a str) -> IssuedFuture<'a> {
+        Box::pin(async move {
+            // A consulta devolve o hash gravado para que a aceitação seja uma
+            // comparação em tempo constante, e não a confiança cega no índice.
+            let row = sqlx::query(
+                "SELECT token_id, tenant_id, principal, token_hash, scopes, \
+                        (EXTRACT(EPOCH FROM not_before))::bigint AS not_before, \
+                        (EXTRACT(EPOCH FROM expires_at))::bigint AS expires_at, \
+                        authority_epoch \
+                   FROM grant_issued WHERE token_hash = $1",
+            )
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| "falha ao consultar grant_issued".to_owned())?;
+            let Some(row) = row else { return Ok(None) };
+            let stored: String = row.get("token_hash");
+            if !hash_matches(&stored, token_hash) {
+                return Ok(None);
+            }
+            let names: Vec<String> = row.get("scopes");
+            let mut scopes = Vec::with_capacity(names.len());
+            for name in names {
+                // Escopo desconhecido no banco é dado corrompido: falha fechada,
+                // em vez de ignorar a linha ou inventar um escopo.
+                let Some(scope) = Scope::from_name(&name) else {
+                    return Err(format!("escopo desconhecido em grant_issued: {name}"));
+                };
+                scopes.push(scope);
+            }
+            let epoch: i64 = row.get("authority_epoch");
+            Ok(Some(IssuedGrant {
+                token_id: row.get("token_id"),
+                subject: Subject {
+                    tenant_id: row.get("tenant_id"),
+                    principal: row.get("principal"),
+                },
+                scopes,
+                not_before: row.get("not_before"),
+                expires_at: row.get("expires_at"),
+                authority_epoch: u64::try_from(epoch).unwrap_or(0),
+            }))
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 struct CachedRevocation {
@@ -643,6 +849,9 @@ pub struct Authorization {
     registry: GrantRegistry,
     clock: Arc<dyn Clock>,
     revocation: Arc<dyn RevocationSource>,
+    /// `None` significa "nenhum grant emitido é aceito": composição antiga e
+    /// testes não ganham aceitação nova por omissão (falha fechada).
+    issued: Option<Arc<dyn IssuedGrantSource>>,
     cache: RevocationCache,
     audit: Arc<dyn AuditSink>,
 }
@@ -655,13 +864,16 @@ impl Authorization {
         Self {
             registry,
             clock: Arc::new(SystemClock),
-            revocation: Arc::new(PgRevocationSource::new(pool)),
+            revocation: Arc::new(PgRevocationSource::new(pool.clone())),
+            issued: Some(Arc::new(PgIssuedGrantSource::new(pool))),
             cache: RevocationCache::default(),
             audit: Arc::new(StderrAudit),
         }
     }
 
     /// Composição explícita, usada por testes e por quem injeta outra fonte.
+    ///
+    /// Sem [`Self::with_issued_source`] nenhum grant emitido por API é aceito.
     pub fn with_parts(
         registry: GrantRegistry,
         clock: Arc<dyn Clock>,
@@ -673,9 +885,17 @@ impl Authorization {
             registry,
             clock,
             revocation,
+            issued: None,
             cache: RevocationCache::new(cache_ttl_seconds),
             audit,
         }
+    }
+
+    /// Habilita a aceitação de grants emitidos pela API administrativa.
+    #[must_use]
+    pub fn with_issued_source(mut self, issued: Arc<dyn IssuedGrantSource>) -> Self {
+        self.issued = Some(issued);
+        self
     }
 
     /// Registro consultado. Exposto para inspeção de contagem, nunca de token.
@@ -693,6 +913,34 @@ impl Authorization {
     /// Invalida explicitamente todo o cache de revogação.
     pub async fn invalidate_all_revocations(&self) {
         self.cache.invalidate_all().await;
+    }
+
+    /// Instante corrente do relógio injetado, em segundos Unix.
+    ///
+    /// A emissão usa o mesmo relógio da verificação: um grant emitido e aceito
+    /// não podem discordar sobre "agora".
+    #[must_use]
+    pub fn now_unix(&self) -> i64 {
+        self.clock.now_unix()
+    }
+
+    /// Registra um evento de auditoria. Nunca recebe token, por contrato.
+    pub fn audit_event(&self, event: &str) {
+        self.audit.record(event);
+    }
+
+    /// Resolve o token contra os grants emitidos por API, pelo seu hash.
+    ///
+    /// Ausência de fonte configurada devolve `None` sem consultar nada; falha de
+    /// banco vira [`AuthError::IssuanceUnavailable`] (nega), nunca aceitação.
+    async fn issued_record(&self, token: &str) -> Result<Option<GrantRecord>, AuthError> {
+        let Some(source) = &self.issued else {
+            return Ok(None);
+        };
+        match source.find_by_hash(&token_hash(token)).await {
+            Ok(found) => Ok(found.map(IssuedGrant::into_record)),
+            Err(_) => Err(AuthError::IssuanceUnavailable),
+        }
     }
 
     async fn revocation_status(
@@ -722,10 +970,20 @@ impl Authorization {
     /// # Errors
     /// [`AuthError`] com o motivo exato da recusa. Nenhuma mensagem contém o token.
     pub async fn authenticate(&self, token: &str) -> Result<VerifiedGrant, AuthError> {
-        let Some(record) = self.registry.verify(token) else {
-            self.audit.record("event=auth_denied reason=unauthenticated");
-            return Err(AuthError::Unauthenticated);
+        // Dois caminhos de credencial, um só julgamento: o registro em
+        // configuração (comparação em tempo constante) e o grant emitido por
+        // API (hash do token comparado com `grant_issued`).
+        let record = match self.registry.verify(token) {
+            Some(record) => record.clone(),
+            None => match self.issued_record(token).await? {
+                Some(record) => record,
+                None => {
+                    self.audit.record("event=auth_denied reason=unauthenticated");
+                    return Err(AuthError::Unauthenticated);
+                }
+            },
         };
+        let record = &record;
         let token_id = record.token_id.as_str();
         if record.revoked_at.is_some() {
             self.audit
@@ -1123,5 +1381,222 @@ mod tests {
     fn cache_ttl_zero_disables_reuse() {
         assert_eq!(cache_ttl_seconds(Duration::ZERO), 0);
         assert_eq!(cache_ttl_seconds(Duration::from_secs(5)), 5);
+    }
+}
+#[cfg(test)]
+mod issued_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// Fonte em memória: prova o caminho de aceitação sem banco no teste de
+    /// unidade. O comportamento de SQL fica nos testes de integração.
+    #[derive(Debug, Default)]
+    struct MemoryIssued {
+        by_hash: std::sync::Mutex<HashMap<String, IssuedGrant>>,
+    }
+
+    impl IssuedGrantSource for MemoryIssued {
+        fn find_by_hash<'a>(&'a self, token_hash: &'a str) -> IssuedFuture<'a> {
+            Box::pin(async move {
+                let guard = self
+                    .by_hash
+                    .lock()
+                    .map_err(|_| "fonte em memória envenenada".to_owned())?;
+                Ok(guard.get(token_hash).cloned())
+            })
+        }
+    }
+
+    /// Revogação em memória sempre ausente: estes testes são sobre emissão.
+    #[derive(Debug, Default)]
+    struct NeverRevoked;
+
+    impl RevocationSource for NeverRevoked {
+        fn revoked_at<'a>(&'a self, _token_id: &'a str) -> RevocationFuture<'a> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    struct Fixture {
+        auth: Authorization,
+        audit: Arc<CapturedAudit>,
+    }
+
+    fn fixture(now: i64, issued: &[(String, IssuedGrant)]) -> Fixture {
+        let source = MemoryIssued::default();
+        for (token, grant) in issued {
+            source
+                .by_hash
+                .lock()
+                .expect("fonte em memória")
+                .insert(token_hash(token), grant.clone());
+        }
+        let audit = Arc::new(CapturedAudit::default());
+        let auth = Authorization::with_parts(
+            GrantRegistry::default(),
+            Arc::new(FixedClock(now)),
+            Arc::new(NeverRevoked),
+            REVOCATION_CACHE_TTL_SECONDS,
+            audit.clone(),
+        )
+        .with_issued_source(Arc::new(source));
+        Fixture { auth, audit }
+    }
+
+    fn issued(token_id: &str, scopes: Vec<Scope>, not_before: i64, expires_at: i64) -> IssuedGrant {
+        IssuedGrant {
+            token_id: token_id.to_owned(),
+            subject: Subject {
+                tenant_id: "tenant-issued".to_owned(),
+                principal: "principal-issued".to_owned(),
+            },
+            scopes,
+            not_before,
+            expires_at,
+            authority_epoch: ISSUED_AUTHORITY_EPOCH,
+        }
+    }
+
+    #[test]
+    fn generated_credentials_are_opaque_and_unique() {
+        let (token_a, id_a) = generate_credential().expect("entropia do sistema");
+        let (token_b, id_b) = generate_credential().expect("entropia do sistema");
+        assert_ne!(token_a, token_b, "dois tokens nunca podem coincidir");
+        assert_ne!(id_a, id_b, "dois token_id nunca podem coincidir");
+        assert!(token_a.starts_with("gm_"));
+        assert_eq!(token_a.len(), 3 + 2 * TOKEN_BYTES);
+        assert!(token_a[3..].chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(id_a.starts_with("gtr_"));
+        assert_eq!(id_a.len(), 4 + 2 * TOKEN_ID_BYTES);
+    }
+
+    #[test]
+    fn token_hash_is_sha256_hex_and_never_reversible() {
+        let hash = token_hash("gm_exemplo");
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        // Vetor conhecido: sha256("") = e3b0...b855.
+        assert_eq!(
+            token_hash(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert!(!hash.contains("gm_exemplo"));
+        assert!(hash_matches(&hash, &token_hash("gm_exemplo")));
+        assert!(!hash_matches(&hash, &token_hash("gm_outro")));
+    }
+
+    #[test]
+    fn scope_names_round_trip() {
+        for scope in Scope::ALL {
+            assert_eq!(Scope::from_name(scope.as_str()), Some(scope));
+        }
+        assert_eq!(
+            Scope::from_name("admin:grants"),
+            Some(Scope::AdminGrants),
+            "o escopo administrativo tem nome estável"
+        );
+        assert_eq!(Scope::from_name("admin:*"), None);
+        assert_eq!(Scope::from_name("incident:delete"), None);
+    }
+
+    #[tokio::test]
+    async fn issued_token_is_accepted_and_scoped() {
+        let fixture = fixture(
+            150,
+            &[(
+                "gm_emitido".to_owned(),
+                issued("gtr-1", vec![Scope::IncidentRead], 100, 200),
+            )],
+        );
+        let verified = fixture
+            .auth
+            .authorize("gm_emitido", Scope::IncidentRead)
+            .await
+            .expect("token emitido válido");
+        assert_eq!(verified.token_id, "gtr-1");
+        assert_eq!(verified.subject.tenant_id, "tenant-issued");
+        assert!(verified.has_scope(Scope::IncidentRead));
+        assert!(!verified.has_scope(Scope::IncidentWrite));
+        assert_eq!(verified.authority_epoch, ISSUED_AUTHORITY_EPOCH);
+
+        assert_eq!(
+            fixture
+                .auth
+                .authorize("gm_emitido", Scope::IncidentWrite)
+                .await,
+            Err(AuthError::InsufficientScope)
+        );
+        assert_eq!(
+            fixture.auth.authenticate("gm_nao_emitido").await,
+            Err(AuthError::Unauthenticated)
+        );
+    }
+
+    #[tokio::test]
+    async fn issued_token_obeys_window() {
+        let late = fixture(
+            250,
+            &[(
+                "gm_expirado".to_owned(),
+                issued("gtr-exp", vec![Scope::IncidentRead], 100, 200),
+            )],
+        );
+        assert_eq!(
+            late.auth.authenticate("gm_expirado").await,
+            Err(AuthError::CredentialExpired)
+        );
+
+        let early = fixture(
+            50,
+            &[(
+                "gm_futuro".to_owned(),
+                issued("gtr-fut", vec![Scope::IncidentRead], 100, 200),
+            )],
+        );
+        assert_eq!(
+            early.auth.authenticate("gm_futuro").await,
+            Err(AuthError::CredentialNotYetValid)
+        );
+    }
+
+    #[tokio::test]
+    async fn without_issued_source_emitted_tokens_are_unknown() {
+        let auth = Authorization::with_parts(
+            GrantRegistry::default(),
+            Arc::new(FixedClock(150)),
+            Arc::new(NeverRevoked),
+            5,
+            Arc::new(CapturedAudit::default()),
+        );
+        assert_eq!(
+            auth.authenticate("gm_emitido").await,
+            Err(AuthError::Unauthenticated),
+            "sem fonte configurada nada é aceito (falha fechada)"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_never_contains_the_token() {
+        let fixture = fixture(
+            150,
+            &[(
+                "gm_segredo_de_teste".to_owned(),
+                issued("gtr-log", vec![Scope::IncidentRead], 100, 200),
+            )],
+        );
+        fixture
+            .auth
+            .authenticate("gm_segredo_de_teste")
+            .await
+            .expect("aceito");
+        let lines = fixture.audit.lines().await;
+        assert!(lines.iter().any(|line| line.contains("token_id=gtr-log")));
+        for line in lines {
+            assert!(
+                !line.contains("gm_segredo_de_teste"),
+                "auditoria não pode conter o token: {line}"
+            );
+        }
     }
 }

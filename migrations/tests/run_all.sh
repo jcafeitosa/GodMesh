@@ -8,6 +8,7 @@
 #   migrations/0004_grant_revocation.sql
 #   migrations/0005_sync_inbox.sql
 #   migrations/0006_incident_listing.sql
+#   migrations/0007_grant_issuance.sql
 # depois roda todos os `*_invariants.sql` e falha (exit != 0) se algum bloco
 # `NOTICE: OK` esperado não aparecer.
 #
@@ -74,6 +75,7 @@ aplicar "$raiz/migrations/0003_outbox_publisher.sql"
 aplicar "$raiz/migrations/0004_grant_revocation.sql"
 aplicar "$raiz/migrations/0005_sync_inbox.sql"
 aplicar "$raiz/migrations/0006_incident_listing.sql"
+aplicar "$raiz/migrations/0007_grant_issuance.sql"
 
 if [ -n "$sabotagem" ]; then
     [ -f "$sabotagem" ] || { echo "erro: sabotagem inexistente: $sabotagem" >&2; exit 2; }
@@ -127,6 +129,13 @@ esperado_0006=(
     "OK 2: list_seq não aceita escrita explícita"
     "OK 3: índice sos_incident_listagem (tenant_id, list_seq DESC) presente"
 )
+esperado_0007=(
+    "OK 1: token_hash fora do formato sha256 hex recusado (CHECK)"
+    "OK 2: hash de token duplicado recusado (UNIQUE)"
+    "OK 3: grant sem escopo recusado (CHECK)"
+    "OK 4: janela invertida recusada (CHECK)"
+    "OK 5: grant_issued guarda token_hash e nenhuma coluna de token"
+)
 
 saida="$(mktemp)"
 falhas=0
@@ -164,6 +173,7 @@ verificar "$tests/0003_invariants.sql" "${esperado_0003[@]}"
 verificar "$tests/0004_invariants.sql" "${esperado_0004[@]}"
 verificar "$tests/0005_invariants.sql" "${esperado_0005[@]}"
 verificar "$tests/0006_invariants.sql" "${esperado_0006[@]}"
+verificar "$tests/0007_invariants.sql" "${esperado_0007[@]}"
 
 rm -f "$saida"
 

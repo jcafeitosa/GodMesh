@@ -62,6 +62,8 @@ pub enum ApiError {
     InsufficientScope,
     /// Não foi possível consultar a revogação persistente: nega (falha fechada).
     RevocationUnavailable,
+    /// Não foi possível consultar os grants emitidos: nega (falha fechada).
+    IssuanceUnavailable,
     /// Pedido recusado na fronteira (corpo inválido ou tentativa de declarar tenancy).
     InvalidRequest(String),
     GrantDenied(GrantDecision),
@@ -86,6 +88,10 @@ pub enum ApiError {
         duplicates: u64,
         contiguous_prefix: u64,
     },
+    /// `token_id` que não corresponde a nenhum grant emitido pela API.
+    GrantNotFound,
+    /// O RNG do sistema não respondeu: sem entropia não há token opaco.
+    RandomnessUnavailable(String),
     /// Cursor ilegível, de versão desconhecida, sem partição ou de outro
     /// principal. Distinto de cursor ausente, que começa do início.
     CursorInvalid(String),
@@ -119,6 +125,7 @@ impl From<AuthError> for ApiError {
             AuthError::CredentialRevoked => Self::CredentialRevoked,
             AuthError::InsufficientScope => Self::InsufficientScope,
             AuthError::RevocationUnavailable => Self::RevocationUnavailable,
+            AuthError::IssuanceUnavailable => Self::IssuanceUnavailable,
             AuthError::InvalidCredential(inner) => Self::InvalidCredential(inner),
         }
     }
