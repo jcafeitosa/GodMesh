@@ -11,13 +11,24 @@
 //!    a `(principal, tenant, stream, partição, epoch, filtros)`; de outra
 //!    partição/epoch é recusado, nunca traduzido.
 //!
-//! Fronteira de confiança: `tenant_id` e `principal` vêm do grant verificado. O
-//! corpo do pedido traz só a posição, a classe de retenção e a origem; um corpo
-//! que tente declarar tenancy é recusado por `deny_unknown_fields`.
+//! Fronteira de confiança, em duas camadas (S-sec-2 — regra dura de
+//! `docs/04-seguranca/abuso-e-malha-maligna.md` §5):
+//!
+//! 1. o **grant** autenticou o *cliente* (um token com `event:write`); ele não
+//!    prova nada sobre a origem do evento;
+//! 2. a **assinatura do nó** prova o que o cliente afirma: posição canônica,
+//!    `tenant_id`, classe de retenção, instante de emissão e — decisivamente —
+//!    que a origem declarada é o próprio nó que assinou. Sem envelope válido,
+//!    **nenhum INSERT acontece** e nenhuma linha nasce em `event_position`.
+//!
+//! O `tenant_id` do envelope nunca amplia tenancy: é conferido contra o tenant
+//! autenticado do grant. Corpo com campos desconhecidos é recusado por
+//! `deny_unknown_fields`, como no resto da API.
 //!
 //! O ACK desta fatia é sempre `persisted_local`: a escrita é local e a resposta
 //! nunca alega replicação, materialização ou entrega.
 
+use godmesh_federation::event::{SignedEvent, SignedEventError};
 use godmesh_protocol::ack::AckClass;
 use godmesh_protocol::cursor::{Cursor, CursorError, CursorScope, CursorTokenError};
 use godmesh_sync::position::{Admission, EventPosition, PositionError};
@@ -35,16 +46,58 @@ pub const CURSOR_PROFILE: &str = "gmp.event.v1";
 /// de capacidade; `limit` é obrigatório justamente para não inventar default.
 pub const MAX_EVENTS_LIMIT: u32 = 100;
 
-/// Corpo do recebimento de evento.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct EventPayload {
-    pub origin_node: String,
-    pub stream_id: String,
-    pub partition: u32,
-    pub authority_epoch: u64,
-    pub seq: u64,
-    pub retention_class: String,
+// O corpo aceito por `POST /v1/events` é `godmesh_federation::event::SignedEvent`:
+// **não existe payload sem assinatura nesta rota, nem por flag**. Eventos do
+// nó local (smoke/admin, `GODMESH_NODE_KEY`) entram pelo mesmo caminho: o
+// processo assina com a própria chave e o nó local precisa estar registrado
+// como par `authorized` com escopo concedido — zero caminho privilegiado
+// implícito, zero modo de transição.
+
+/// Janela de frescor aceita no `issued_at` do envelope.
+///
+/// A assinatura prova autoria, não momento: sem janela, um envelope roubado
+/// vale para sempre e vira replay de histórico. Mesma regra e mesmo default do
+/// manifesto de ingresso (5 minutos), mas **configuração própria** — afrouxar
+/// ingresso não afrouxa ingest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventWindow {
+    pub max_age_seconds: i64,
+}
+
+/// Nome do ambiente que ajusta a janela de frescor do ingest (segundos).
+pub const EVENT_MAX_AGE_ENV: &str = "GODMESH_EVENT_MAX_AGE_SECONDS";
+
+impl Default for EventWindow {
+    fn default() -> Self {
+        Self {
+            max_age_seconds: godmesh_federation::manifest::DEFAULT_MAX_AGE_SECONDS,
+        }
+    }
+}
+
+impl EventWindow {
+    /// Janela explícita; valores não positivos caem no padrão (janela zero
+    /// recusaria todo evento e não é configuração útil).
+    #[must_use]
+    pub fn new(max_age_seconds: i64) -> Self {
+        if max_age_seconds > 0 {
+            Self { max_age_seconds }
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Janela lida de [`EVENT_MAX_AGE_ENV`]; ausente/ilegível fica o padrão.
+    #[must_use]
+    pub fn from_env() -> Self {
+        match std::env::var(EVENT_MAX_AGE_ENV) {
+            Ok(raw) => match raw.trim().parse::<i64>() {
+                Ok(seconds) => Self::new(seconds),
+                Err(_) => Self::default(),
+            },
+            Err(_) => Self::default(),
+        }
+    }
 }
 
 /// Resposta do recebimento. `ack_class` é a única alegação permitida.
@@ -104,24 +157,45 @@ pub struct EventPage {
     pub next_cursor: Option<String>,
 }
 
-/// Persiste um evento novo, ou reconhece a repetição da mesma posição.
+/// Verifica o envelope assinado **antes de qualquer efeito de escrita** e
+/// persiste a posição, ou reconhece a repetição da mesma posição.
 ///
-/// Ordem das verificações, deliberada: sujeito verificado → predicado do grant →
-/// posição válida → jurisdição do tenant → política de retenção (mesma transação
-/// da escrita) → repetição → prefixo contíguo. A política vem antes da repetição
-/// para que uma classe removida falhe fechado mesmo em replay.
+/// Ordem das verificações, deliberada — cada recusa devolve 422 com código
+/// próprio, **sem INSERT e sem linha nova em `event_position`**:
+///
+/// 1. sujeito verificado e predicado do grant;
+/// 2. formato do envelope e **origem = assinante** (nó comprometido não pode
+///    reivindicar outro nó como origem da posição);
+/// 3. o nó tem chave registrada em `federation_peer` (sem registro a recusa é
+///    `event_node_unauthorized` — não existe "sem assinatura" nesta rota);
+/// 4. assinatura válida sobre os bytes canônicos, com `verify_strict` contra a
+///    chave do registro, reconfirmando a ligação `node_id` ↔ chave;
+/// 5. `trust_state = authorized` (pendente/revogado/desconhecido nega);
+/// 6. tenant assinado = tenant autenticado do grant, **e** escopo
+///    `(node_id, tenant_id, stream_id)` presente em `federation_peer_scope`
+///    (ausência de linha é negativa: falha fechada);
+/// 7. `issued_at` dentro da janela de frescor;
+/// 8. na transação da escrita: epoch não regressivo por namespace → jurisdição
+///    → política de retenção → repetição → prefixo contíguo. A política vem
+///    antes da repetição para que uma classe removida falhe fechado em replay.
+///
+/// O `now` é injetado (o caso de uso não lê o relógio sozinho) para que a
+/// janela de frescor seja testável sem esperar tempo de parede.
 ///
 /// # Errors
-/// `InvalidCredential` com sujeito verificado incompleto; `InvalidRequest` para
-/// posição inválida (campo vazio, sequência zero, valores fora do tipo do banco);
-/// `GrantDenied` quando o predicado não devolve `Allow`; `RetentionScopeUnresolved`
-/// sem jurisdição declarada; `RetentionPolicyMissing` sem classe/cópia primária na
-/// jurisdição; `SequenceGap` para salto em relação ao prefixo contíguo; `Storage`
-/// para falha de banco.
+/// `InvalidCredential` com sujeito incompleto; `InvalidRequest` para posição ou
+/// envelope malformado (campo vazio, sequência zero, fora do tipo do banco);
+/// `GrantDenied` quando o predicado não devolve `Allow`; `EventSignatureInvalid`,
+/// `EventNodeUnauthorized`, `EventScopeDenied`, `EventNotFresh` e
+/// `EventEpochStale` para as negações desta fatia; `RetentionScopeUnresolved`
+/// sem jurisdição declarada; `RetentionPolicyMissing` sem classe/cópia primária;
+/// `SequenceGap` para salto no prefixo contíguo; `Storage` para falha de banco.
 pub async fn create_event(
     pool: &PgPool,
     grant: &VerifiedGrant,
-    payload: EventPayload,
+    event: SignedEvent,
+    window: &EventWindow,
+    now: i64,
 ) -> Result<EventOutcome, ApiError> {
     grant.validate().map_err(ApiError::InvalidCredential)?;
 
@@ -130,17 +204,29 @@ pub async fn create_event(
         denied => return Err(ApiError::GrantDenied(denied)),
     }
 
-    let tenant_id = &grant.subject.tenant_id;
+    // --- fronteira de assinatura -------------------------------------------------
+    // Nada daqui abaixo abre transação de escrita antes que o envelope esteja
+    // provado. Cada recusa devolve 422 nomeado e não deixa rastro em
+    // `event_position`.
 
-    // A posição entra no domínio antes de qualquer efeito: origem/stream vazios e
-    // sequência zero são recusados pela própria `EventPosition`.
+    event
+        .validate_fields()
+        .map_err(|e| ApiError::InvalidRequest(e.to_string()))?;
+    event.verify_origin_is_signer().map_err(|e| {
+        ApiError::EventScopeDenied(format!(
+            "um nó não pode declarar outro como origem da posição: {e}"
+        ))
+    })?;
+
+    // A posição entra no domínio antes de qualquer efeito: origem/stream vazios
+    // e sequência zero são recusados pela própria `EventPosition`.
     let position = EventPosition::new(
-        &payload.origin_node,
-        tenant_id,
-        &payload.stream_id,
-        payload.partition,
-        payload.authority_epoch,
-        payload.seq,
+        &event.position.origin_node,
+        &event.tenant_id,
+        &event.position.stream_id,
+        event.position.partition,
+        event.position.authority_epoch,
+        event.position.seq,
     )
     .map_err(invalid_position)?;
 
@@ -151,11 +237,117 @@ pub async fn create_event(
     let seq = i64::try_from(position.seq())
         .map_err(|_| ApiError::InvalidRequest("seq fora do intervalo".to_owned()))?;
 
+    // A chave que verifica a assinatura vem **só** do registro de pares aprovado
+    // por ingresso (migração 0008). O envelope não carrega `public_key`: trazê-
+    // la no corpo abriria um canal de troca de identidade que a assinatura não
+    // fecha — quem apresenta a chave decidiria quem é.
+    let peer: Option<(String, String)> =
+        sqlx::query_as("SELECT public_key, trust_state FROM federation_peer WHERE node_id = $1")
+            .bind(&event.node_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(ApiError::Storage)?;
+    let Some((public_key, trust_state)) = peer else {
+        return Err(ApiError::EventNodeUnauthorized(format!(
+            "nó {} não tem chave registrada na federação",
+            event.node_id
+        )));
+    };
+
+    match event.verify_signature_against(&public_key) {
+        Ok(()) => {}
+        Err(error) => return Err(event_signature_error(error)),
+    }
+
+    if trust_state != "authorized" {
+        return Err(ApiError::EventNodeUnauthorized(format!(
+            "nó {} está em estado {trust_state}; só nó autorizado escreve no log durável",
+            event.node_id
+        )));
+    }
+
+    // Tenancy: o tenant assinado no envelope é conferido contra o grant.
+    // Assinatura de nó autorizado não amplia tenancy, e grant não escolhe
+    // origem. Qualquer um dos dois mentindo é negativa de escopo.
+    let tenant_id = &grant.subject.tenant_id;
+    if &event.tenant_id != tenant_id {
+        return Err(ApiError::EventScopeDenied(
+            "tenant_id assinado no envelope não é o tenant autenticado pelo grant".to_owned(),
+        ));
+    }
+
+    let scoped: Option<String> = sqlx::query_scalar(
+        "SELECT stream_id FROM federation_peer_scope \
+          WHERE node_id = $1 AND tenant_id = $2 AND stream_id = $3",
+    )
+    .bind(&event.node_id)
+    .bind(tenant_id)
+    .bind(&event.position.stream_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::Storage)?;
+    if scoped.is_none() {
+        return Err(ApiError::EventScopeDenied(format!(
+            "nó {} não tem escopo para (tenant {}, stream {})",
+            event.node_id, tenant_id, event.position.stream_id
+        )));
+    }
+
+    if let Err(e) = event.verify_fresh(now, window.max_age_seconds) {
+        return Err(ApiError::EventNotFresh(match e {
+            SignedEventError::Expired {
+                issued_at,
+                now,
+                max_age_seconds,
+            } => {
+                format!("issued_at {issued_at} fora da janela de {max_age_seconds}s (agora {now})")
+            }
+            SignedEventError::NotYetValid { issued_at, now } => {
+                format!("issued_at {issued_at} no futuro além da janela (agora {now})")
+            }
+            other => other.to_string(),
+        }));
+    }
+
+    // --- verificação dentro da transação da escrita -------------------------------
+
     let mut tx = pool.begin().await.map_err(ApiError::Storage)?;
+
+    // Epoch não regressivo por namespace `(origem, tenant, stream, partição)` —
+    // a mesma dimensão do prefixo contíguo. Depois que a stream reconheceu a
+    // autoridade E, um envelope assinado sob autoridade E' < E não reabre
+    // histórico (fencing de ADR-061). Epoch maior é aceito: a autoridade nova
+    // manda, e o prefixo dela começa do zero.
+    // O agregado devolve **uma linha** mesmo sem histórico, e o valor dessa
+    // linha é NULL: `fetch_optional` decodificaria NULL como i64 e o erro
+    // pareceria falha de banco. Tipagem explícita em `Option<i64>` + `fetch_one`.
+    let epoch_max: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT max(authority_epoch) FROM event_position \
+          WHERE origin_node = $1 AND tenant_id = $2 AND stream_id = $3 AND partition = $4",
+    )
+    .bind(&event.position.origin_node)
+    .bind(tenant_id)
+    .bind(&event.position.stream_id)
+    .bind(partition)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(ApiError::Storage)?;
+    if let Some(current) = epoch_max {
+        let current_u64 = u64::try_from(current.max(0)).unwrap_or(u64::MAX);
+        if position.authority_epoch() < current_u64 {
+            tx.rollback().await.map_err(ApiError::Storage)?;
+            return Err(ApiError::EventEpochStale {
+                current: current_u64,
+                got: position.authority_epoch(),
+            });
+        }
+    }
+
     let jurisdiction = resolve_jurisdiction(&mut tx, tenant_id).await?;
 
+
     // Política efetiva da jurisdição do tenant, sob o mesmo lock que a escrita.
-    let class = resolve_retention_class(&mut tx, &payload.retention_class, &jurisdiction).await?;
+    let class = resolve_retention_class(&mut tx, &event.retention_class, &jurisdiction).await?;
 
     // Repetição da mesma tupla: idempotente, sem segundo INSERT. A classe da
     // resposta é a que já está durável, não a declarada no replay.
@@ -164,9 +356,9 @@ pub async fn create_event(
           WHERE origin_node = $1 AND tenant_id = $2 AND stream_id = $3 \
             AND partition = $4 AND authority_epoch = $5 AND seq = $6",
     )
-    .bind(&payload.origin_node)
+    .bind(&event.position.origin_node)
     .bind(tenant_id)
-    .bind(&payload.stream_id)
+    .bind(&event.position.stream_id)
     .bind(partition)
     .bind(authority_epoch)
     .bind(seq)
@@ -175,7 +367,7 @@ pub async fn create_event(
     .map_err(ApiError::Storage)?;
 
     if let Some(stored_class) = stored {
-        let response = ack_for(&payload, &stored_class, position.seq());
+        let response = ack_for(&event, &stored_class, position.seq());
         tx.rollback().await.map_err(ApiError::Storage)?;
         return Ok(EventOutcome {
             response,
@@ -185,9 +377,9 @@ pub async fn create_event(
 
     let prefix = contiguous_prefix(
         &mut tx,
-        &payload.origin_node,
+        &event.position.origin_node,
         tenant_id,
-        &payload.stream_id,
+        &event.position.stream_id,
         partition,
         authority_epoch,
     )
@@ -200,7 +392,7 @@ pub async fn create_event(
             // `match` obriga: se aparecer, é repetição, não lacuna.
             tx.rollback().await.map_err(ApiError::Storage)?;
             return Ok(EventOutcome {
-                response: ack_for(&payload, &class, position.seq()),
+                response: ack_for(&event, &class, position.seq()),
                 created: false,
             });
         }
@@ -223,9 +415,9 @@ pub async fn create_event(
          ON CONFLICT (origin_node, tenant_id, stream_id, partition, authority_epoch, seq) \
          DO NOTHING",
     )
-    .bind(&payload.origin_node)
+    .bind(&event.position.origin_node)
     .bind(tenant_id)
-    .bind(&payload.stream_id)
+    .bind(&event.position.stream_id)
     .bind(partition)
     .bind(authority_epoch)
     .bind(seq)
@@ -239,14 +431,14 @@ pub async fn create_event(
     if !created {
         tx.rollback().await.map_err(ApiError::Storage)?;
         return Ok(EventOutcome {
-            response: ack_for(&payload, &class, position.seq()),
+            response: ack_for(&event, &class, position.seq()),
             created: false,
         });
     }
 
     tx.commit().await.map_err(ApiError::Storage)?;
     Ok(EventOutcome {
-        response: ack_for(&payload, &class, position.seq()),
+        response: ack_for(&event, &class, position.seq()),
         created: true,
     })
 }
@@ -407,18 +599,26 @@ fn filters_for(origin_node: Option<&str>) -> String {
 }
 
 /// ACK do recebimento. Nesta fatia a única evidência é a linha durável local.
-fn ack_for(payload: &EventPayload, retention_class: &str, seq: u64) -> EventAck {
+/// Os campos ecoam a **posição assinada**, não o corpo cru: um replay com
+/// `issued_at` diferente recebe a mesma posição porque é a mesma posição.
+fn ack_for(event: &SignedEvent, retention_class: &str, seq: u64) -> EventAck {
     EventAck {
-        origin_node: payload.origin_node.clone(),
-        stream_id: payload.stream_id.clone(),
-        partition: payload.partition,
-        authority_epoch: payload.authority_epoch,
+        origin_node: event.position.origin_node.clone(),
+        stream_id: event.position.stream_id.clone(),
+        partition: event.position.partition,
+        authority_epoch: event.position.authority_epoch,
         seq,
         retention_class: retention_class.to_owned(),
         ack_class: AckClass::PersistedLocal.as_str().to_owned(),
     }
 }
 
+/// Toda negação de autenticidade do envelope é recusa nomeada: a assinatura é
+/// a única forma de provar autoria, e "assinatura inválida" nunca vira erro
+/// genérico. Chave fora do formato no registro também nega (falha fechada).
+fn event_signature_error(error: SignedEventError) -> ApiError {
+    ApiError::EventSignatureInvalid(error.to_string())
+}
 fn invalid_position(error: PositionError) -> ApiError {
     let detail = match error {
         PositionError::EmptyField => "origem, stream e tenant precisam ser não vazios",

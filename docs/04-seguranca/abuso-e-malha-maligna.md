@@ -86,7 +86,7 @@ Não existe "rede segura". Existe **superfície de abuso com custo**: cada ator 
 | Fatia | Entrega | Depende de |
 |---|---|---|
 | S-sec-1 | cotas por grant/tenant + limites de payload + admissão por classe | nada |
-| S-sec-2 | evento assinado pelo nó + escopo `(node, tenant, stream)` no ingest | M1 identidade |
+| S-sec-2 | evento assinado pelo nó + escopo `(node, tenant, stream)` no ingest — **implementado** em `POST /v1/events` (envelope `godmesh.federation.event.v1`, migração 0010, testes em `crates/godmesh-server/tests/event_signature.rs`; evidência em `docs/09-equipe/evidencias/2026-11-18-s-sec-2-evento-assinado.md`). O Inbox `POST /v1/sync/inbox` ainda grava posições sem este envelope: fica na pendência da fatia de sync entre nós (M4) | M1 identidade |
 | S-sec-3 | provação de nó + quarentena automática + revogação assinada | M1b aprovação assinada |
 | S-sec-4 | antiabuso de SOS e de localização (limites + correlação) | S-sec-1 |
 | S-sec-5 | RLS por tenant + teste negativo de vazamento | nada |

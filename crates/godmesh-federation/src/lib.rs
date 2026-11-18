@@ -12,6 +12,10 @@
 //!   (manifesto assinado nos dois sentidos, códigos de fechamento `0x474D00xx`),
 //!   [`link`] (estado de enlace com `unknown` de primeira classe) e [`node`]
 //!   (endpoint, aceitação, discagem e heartbeat 5 s × 3).
+//! * **S-sec-2 — evento assinado**: [`event`] ([`event::SignedEvent`], mesmo
+//!   padrão canônico do manifesto, domínio próprio `godmesh.federation.event.v1`)
+//!   — a regra dura de `docs/04-seguranca/abuso-e-malha-maligna.md` §5: evento
+//!   sem assinatura de nó autorizado não entra no log durável.
 //!
 //! Existe **uma** definição de `NodeIdentity`, `SignedManifest` e `PeerRecord`: a
 //! de M1, que é a que o banco (`migration 0008`) e as rotas
@@ -24,6 +28,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod event;
 pub mod handshake;
 pub mod identity;
 pub mod link;
@@ -32,6 +37,7 @@ pub mod node;
 pub mod peer;
 pub mod transport;
 
+pub use event::{EventPositionClaim, SignedEvent, SignedEventError, signed_event};
 pub use identity::{IdentityError, NodeIdentity, node_id_for, verify_node_id};
 pub use manifest::{DEFAULT_MAX_AGE_SECONDS, ManifestError, SignedManifest};
 pub use peer::{PeerRecord, PeerRegistry, TrustState, TrustTransitionError};

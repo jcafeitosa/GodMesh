@@ -506,6 +506,31 @@ const fn advice(e: &ApiError) -> (&'static str, bool, &'static str) {
             false,
             "reporte ao operador do nó; nada foi assumido como sadio",
         ),
+        ApiError::EventSignatureInvalid(_) => (
+            "a assinatura do envelope não confere com a chave registrada do nó, ou o registro não bate com o node_id",
+            false,
+            "assine os bytes canônicos de godmesh.federation.event.v1 com a chave do nó (GODMESH_NODE_KEY) e reenvie; nada foi gravado",
+        ),
+        ApiError::EventNodeUnauthorized(_) => (
+            "o nó assinante não está registrado em federation_peer ou não está authorized (pendente/revogado/desconhecido)",
+            false,
+            "o nó precisa completar ingresso e aprovação (POST /v1/federation/join-requests); revogado não volta: nova identidade, novo epoch",
+        ),
+        ApiError::EventScopeDenied(_) => (
+            "fora do escopo concedido: origem diferente do assinante, tenant diferente do grant ou tupla (node, tenant, stream) sem linha em federation_peer_scope",
+            false,
+            "peça ao operador a concessão de escopo exata (federation_peer_scope) para o par (tenant, stream); ausência de linha é negativa por design",
+        ),
+        ApiError::EventNotFresh(_) => (
+            "issued_at do envelope fora da janela de frescor do ingest (velho ou do futuro além da tolerância)",
+            true,
+            "alinhe o relógio (NTP) e reenvie o mesmo conteúdo com issued_at atual, assinado de novo; replay do envelope velho é recusado",
+        ),
+        ApiError::EventEpochStale { .. } => (
+            "authority_epoch do envelope é menor que o maior epoch já durável no namespace (fencing ADR-061)",
+            false,
+            "não reenvie sob epoch antigo: sincronize com a autoridade atual (current no corpo) e emita sob ela; quarentena de epoch incomparável é S-sec-3",
+        ),
         ApiError::Storage(_) => (
             "falha de persistência; nada foi confirmado",
             true,
@@ -570,6 +595,14 @@ fn probes() -> Vec<ApiError> {
                 next: "authorized".to_owned(),
             },
             ApiError::FederationInvariant("sonda".to_owned()),
+            ApiError::EventSignatureInvalid("sonda".to_owned()),
+            ApiError::EventNodeUnauthorized("sonda".to_owned()),
+            ApiError::EventScopeDenied("sonda".to_owned()),
+            ApiError::EventNotFresh("sonda".to_owned()),
+            ApiError::EventEpochStale {
+                current: 8,
+                got: 7,
+            },
             ApiError::Storage(sqlx::Error::RowNotFound),
         ]
 }
@@ -748,6 +781,34 @@ pub(crate) fn error_parts(e: &ApiError) -> (StatusCode, &'static str, String) {
             StatusCode::INTERNAL_SERVER_ERROR,
             "federation_invariant_violation",
             detail.clone(),
+        ),
+        // --- S-sec-2: negações do envelope assinado. Todas 422: a credencial
+        // é válida e a rota existe; o que falha é a prova de autoria do que o
+        // corpo afirma. Nada foi gravado em nenhuma delas.
+        ApiError::EventSignatureInvalid(detail) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "event_signature_invalid",
+            detail.clone(),
+        ),
+        ApiError::EventNodeUnauthorized(detail) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "event_node_unauthorized",
+            detail.clone(),
+        ),
+        ApiError::EventScopeDenied(detail) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "event_scope_denied",
+            detail.clone(),
+        ),
+        ApiError::EventNotFresh(detail) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "event_not_fresh",
+            detail.clone(),
+        ),
+        ApiError::EventEpochStale { current, got } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "event_epoch_stale",
+            format!("epoch {got} é regressivo: a stream já reconheceu a autoridade {current}"),
         ),
         ApiError::Storage(_) => (
             StatusCode::SERVICE_UNAVAILABLE,

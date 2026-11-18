@@ -36,6 +36,7 @@ use sqlx::PgPool;
 use crate::admission::{Admission, AdmissionConfig};
 use crate::api::ApiError;
 use crate::auth::{bearer_token, Authorization, GrantRegistry, Scope, VerifiedGrant};
+use crate::events::EventWindow;
 use crate::federation::JoinWindow;
 use crate::metrics::{Gauges, Metrics};
 use crate::observability::{observe, RequestContext, RequestLog, StderrRequestLog};
@@ -62,6 +63,10 @@ pub struct AppState {
     /// Janela de frescor aceita no `issued_at` de manifesto de ingresso.
     /// Lida do ambiente na composição do router (padrão: 5 minutos).
     pub join_window: JoinWindow,
+    /// Janela de frescor aceita no `issued_at` do envelope de evento
+    /// (`GODMESH_EVENT_MAX_AGE_SECONDS`, padrão 5 minutos). Configuração
+    /// própria: afrouxar ingresso não afrouxa o ingest (S-sec-2).
+    pub event_window: EventWindow,
     /// Enlaces de federação observados neste processo. `None` quando o runtime
     /// de malha não está anexado: o diagnóstico responde `unknown`, que é o piso
     /// honesto, em vez de fingir saúde. `GET /v1/meta →
@@ -358,6 +363,7 @@ fn build_router(
     host: HostTelemetry,
 ) -> Router {
     let join_window = JoinWindow::from_env();
+    let event_window = EventWindow::from_env();
 
     // 1. O registro é a única fonte: ele constrói o router E é publicado.
     let mut reg = contract::Registry::new();
@@ -447,6 +453,7 @@ fn build_router(
         metrics: Metrics::new(),
         log,
         join_window,
+        event_window,
         federation,
         admission,
         outbox_enabled,
@@ -650,6 +657,12 @@ impl ApiErrorResponse {
             ApiError::TrustTransition { current, next } => vec![
                 ("current", Value::String(current.clone())),
                 ("next", Value::String(next.clone())),
+            ],
+            // S-sec-2: o epoch que a stream já reconhece é o dado que o
+            // cliente precisa para não reenviar sob autoridade antiga.
+            ApiError::EventEpochStale { current, got } => vec![
+                ("current", json!(current)),
+                ("got", json!(got)),
             ],
             ApiError::InboxGap {
                 expected,

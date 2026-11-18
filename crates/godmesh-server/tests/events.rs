@@ -180,15 +180,18 @@ fn json_body(raw: &str) -> Value {
 }
 
 fn event_body(stream: &str, partition: u32, epoch: u64, seq: u64, class: &str) -> String {
-    serde_json::json!({
-        "origin_node": "node-sb",
-        "stream_id": stream,
-        "partition": partition,
-        "authority_epoch": epoch,
-        "seq": seq,
-        "retention_class": class,
-    })
-    .to_string()
+    // S-sec-2: o corpo aceito pela rota é o envelope assinado pelo nó local de
+    // teste (`common::LOCAL_NODE`). A origem da posição **é** o assinante — o
+    // `"node-sb"` literal desta suíte morreu com a fatia.
+    common::envelope_assinado(
+        &common::LOCAL_NODE,
+        TENANT,
+        stream,
+        partition,
+        epoch,
+        seq,
+        class,
+    )
 }
 
 async fn rows(pool: &PgPool, tenant: &str, stream: &str) -> i64 {
@@ -215,6 +218,7 @@ async fn persists_position_with_tenant_from_grant_and_jurisdiction_from_tenant_r
     declare_tenant(&pool, TENANT, "BR").await;
     let addr = serve(pool.clone(), registry()).await;
     let stream = unique_stream();
+    common::no_local_pronto(&pool, TENANT, &stream).await;
 
     let (status, raw) = tokio::task::spawn_blocking({
         let body = event_body(&stream, 1, 7, 1, CLASS);
@@ -254,6 +258,7 @@ async fn reads_pages_with_next_cursor_and_ends_without_one() {
     declare_tenant(&pool, TENANT, "BR").await;
     let addr = serve(pool.clone(), registry()).await;
     let stream = unique_stream();
+    common::no_local_pronto(&pool, TENANT, &stream).await;
 
     for seq in 1..=3 {
         let (status, raw) = tokio::task::spawn_blocking({
@@ -314,6 +319,7 @@ async fn unknown_retention_class_is_409_and_writes_nothing() {
     declare_tenant(&pool, TENANT, "BR").await;
     let addr = serve(pool.clone(), registry()).await;
     let stream = unique_stream();
+    common::no_local_pronto(&pool, TENANT, &stream).await;
 
     let (status, raw) = tokio::task::spawn_blocking({
         let body = event_body(&stream, 1, 7, 1, "classe-que-nao-existe");
@@ -342,6 +348,7 @@ async fn repeated_position_is_200_with_the_original_ack_and_no_duplicate() {
     declare_tenant(&pool, TENANT, "BR").await;
     let addr = serve(pool.clone(), registry()).await;
     let stream = unique_stream();
+    common::no_local_pronto(&pool, TENANT, &stream).await;
 
     let body = event_body(&stream, 1, 7, 1, CLASS);
     let auth = auth();
@@ -377,6 +384,7 @@ async fn sequence_jump_is_409_and_the_expected_position_is_named() {
     declare_tenant(&pool, TENANT, "BR").await;
     let addr = serve(pool.clone(), registry()).await;
     let stream = unique_stream();
+    common::no_local_pronto(&pool, TENANT, &stream).await;
 
     let (status, raw) = tokio::task::spawn_blocking({
         let body = event_body(&stream, 1, 7, 2, CLASS);
@@ -414,6 +422,7 @@ async fn cursor_from_another_partition_is_400_cursor_incomparable() {
     declare_tenant(&pool, TENANT, "BR").await;
     let addr = serve(pool.clone(), registry()).await;
     let stream = unique_stream();
+    common::no_local_pronto(&pool, TENANT, &stream).await;
 
     for seq in 1..=2 {
         let (status, raw) = tokio::task::spawn_blocking({
@@ -480,6 +489,7 @@ async fn invalid_cursor_is_400_and_absent_cursor_is_a_fresh_read() {
     declare_tenant(&pool, TENANT, "BR").await;
     let addr = serve(pool.clone(), registry()).await;
     let stream = unique_stream();
+    common::no_local_pronto(&pool, TENANT, &stream).await;
 
     // Cursor ausente: leitura do início, 200 mesmo sem nenhum evento.
     let path = format!("/v1/events?stream_id={stream}&partition=1&authority_epoch=7&limit=10");
@@ -532,6 +542,7 @@ async fn cursor_of_another_principal_is_400_cursor_invalid() {
     declare_tenant(&pool, TENANT, "BR").await;
     let addr = serve(pool.clone(), registry()).await;
     let stream = unique_stream();
+    common::no_local_pronto(&pool, TENANT, &stream).await;
 
     for seq in 1..=2 {
         let (status, raw) = tokio::task::spawn_blocking({

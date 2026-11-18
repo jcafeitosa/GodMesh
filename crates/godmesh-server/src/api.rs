@@ -137,6 +137,27 @@ pub enum ApiError {
     },
     /// Estado persistido de federação fora do contrato: invariante de banco (500).
     FederationInvariant(String),
+    /// Envelope de evento com assinatura que não confere, ou chave do registro
+    /// fora do formato / que não deriva do `node_id` (S-sec-2, 422).
+    EventSignatureInvalid(String),
+    /// O nó assinante não está registrado ou não está `authorized` em
+    /// `federation_peer` (S-sec-2, 422). Nenhum INSERT acontece.
+    EventNodeUnauthorized(String),
+    /// Origem ≠ assinante, tenant do envelope ≠ tenant do grant, ou escopo
+    /// `(node, tenant, stream)` não concedido em `federation_peer_scope`
+    /// (S-sec-2, 422). Ausência de linha é negativa: falha fechada.
+    EventScopeDenied(String),
+    /// `issued_at` fora da janela de frescor do ingest (S-sec-2, 422).
+    EventNotFresh(String),
+    /// `authority_epoch` abaixo do maior epoch já reconhecido para o namespace
+    /// `(origem, tenant, stream, partição)`: o envelope não reabre histórico
+    /// (fencing; S-sec-2, 422).
+    EventEpochStale {
+        /// Maior epoch já durável no namespace.
+        current: u64,
+        /// Epoch reivindicado pelo envelope recusado.
+        got: u64,
+    },
     Storage(sqlx::Error),
 }
 

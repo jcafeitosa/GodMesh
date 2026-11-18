@@ -10,6 +10,7 @@
 #   migrations/0006_incident_listing.sql
 #   migrations/0007_grant_issuance.sql
 #   migrations/0008_federation_peers.sql
+#   migrations/0010_event_signed_ingest.sql
 # depois roda todos os `*_invariants.sql` e falha (exit != 0) se algum bloco
 # `NOTICE: OK` esperado não aparecer.
 #
@@ -78,6 +79,10 @@ aplicar "$raiz/migrations/0005_sync_inbox.sql"
 aplicar "$raiz/migrations/0006_incident_listing.sql"
 aplicar "$raiz/migrations/0007_grant_issuance.sql"
 aplicar "$raiz/migrations/0008_federation_peers.sql"
+# 0009 pertence à M1b (aprovação de ingresso assinada, emenda ADR-071) e ainda
+# não tem arquivo; 0010 é a S-sec-2. O runner aplica em ordem de nome, então a
+# M1b entra antes da 0010 no dia em que nascer — nenhuma reordenação aqui.
+aplicar "$raiz/migrations/0010_event_signed_ingest.sql"
 
 if [ -n "$sabotagem" ]; then
     [ -f "$sabotagem" ] || { echo "erro: sabotagem inexistente: $sabotagem" >&2; exit 2; }
@@ -139,6 +144,14 @@ esperado_0008=(
     "OK 5: trust_state inventado recusado (CHECK)"
     "OK 6: tabelas de federação guardam apenas chave pública"
 )
+esperado_0010=(
+    "OK 1: escopo duplicado recusado (PK)"
+    "OK 2: escopo de nó não registrado recusado (FK)"
+    "OK 3: escopo com tenant/stream vazio recusado (CHECK)"
+    "OK 4: apagar par com escopo ativo recusado (FK RESTRICT)"
+    "OK 5: índice de lookup do ingest presente"
+    "OK 6: escopo por nó guarda apenas nomes, nenhum segredo"
+)
 esperado_0007=(
     "OK 1: token_hash fora do formato sha256 hex recusado (CHECK)"
     "OK 2: hash de token duplicado recusado (UNIQUE)"
@@ -185,6 +198,7 @@ verificar "$tests/0005_invariants.sql" "${esperado_0005[@]}"
 verificar "$tests/0006_invariants.sql" "${esperado_0006[@]}"
 verificar "$tests/0007_invariants.sql" "${esperado_0007[@]}"
 verificar "$tests/0008_invariants.sql" "${esperado_0008[@]}"
+verificar "$tests/0010_invariants.sql" "${esperado_0010[@]}"
 
 rm -f "$saida"
 

@@ -307,15 +307,9 @@ async fn send_async(
 }
 
 fn event_body(stream: &str, seq: u64) -> String {
-    json!({
-        "origin_node": "node-limits",
-        "stream_id": stream,
-        "partition": 1,
-        "authority_epoch": 7,
-        "seq": seq,
-        "retention_class": CLASS,
-    })
-    .to_string()
+    // S-sec-2: corpo é envelope assinado pelo nó local de teste. A origem da
+    // posição é o próprio assinante; o tenant vem do grant do token `eventos`.
+    common::envelope_assinado(&common::LOCAL_NODE, TENANT_EVENTOS, stream, 1, 7, seq, CLASS)
 }
 
 fn inbox_body(stream: &str, origin: &str, seqs: &[u64]) -> String {
@@ -549,6 +543,7 @@ async fn rajada_acima_da_cota_de_requisicoes_e_429_com_retry_after_sem_efecto() 
     let (grants, tokens) = registry();
     let addr = serve(pool.clone(), grants, config_with(Scope::EventWrite, tight_limits())).await;
     let stream = unique("stream-cota");
+    common::no_local_pronto(&pool, TENANT_EVENTOS, &stream).await;
 
     let r1 = send_async(addr, "POST", "/v1/events", Some(&tokens.eventos), None, Some(event_body(&stream, 1))).await;
     let r2 = send_async(addr, "POST", "/v1/events", Some(&tokens.eventos), None, Some(event_body(&stream, 2))).await;
@@ -686,6 +681,7 @@ async fn sob_pressao_classe_baixa_e_503_enquanto_sos_continua_201() {
 
     // Evento (classe baixa): recusado **antes** do handler.
     let stream = unique("stream-pressao");
+    common::no_local_pronto(&pool, TENANT_EVENTOS, &stream).await;
     let evento = send_async(addr, "POST", "/v1/events", Some(&tokens.eventos), None, Some(event_body(&stream, 1))).await;
     assert_eq!(evento.status, 503, "{:?}", evento.body);
     assert_eq!(event_rows(&pool, TENANT_EVENTOS, &stream).await, 0);
@@ -744,6 +740,7 @@ async fn flood_de_evento_nao_consome_a_cota_de_sos() {
     )
     .await;
     let stream = unique("stream-sos-cota");
+    common::no_local_pronto(&pool, TENANT_EVENTOS, &stream).await;
 
     let primeiro = send_async(addr, "POST", "/v1/events", Some(&tokens.eventos), None, Some(event_body(&stream, 1))).await;
     assert_eq!(primeiro.status, 201, "{:?}", primeiro.body);

@@ -9,15 +9,17 @@ use super::contract::{Access, ParamSpec, Registry, RouteDoc, Schema};
 use super::{created_status, AppState, ApiErrorResponse};
 use crate::api::ApiError;
 use crate::auth::{Scope, VerifiedGrant};
-use crate::events::{create_event, list_events, EventAck, EventPage, EventPayload, EventQuery};
+use crate::events::{create_event, list_events, EventAck, EventPage, EventQuery};
+use godmesh_federation::SignedEvent;
+use godmesh_federation::now_unix;
 
 pub(super) fn register(reg: &mut Registry) {
     reg.post(
         "/v1/events",
         Access::Scope(Scope::EventWrite),
         RouteDoc {
-            summary: "Aceita a posição de um evento; replay da mesma posição devolve 200 sem reescrever",
-            request: Some("EventPayload"),
+            summary: "Aceita um evento assinado pelo nó de origem; replay da mesma posição devolve 200 sem reescrever (S-sec-2: sem assinatura válida de nó autorizado, nenhum INSERT)",
+            request: Some("SignedEvent"),
             success: &[
                 (201, Schema::Ref("EventAck")),
                 (200, Schema::Ref("EventAck")),
@@ -25,6 +27,11 @@ pub(super) fn register(reg: &mut Registry) {
             errors: &[
                 "invalid_request",
                 "grant_denied",
+                "event_signature_invalid",
+                "event_node_unauthorized",
+                "event_scope_denied",
+                "event_epoch_stale",
+                "event_not_fresh",
                 "retention_scope_unresolved",
                 "retention_policy_missing",
                 "sequence_gap",
@@ -64,14 +71,15 @@ pub(super) fn register(reg: &mut Registry) {
 pub(super) async fn post_event(
     State(state): State<AppState>,
     Extension(grant): Extension<VerifiedGrant>,
-    payload: Result<Json<EventPayload>, JsonRejection>,
+    payload: Result<Json<SignedEvent>, JsonRejection>,
 ) -> Result<(StatusCode, Json<EventAck>), ApiErrorResponse> {
-    let Json(payload) = payload.map_err(|rejection| {
+    let Json(event) = payload.map_err(|rejection| {
         ApiErrorResponse::from(ApiError::InvalidRequest(rejection.body_text()))
     })?;
     // 201 na posição nova, 200 na repetição idempotente da mesma posição. O ACK
-    // nunca passa de `persisted_local` (ADR-058).
-    match create_event(&state.pool, &grant, payload).await {
+    // nunca passa de `persisted_local` (ADR-058). A janela de frescor usa o
+    // relógio do processo; o caso de uso aceita `now` injetável para teste.
+    match create_event(&state.pool, &grant, event, &state.event_window, now_unix()).await {
         Ok(outcome) => Ok((created_status(outcome.created), Json(outcome.response))),
         Err(e) => Err(ApiErrorResponse::from(e)),
     }

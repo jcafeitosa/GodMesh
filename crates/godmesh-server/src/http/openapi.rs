@@ -47,7 +47,7 @@ use crate::admin::{
 };
 use crate::api::{IncidentPayload, IncidentResponse};
 use crate::auth::Scope;
-use crate::events::{EventAck, EventPage, EventPayload, EventRecord};
+use crate::events::{EventAck, EventPage, EventRecord};
 use crate::federation::JoinRequestView;
 use crate::inbox::{
     InboxBatchPayload, InboxBatchResponse, InboxGap, InboxPositionPayload, InboxState,
@@ -353,7 +353,8 @@ fn components() -> Components {
         .schema_from::<AcknowledgePayload>()
         .schema_from::<IncidentPage>()
         .schema_from::<IncidentSummary>()
-        .schema_from::<EventPayload>()
+        .schema_from::<godmesh_federation::event::SignedEvent>()
+        .schema_from::<godmesh_federation::event::EventPositionClaim>()
         .schema_from::<EventAck>()
         .schema_from::<EventRecord>()
         .schema_from::<EventPage>()

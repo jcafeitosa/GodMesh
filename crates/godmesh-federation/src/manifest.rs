@@ -188,14 +188,14 @@ impl From<IdentityError> for ManifestError {
     }
 }
 
-fn push_field(out: &mut Vec<u8>, tag: &str, value: &[u8]) {
+pub(crate) fn push_field(out: &mut Vec<u8>, tag: &str, value: &[u8]) {
     out.extend_from_slice(&(tag.len() as u32).to_be_bytes());
     out.extend_from_slice(tag.as_bytes());
     out.extend_from_slice(&(value.len() as u32).to_be_bytes());
     out.extend_from_slice(value);
 }
 
-fn normalise(items: &[String]) -> Vec<&str> {
+pub(crate) fn normalise(items: &[String]) -> Vec<&str> {
     let mut items: Vec<&str> = items.iter().map(String::as_str).collect();
     items.sort_unstable();
     items.dedup();

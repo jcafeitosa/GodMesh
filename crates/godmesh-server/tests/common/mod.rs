@@ -172,3 +172,95 @@ pub fn call(
 pub fn get(addr: SocketAddr, path: &str, token: &str) -> HttpResponse {
     call(addr, "GET", path, Some(token), None)
 }
+
+// ---------------------------------------------------------------------------
+// S-sec-2 — envelopes de evento assinados pelo nó.
+//
+// Todo `POST /v1/events` de teste passa por aqui: não existe mais corpo sem
+// assinatura na rota, e os testes provam isso por construção (a única forma de
+// fabricar um corpo válido é assinar). A criptografia é a do próprio
+// `godmesh-federation` — o teste não implementa nada.
+// ---------------------------------------------------------------------------
+
+use godmesh_federation::event::EventDraft;
+use godmesh_federation::{NodeIdentity, now_unix, signed_event};
+
+/// Nó **local** do processo de teste: a chave vive só aqui, e o `node_id` é o
+/// derivado da chave pública — a mesma derivação que a produção lê de
+/// `GODMESH_NODE_KEY`.
+pub static LOCAL_NODE: LazyLock<NodeIdentity> = LazyLock::new(|| {
+    NodeIdentity::generate_in_memory().expect("identidade de nó em memória")
+});
+
+/// Registro o nó em `federation_peer` com o estado pedido (idempotente por
+/// `node_id`, como o ingresso). `public_key` é a chave do arquivo do nó —
+/// dado público; a privada nunca sai do processo.
+pub async fn registrar_no(pool: &PgPool, identity: &NodeIdentity, trust_state: &str) {
+    sqlx::query(
+        "INSERT INTO federation_peer \
+             (node_id, peer_id, public_key, cluster, region, trust_state, \
+              software_version, epoch) \
+         VALUES ($1, $1, $2, 'cluster-teste', 'BR', $3, '0.0.1', 1) \
+         ON CONFLICT (node_id) DO UPDATE SET trust_state = EXCLUDED.trust_state",
+    )
+    .bind(identity.node_id())
+    .bind(identity.public_key_hex())
+    .bind(trust_state)
+    .execute(pool)
+    .await
+    .expect("par de teste registrado");
+}
+
+/// Concede o escopo exato `(nó, tenant, stream)` — sem linha, o ingest nega.
+pub async fn conceder_escopo(pool: &PgPool, node_id: &str, tenant_id: &str, stream_id: &str) {
+    sqlx::query(
+        "INSERT INTO federation_peer_scope (node_id, tenant_id, stream_id) \
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(node_id)
+    .bind(tenant_id)
+    .bind(stream_id)
+    .execute(pool)
+    .await
+    .expect("escopo de ingest concedido");
+}
+
+/// Nó local autorizado + escopo para `(tenant, stream)`: a preparação mínima
+/// de um caminho feliz. Idempotente para testes que chamam mais de uma vez.
+pub async fn no_local_pronto(pool: &PgPool, tenant_id: &str, stream_id: &str) {
+    registrar_no(pool, &LOCAL_NODE, "authorized").await;
+    conceder_escopo(pool, LOCAL_NODE.node_id(), tenant_id, stream_id).await;
+}
+
+/// Envelope assinado pelo nó, JSON pronto para o corpo de `POST /v1/events`.
+pub fn envelope_assinado(
+    identity: &NodeIdentity,
+    tenant_id: &str,
+    stream_id: &str,
+    partition: u32,
+    authority_epoch: u64,
+    seq: u64,
+    retention_class: &str,
+) -> String {
+    let event = signed_event(
+        identity,
+        EventDraft {
+            tenant_id,
+            stream_id,
+            partition,
+            authority_epoch,
+            seq,
+            retention_class,
+            issued_at: now_unix(),
+        },
+    );
+    serde_json::to_string(&event).expect("envelope serializável")
+}
+
+/// Envelope com `issued_at` explícito (cenários de janela de frescor): o
+/// chamador constrói o [`EventDraft`] e recebe o JSON já assinado. Alterar o
+/// corpo depois de assinar quebraria a assinatura — o teste provaria outra
+/// coisa, então a API só permite assinar o rascunho inteiro de uma vez.
+pub fn envelope(identity: &NodeIdentity, draft: EventDraft<'_>) -> String {
+    serde_json::to_string(&signed_event(identity, draft)).expect("envelope serializável")
+}

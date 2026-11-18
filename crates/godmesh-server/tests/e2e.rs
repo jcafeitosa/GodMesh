@@ -336,15 +336,10 @@ fn incident_body(id: &str) -> String {
 }
 
 fn event_body(stream: &str, seq: u64, class: &str) -> String {
-    json!({
-        "origin_node": "node-e2e",
-        "stream_id": stream,
-        "partition": 1,
-        "authority_epoch": 7,
-        "seq": seq,
-        "retention_class": class,
-    })
-    .to_string()
+    // S-sec-2: envelope assinado pelo nó local de teste. Origem da posição e
+    // assinante são o mesmo `gmn_` derivado da chave — a rota não aceita mais
+    // o `"node-e2e"` literal que esta suíte usava.
+    common::envelope_assinado(&common::LOCAL_NODE, TENANT_A, stream, 1, 7, seq, class)
 }
 
 // --- leitura do banco: o efeito, não a promessa -------------------------------
@@ -622,6 +617,7 @@ async fn evento_persistido_replay_lacuna_classe_e_cursor() {
     let pool = pool(env).await;
     let addr = serve(pool.clone()).await;
     let stream = unique("stream");
+    common::no_local_pronto(&pool, TENANT_A, &stream).await;
 
     // 9. posição nova
     let body = event_body(&stream, 1, CLASS);
