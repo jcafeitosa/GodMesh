@@ -646,3 +646,103 @@ fn esquema_de_migracao_e_v1() {
     assert_eq!(migrate::DEFAULT_MIGRATIONS_DIR, "migrations");
     assert_eq!(migrate::MIGRATIONS_DIR_ENV, "GODMESH_MIGRATIONS_DIR");
 }
+
+async fn schema_before_signed_approval(base: &str) -> (String, PgPool) {
+    recreate_sa(&admin_pool(base).await).await;
+    let url = sa_url(base);
+    let dir = migrations_dir();
+    let old = std::env::temp_dir().join(format!("godmesh-m1bi-{}", std::process::id()));
+    std::fs::create_dir(&old).unwrap();
+    for name in nomes_de_migracao(&dir) {
+        if !name.starts_with("0009") {
+            std::fs::copy(dir.join(&name), old.join(&name)).unwrap();
+        }
+    }
+    let migration = run_migrate_only(&url, &old);
+    std::fs::remove_dir_all(old).unwrap();
+    assert!(migration.status.success(), "{}", stderr_of(&migration));
+    let pool = pool_for(&url).await;
+    (url, pool)
+}
+
+#[tokio::test]
+async fn m1bi_applies_0009_after_0010_once() {
+    let Some(base) = base_url() else {
+        eprintln!("SKIP: DATABASE_URL ausente");
+        return;
+    };
+    let _guard = sole_lock().await;
+    let (url, pool) = schema_before_signed_approval(&base).await;
+    sqlx::raw_sql(
+        "INSERT INTO federation_peer
+         (node_id, peer_id, public_key, cluster, region, trust_state, software_version, epoch)
+         VALUES ('ingest-node', 'ingest-node', repeat('a', 64), 'cluster', 'region',
+                 'authorized', '1.0.0', 1);
+         INSERT INTO federation_peer_scope (node_id, tenant_id, stream_id)
+         VALUES ('ingest-node', 'tenant', 'stream');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let scope = "SELECT to_jsonb(s)::text FROM federation_peer_scope s";
+    let prior_scope: String = sqlx::query_scalar(scope).fetch_one(&pool).await.unwrap();
+    let before = control_rows(&pool).await;
+    assert!(
+        before
+            .iter()
+            .any(|row| row.0 == "0010_event_signed_ingest.sql")
+    );
+    let report = migrate::migrate(&pool, &migrations_dir()).await.unwrap();
+    assert_eq!(report.applied, ["0009_federation_approval.sql"]);
+    let after = control_rows(&pool).await;
+    assert_eq!(after.len(), before.len() + 1);
+    assert!(before.iter().all(|row| after.contains(row)));
+    assert!(run_migrate_only(&url, &migrations_dir()).status.success());
+    assert_eq!(control_rows(&pool).await, after);
+    let current_scope: String = sqlx::query_scalar(scope).fetch_one(&pool).await.unwrap();
+    assert_eq!(current_scope, prior_scope);
+}
+
+#[tokio::test]
+async fn m1bi_legacy_approval_blocks_0009_without_partial_changes() {
+    let Some(base) = base_url() else {
+        eprintln!("SKIP: DATABASE_URL ausente");
+        return;
+    };
+    let _guard = sole_lock().await;
+    let (url, pool) = schema_before_signed_approval(&base).await;
+    sqlx::query(
+        "INSERT INTO federation_join_request
+         (join_request_id, node_id, epoch, manifest, state, approved_at, approved_by)
+         VALUES ('fjr_00000000000000000000000000000001', 'legacy', 1, '{}',
+                 'approved', now(), 'operator')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before = control_rows(&pool).await;
+    let request = "SELECT to_jsonb(r)::text FROM federation_join_request r";
+    let legacy: String = sqlx::query_scalar(request).fetch_one(&pool).await.unwrap();
+
+    let result = run_migrate_only(&url, &migrations_dir());
+    assert!(
+        !result.status.success(),
+        "0009 precisa bloquear aprovação legada"
+    );
+    let error = stderr_of(&result);
+    assert!(
+        error.contains("0009_federation_approval.sql") && error.contains("sem prova assinada"),
+        "{error}"
+    );
+    assert_eq!(control_rows(&pool).await, before);
+    let after: String = sqlx::query_scalar(request).fetch_one(&pool).await.unwrap();
+    assert_eq!(after, legacy);
+    let index: Option<String> = sqlx::query_scalar(
+        "SELECT indexname FROM pg_indexes WHERE tablename = 'federation_join_request'
+         AND indexdef LIKE '%approval_epoch%'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert_eq!(index, None);
+}
