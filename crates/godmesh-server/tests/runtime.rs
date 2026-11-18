@@ -647,14 +647,14 @@ fn esquema_de_migracao_e_v1() {
     assert_eq!(migrate::MIGRATIONS_DIR_ENV, "GODMESH_MIGRATIONS_DIR");
 }
 
-async fn schema_before_signed_approval(base: &str) -> (String, PgPool) {
+async fn schema_without(base: &str, excluded: &[&str]) -> (String, PgPool) {
     recreate_sa(&admin_pool(base).await).await;
     let url = sa_url(base);
     let dir = migrations_dir();
     let old = std::env::temp_dir().join(format!("godmesh-m1bi-{}", std::process::id()));
     std::fs::create_dir(&old).unwrap();
     for name in nomes_de_migracao(&dir) {
-        if !name.starts_with("0009") {
+        if !excluded.iter().any(|prefix| name.starts_with(prefix)) {
             std::fs::copy(dir.join(&name), old.join(&name)).unwrap();
         }
     }
@@ -672,7 +672,7 @@ async fn m1bi_applies_0009_after_0010_once() {
         return;
     };
     let _guard = sole_lock().await;
-    let (url, pool) = schema_before_signed_approval(&base).await;
+    let (url, pool) = schema_without(&base, &["0009", "0011"]).await;
     sqlx::raw_sql(
         "INSERT INTO federation_peer
          (node_id, peer_id, public_key, cluster, region, trust_state, software_version, epoch)
@@ -693,9 +693,15 @@ async fn m1bi_applies_0009_after_0010_once() {
             .any(|row| row.0 == "0010_event_signed_ingest.sql")
     );
     let report = migrate::migrate(&pool, &migrations_dir()).await.unwrap();
-    assert_eq!(report.applied, ["0009_federation_approval.sql"]);
+    assert_eq!(
+        report.applied,
+        [
+            "0009_federation_approval.sql",
+            "0011_federation_decision_epoch.sql"
+        ]
+    );
     let after = control_rows(&pool).await;
-    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(after.len(), before.len() + 2);
     assert!(before.iter().all(|row| after.contains(row)));
     assert!(run_migrate_only(&url, &migrations_dir()).status.success());
     assert_eq!(control_rows(&pool).await, after);
@@ -710,7 +716,7 @@ async fn m1bi_legacy_approval_blocks_0009_without_partial_changes() {
         return;
     };
     let _guard = sole_lock().await;
-    let (url, pool) = schema_before_signed_approval(&base).await;
+    let (url, pool) = schema_without(&base, &["0009", "0011"]).await;
     sqlx::query(
         "INSERT INTO federation_join_request
          (join_request_id, node_id, epoch, manifest, state, approved_at, approved_by)
@@ -766,6 +772,58 @@ fn m1bi_governance_malformada_impede_boot_do_servico() {
             .unwrap();
         assert_eq!(result.status.code(), Some(78), "{}", stderr_of(&result));
         let error = stderr_of(&result);
-        assert!(error.contains("GODMESH_FEDERATION_GOVERNANCE"), "{value:?}: {error}");
+        assert!(
+            error.contains("GODMESH_FEDERATION_GOVERNANCE"),
+            "{value:?}: {error}"
+        );
     }
+}
+
+#[tokio::test]
+async fn m1bi_0011_inicializa_piso_por_aprovador_e_preserva_historico() {
+    let Some(base) = base_url() else {
+        eprintln!("SKIP: DATABASE_URL ausente");
+        return;
+    };
+    let _guard = sole_lock().await;
+    let (_, pool) = schema_without(&base, &["0011"]).await;
+    sqlx::raw_sql(
+        "INSERT INTO federation_join_request
+            (join_request_id, node_id, epoch, manifest, state, approved_at, approved_by,
+             approved_by_node, approval_signature, approval_epoch, approval_expires_at)
+         SELECT 'fjr_' || lpad(n::text, 32, '0'), 'candidate-' || n, 1, '{}', 'approved',
+                now(), 'operator', 'gmn_' || repeat(signer, 64), repeat('a', 128), epoch,
+                now() + interval '1 day'
+           FROM (VALUES (1, 'a', 9), (2, 'a', 3), (3, 'b', 7)) AS history(n, signer, epoch);
+         INSERT INTO federation_join_request (join_request_id, node_id, epoch, manifest, state)
+         VALUES ('fjr_00000000000000000000000000000004', 'candidate-4', 1, '{}', 'rejected');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let history =
+        "SELECT to_jsonb(r)::text FROM federation_join_request r ORDER BY join_request_id";
+    let requests: Vec<String> = sqlx::query_scalar(history).fetch_all(&pool).await.unwrap();
+    let before = control_rows(&pool).await;
+    let report = migrate::migrate(&pool, &migrations_dir()).await.unwrap();
+    assert_eq!(report.applied, ["0011_federation_decision_epoch.sql"]);
+    let after = control_rows(&pool).await;
+    assert_eq!(after.len(), before.len() + 1);
+    assert!(before.iter().all(|row| after.contains(row)));
+    let floor = "SELECT approver_node_id, decision_epoch FROM federation_decision_epoch ORDER BY 1";
+    let expected = [
+        (format!("gmn_{}", "a".repeat(64)), 9),
+        (format!("gmn_{}", "b".repeat(64)), 7),
+    ];
+    let floors: Vec<(String, i64)> = sqlx::query_as(floor).fetch_all(&pool).await.unwrap();
+    assert_eq!(floors, expected);
+    let same_requests: Vec<String> = sqlx::query_scalar(history).fetch_all(&pool).await.unwrap();
+    assert_eq!(same_requests, requests);
+
+    let rerun = migrate::migrate(&pool, &migrations_dir()).await.unwrap();
+    assert!(rerun.applied.is_empty());
+    assert_eq!(control_rows(&pool).await, after);
+    let same_floors: Vec<(String, i64)> = sqlx::query_as(floor).fetch_all(&pool).await.unwrap();
+    assert_eq!(same_floors, floors);
 }

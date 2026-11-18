@@ -12,6 +12,7 @@
 #   migrations/0008_federation_peers.sql
 #   migrations/0009_federation_approval.sql
 #   migrations/0010_event_signed_ingest.sql
+#   migrations/0011_federation_decision_epoch.sql
 # depois roda todos os `*_invariants.sql` e falha (exit != 0) se algum bloco
 # `NOTICE: OK` esperado não aparecer.
 #
@@ -82,6 +83,7 @@ aplicar "$raiz/migrations/0007_grant_issuance.sql"
 aplicar "$raiz/migrations/0008_federation_peers.sql"
 aplicar "$raiz/migrations/0009_federation_approval.sql"
 aplicar "$raiz/migrations/0010_event_signed_ingest.sql"
+aplicar "$raiz/migrations/0011_federation_decision_epoch.sql"
 
 if [ -n "$sabotagem" ]; then
     [ -f "$sabotagem" ] || { echo "erro: sabotagem inexistente: $sabotagem" >&2; exit 2; }
