@@ -291,3 +291,29 @@ Decisão do usuário: "shadcn fica". Regras para não virar dois sistemas:
 | **Consequências** | Ganho: API usada tem fonte datada, e não memória de modelo. Risco: `latest` pode trazer **breaking change** entre resoluções e quebrar código que passou ontem. Mitigação: lockfile com versão exata e digest, mais **testes de contrato** na fronteira de cada biblioteca adotada; upgrade entra por ciclo com nova resolução e nova evidência, nunca silencioso. Custo: uma etapa de consulta antes de codar e um registro por dependência. |
 | **Verificação** | (a) PR de dependência cita versão resolvida, fonte e data; imagem cita digest. (b) Item implementado sem documentação acessível aparece marcado "não verificado", sem API inventada. (c) Build reprodutível a partir do lockfile. (d) Teste de contrato falha quando a API muda de forma incompatível em upgrade de `latest`. (e) Atualização sem nova resolução/evidência é rejeitada na revisão. |
 | **Escopo** | Vale para todo código de produto e infraestrutura. Não altera as decisões técnicas anteriores; apenas condiciona a execução delas a fonte documental verificável. |
+
+## ADR-071 — Malha entre servidores: identidade de nó, QUIC mTLS e ingresso autorizado
+
+| Campo | Conteúdo |
+|---|---|
+| **Status** | Aprovada tecnicamente pelo CTO em 18/11/2026 por instrução do usuário ("servidores como rede mesh e/ou p2p"); implementação em fatias |
+| **Contexto** | A documentação proíbe ingresso anônimo (ADR-008) e trata libp2p como **candidato a validar** (ADR-007). Uma malha sem identidade de nó é só um conjunto de portas abertas. |
+| **Decisão** | (1) **Identidade de nó**: par Ed25519 persistente, `node_id` derivado da chave pública; toda mensagem entre nós é assinada. (2) **Transporte**: QUIC com mTLS (RFC 9000/8446), certificado de nó autoemitido e validado por chave pública registrada — não por CA pública; QUIC v2 só se a biblioteca implementar e passar nos testes. (3) **Topologia**: malha parcial — cada nó conhece os pares autorizados do seu cluster/região e mantém heartbeat; não é broadcast global. (4) **Ingresso**: `join-request` assinado + aprovação explícita → `join_certificate` com escopos e validade; sem aprovação o nó fica `isolated` e não recebe dado privado. (5) **libp2p fica como provider alternativo futuro** (descoberta Kademlia/Gossipsub), atrás da mesma interface de transporte; não entra nesta fatia para não acoplar descoberta a ingresso. |
+| **Versões resolvidas em 18/11/2026** | `quinn` 0.11.12 · `rustls` 0.23.46 · `ed25519-dalek` 3.0.0 · `rcgen` 0.14.10 · `bytes` 1.12.2. Fonte: crates.io API, consulta em 18/11/2026. `libp2p` 0.57.1 registrado como alternativa não adotada. |
+| **Consequências** | Dependências novas de criptografia e QUIC (ADR-026/031 permitem: são padrões auditados, não cifra própria). Certificado autoemitido exige disciplina: validação é por chave registrada, nunca por nome. NAT/relay ainda não cobertos — nó atrás de NAT precisa de relay autorizado, que fica para fatia posterior. |
+| **Verificação** | Dois nós locais: `A` sem aprovação não recebe dado privado; `A` aprovado completa handshake assinado, registra peer, mantém heartbeat; certificado de chave não registrada é rejeitado; replay de `join_certificate` expirado é recusado; queda de `B` marca peer `unknown` (não `ready`). |
+
+### Emenda à ADR-071 (18/11/2026) — quem autoriza um servidor
+
+**Instrução do usuário:** "os servidores principais autorizam outros servidores". Regra normativa:
+
+1. **Autoridade de ingresso é de nó, não de token solto.** Aprovar um `join-request` exige que o aprovador seja um **nó já `authorized`** no mesmo `cluster`; um grant humano sozinho não basta — ele autoriza a *operação*, não o nó.
+2. **Aprovação é assinada.** O aprovador assina `{join_request_id, node_id, public_key, cluster, scopes, not_before, expires_at, epoch}` com sua chave Ed25519. O registro guarda `approved_by_node` + `approval_signature`, verificável por qualquer nó que conheça a chave do aprovador.
+3. **Cadeia de confiança verificável.** O candidato recebe o `join_certificate` assinado e o conjunto de aprovações; qualquer nó valida a assinatura contra o registro de peers autorizados — sem confiar em quem entregou.
+4. **Revogação também é assinada e propagada** por nó autorizado (`revoked_by_node` + assinatura + `epoch`); revogação com `epoch` anterior não reativa acesso.
+5. **Bootstrap não é confiança automática.** Os primeiros nós de um cluster (genesis) são declarados por configuração do operador (`GODMESH_FEDERATION_GENESIS`), fora de banda. A partir deles, todo ingresso vem de aprovação assinada — nada de *trust on first use*.
+6. **Quórum.** Cluster com `control-voter` exige aprovação de quórum ímpar (3 ou 5) para mudanças de governança; cluster sem votantes exige **1 aprovação de nó autorizado**. O valor efetivo é configuração declarada, nunca presumida.
+7. **Nó não autorizado permanece `isolated`**: pode apresentar manifesto e pedir ingresso; não recebe snapshot, eventos, nem rota de cliente.
+
+**Efeito na implementação:** a rota de aprovação deixa de aceitar apenas o escopo `federation:admin` e passa a exigir **identidade de nó autorizado + assinatura de aprovação**; o escopo humano permanece como autorização secundária para o operador que dispara a operação. A fatia M1 implementa o registro; a verificação por assinatura de nó entra em M1b.
+
