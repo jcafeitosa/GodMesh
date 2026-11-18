@@ -105,59 +105,6 @@ fn resolve_bind_addr(bind_addr: Option<&str>, env: Option<&str>) -> Result<Strin
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{DEFAULT_BIND_ADDR, resolve_bind_addr};
-
-    #[test]
-    fn bind_addr_ausente_em_producao_falha_citando_a_variavel() {
-        let erro = resolve_bind_addr(None, Some("production")).expect_err("deve falhar");
-        assert!(
-            erro.contains("BIND_ADDR"),
-            "mensagem precisa citar BIND_ADDR: {erro}"
-        );
-    }
-
-    #[test]
-    fn bind_addr_ausente_sem_godmesh_env_e_tratada_como_producao() {
-        assert!(resolve_bind_addr(None, None).is_err());
-    }
-
-    #[test]
-    fn bind_addr_vazia_em_producao_falha() {
-        assert!(resolve_bind_addr(Some("   "), Some("production")).is_err());
-    }
-
-    #[test]
-    fn bind_addr_desconhecida_falha_fechada() {
-        assert!(resolve_bind_addr(None, Some("staging")).is_err());
-    }
-
-    #[test]
-    fn bind_addr_default_loopback_so_em_dev() {
-        assert_eq!(
-            resolve_bind_addr(None, Some("dev")).unwrap(),
-            DEFAULT_BIND_ADDR
-        );
-        assert_eq!(
-            resolve_bind_addr(None, Some("development")).unwrap(),
-            DEFAULT_BIND_ADDR
-        );
-        assert_eq!(
-            resolve_bind_addr(None, Some("DEV")).unwrap(),
-            DEFAULT_BIND_ADDR
-        );
-    }
-
-    #[test]
-    fn bind_addr_explicita_vale_em_qualquer_ambiente() {
-        assert_eq!(
-            resolve_bind_addr(Some("0.0.0.0:8080"), Some("production")).unwrap(),
-            "0.0.0.0:8080"
-        );
-    }
-}
-
 fn main() -> ExitCode {
     let config = match Config::from_env() {
         Ok(c) => c,
@@ -248,5 +195,60 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {}
         () = terminate => {}
+    }
+}
+
+// Módulo de testes no fim do arquivo: `clippy::items-after-test-module`
+// (negado por `-D clippy::all`) exige que nenhum item venha depois dele.
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_BIND_ADDR, resolve_bind_addr};
+
+    #[test]
+    fn bind_addr_ausente_em_producao_falha_citando_a_variavel() {
+        let erro = resolve_bind_addr(None, Some("production")).expect_err("deve falhar");
+        assert!(
+            erro.contains("BIND_ADDR"),
+            "mensagem precisa citar BIND_ADDR: {erro}"
+        );
+    }
+
+    #[test]
+    fn bind_addr_ausente_sem_godmesh_env_e_tratada_como_producao() {
+        assert!(resolve_bind_addr(None, None).is_err());
+    }
+
+    #[test]
+    fn bind_addr_vazia_em_producao_falha() {
+        assert!(resolve_bind_addr(Some("   "), Some("production")).is_err());
+    }
+
+    #[test]
+    fn bind_addr_desconhecida_falha_fechada() {
+        assert!(resolve_bind_addr(None, Some("staging")).is_err());
+    }
+
+    #[test]
+    fn bind_addr_default_loopback_so_em_dev() {
+        assert_eq!(
+            resolve_bind_addr(None, Some("dev")).unwrap(),
+            DEFAULT_BIND_ADDR
+        );
+        assert_eq!(
+            resolve_bind_addr(None, Some("development")).unwrap(),
+            DEFAULT_BIND_ADDR
+        );
+        assert_eq!(
+            resolve_bind_addr(None, Some("DEV")).unwrap(),
+            DEFAULT_BIND_ADDR
+        );
+    }
+
+    #[test]
+    fn bind_addr_explicita_vale_em_qualquer_ambiente() {
+        assert_eq!(
+            resolve_bind_addr(Some("0.0.0.0:8080"), Some("production")).unwrap(),
+            "0.0.0.0:8080"
+        );
     }
 }
