@@ -2,7 +2,8 @@
 # Verificação dos invariantes de banco contra um banco DESCARTÁVEL.
 #
 # Cria um banco próprio, aplica `migrations/0001_core.sql` +
-# `migrations/0002_incident_tenancy.sql`, roda todos os `*_invariants.sql` e
+# `migrations/0002_incident_tenancy.sql` + `migrations/0003_outbox_publisher.sql`,
+# roda todos os `*_invariants.sql` e
 # falha (exit != 0) se algum bloco `NOTICE: OK` esperado não aparecer.
 #
 # Por que não basta rodar psql e olhar a saída: os scripts usam
@@ -64,6 +65,7 @@ aplicar() {
 
 aplicar "$raiz/migrations/0001_core.sql"
 aplicar "$raiz/migrations/0002_incident_tenancy.sql"
+aplicar "$raiz/migrations/0003_outbox_publisher.sql"
 
 if [ -n "$sabotagem" ]; then
     [ -f "$sabotagem" ] || { echo "erro: sabotagem inexistente: $sabotagem" >&2; exit 2; }
@@ -89,6 +91,14 @@ esperado_0002=(
     "OK 5: colisão de id entre tenants recusada"
     "OK 6: PK de sos_incident é (tenant_id, id)"
     "OK 7: política em uso não pode ser removida (FK)"
+)
+esperado_0003=(
+    "OK 1: confirmed_at sem published_at recusado (CHECK)"
+    "OK 2: publicado sem confirmado aceito"
+    "OK 3: publicado e então confirmado aceito"
+    "OK 4: apagar published_at de linha confirmada recusado"
+    "OK 5: attempts inicia em 0 e recusa negativo"
+    "OK 6: entrega duplicada da mesma posição recusada"
 )
 
 saida="$(mktemp)"
@@ -123,6 +133,7 @@ verificar() {
 
 verificar "$tests/0001_invariants.sql" "${esperado_0001[@]}"
 verificar "$tests/0002_invariants.sql" "${esperado_0002[@]}"
+verificar "$tests/0003_invariants.sql" "${esperado_0003[@]}"
 
 rm -f "$saida"
 

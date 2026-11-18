@@ -13,4 +13,5 @@ pub mod events;
 pub mod http;
 pub mod lifecycle;
 pub mod migrate;
+pub mod publisher;
 pub mod runtime;

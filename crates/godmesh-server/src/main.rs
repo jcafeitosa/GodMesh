@@ -17,6 +17,12 @@
 //! - `BIND_ADDR` (obrigatório para servir, exceto em `GODMESH_ENV=dev|development`,
 //!   onde o default é `127.0.0.1:8080`)
 //! - `GODMESH_ENV` (opcional; ausente é tratado como `production`)
+//! - `GODMESH_OUTBOX` (opcional; `off` desliga o publicador, default `on`)
+//! - `GODMESH_OUTBOX_INTERVAL_MS` (opcional; default 1000 ms)
+//!
+//! O publicador do outbox (ADR-061) roda como tarefa tokio ao lado do HTTP e
+//! entrega no sink de teste `outbox_sink` (migração 0003). Ele só publica; a
+//! confirmação vem depois do efeito ter sido executado.
 //!
 //! Ausência de configuração é erro explícito com mensagem e código de saída != 0.
 //! Um default de loopback em produção deixava o serviço inalcançável de fora do
@@ -30,7 +36,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use godmesh_server::auth::GrantRegistry;
+use godmesh_server::publisher::{OutboxConfig, Publisher};
 use godmesh_server::{migrate, runtime};
+use godmesh_sync::pg_outbox::{PgOutbox, PgSink};
 use sqlx::postgres::PgPoolOptions;
 
 /// Endereço padrão aceito **apenas** em ambiente de desenvolvimento: só loopback.
@@ -85,6 +93,7 @@ enum Mode {
     Serve {
         grants: GrantRegistry,
         bind_addr: String,
+        outbox: OutboxConfig,
     },
 }
 
@@ -125,7 +134,9 @@ impl Config {
                 )?;
                 let grants = GrantRegistry::from_env()
                     .map_err(|e| format!("registro de grants indisponível: {e}"))?;
-                Mode::Serve { grants, bind_addr }
+                let outbox =
+                    OutboxConfig::from_env().map_err(|e| format!("configuração do outbox: {e}"))?;
+                Mode::Serve { grants, bind_addr, outbox }
             }
         };
 
@@ -226,7 +237,7 @@ async fn run(config: Config) -> Result<(), String> {
         report.skipped.join(", "),
     );
 
-    let Mode::Serve { grants, bind_addr } = config.mode else {
+    let Mode::Serve { grants, bind_addr, outbox } = config.mode else {
         pool.close().await;
         return Ok(());
     };
@@ -243,13 +254,47 @@ async fn run(config: Config) -> Result<(), String> {
         grants.len()
     );
 
+    // Um único sinal de término alimenta o HTTP e o publicador.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let sinal = runtime::shutdown_signal();
+    tokio::spawn(async move {
+        sinal.await;
+        let _ = shutdown_tx.send(true);
+    });
+
+    let publisher = if outbox.enabled {
+        println!(
+            "godmesh-server: outbox publicador ativo a cada {} ms (sink de teste outbox_sink)",
+            outbox.interval.as_millis()
+        );
+        let mut parar = shutdown_rx.clone();
+        let publisher = Publisher::new(PgOutbox::new(pool.clone()), PgSink::new(pool.clone()));
+        Some(tokio::spawn(async move {
+            publisher
+                .run(outbox.interval, async move {
+                    let _ = parar.changed().await;
+                })
+                .await;
+        }))
+    } else {
+        println!("godmesh-server: outbox publicador desligado (GODMESH_OUTBOX=off)");
+        None
+    };
+
+    let mut encerrar = shutdown_rx;
     let served = runtime::serve(
         listener,
         godmesh_server::http::router(pool.clone(), grants),
         pool,
-        runtime::shutdown_signal(),
+        async move {
+            let _ = encerrar.changed().await;
+        },
     )
     .await?;
+
+    if let Some(publisher) = publisher {
+        let _ = publisher.await;
+    }
 
     println!(
         "godmesh-server: shutdown solicitado; {} requisição(ões) em voo drenada(s)",

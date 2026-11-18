@@ -1,5 +1,12 @@
 # Histórico da documentação
 
+## Outbox publicador durável — 18/11/2026
+- Migração `0003_outbox_publisher.sql`: `outbox_entry.attempts` (contador de falhas do efeito), `CHECK outbox_entry_confirmed_requires_published` (confirmação sem publicação é impossível no banco), índice parcial de pendências e a tabela de **teste** `outbox_sink` (não é integração externa).
+- `godmesh-sync::pg_outbox` implementa o contrato da ADR-061 sobre a tabela: append transacional com lock de grupo, reivindicação de publicação atômica (`FOR UPDATE SKIP LOCKED` + `UPDATE … RETURNING`), confirmação só após publicação e só na ordem do prefixo, contagem de tentativas e leitura de pendências que para na primeira sequência ausente.
+- `godmesh-server::publisher` liga o laço tokio (`GODMESH_OUTBOX`, `GODMESH_OUTBOX_INTERVAL_MS`, default 1000 ms) e loga publicados/confirmados/falhas. Evidência em `docs/09-equipe/evidencias/2026-11-18-servidor-outbox.md`.
+- `migrations/tests/run_all.sh` passa a aplicar a 0003 e a exigir 6 blocos `OK` novos: total 20 invariantes.
+
+
 ## Versões latest e documentação oficial — 17/11/2026
 - ADR-069: versões latest estáveis somente, com versão resolvida, fonte, data e digest de imagem registrados; documentação oficial da versão é pré-requisito de implementação; atualização de dependência exige nova resolução e nova evidência.
 - `AGENTS.md`: nova seção "Versões e documentação" com a mesma regra vinculante.

@@ -437,6 +437,10 @@ dependencies = [
 [[package]]
 name = "godmesh-sync"
 version = "0.1.0"
+dependencies = [
+ "sqlx",
+ "tokio",
+]
 
 [[package]]
 name = "hashbrown"
