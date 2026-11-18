@@ -17,6 +17,7 @@
 //! "cluster"  <u32 BE len><bytes>
 //! "region"   <u32 BE len><bytes>
 //! "software_version" <u32 BE len><bytes>
+//! "alpn"     <u32 BE len><bytes>
 //! "capabilities" <u32 BE n> (<u32 BE len><bytes>)*   -- ordenado e sem repetição
 //! "endpoints"    <u32 BE n> (<u32 BE len><bytes>)*   -- ordenado e sem repetição
 //! "epoch"    <u64 BE>
@@ -51,6 +52,12 @@ pub const MAX_LIST_ITEMS: usize = 128;
 /// Máximo de bytes de um campo textual.
 pub const MAX_FIELD_LEN: usize = 256;
 
+/// Teto de um frame de manifesto na rede, em bytes.
+///
+/// Recusa **antes** de alocar/parsear: um frame anunciado como gigante não pode
+/// consumir memória do processo que o recebe.
+pub const MAX_MANIFEST_FRAME_BYTES: usize = 8 * 1024;
+
 /// Manifesto assinado por um nó.
 ///
 /// `deny_unknown_fields` é deliberado: o corpo vem da rede e um campo
@@ -68,6 +75,16 @@ pub struct SignedManifest {
     pub region: String,
     /// Versão do software do nó.
     pub software_version: String,
+    /// ALPN declarado pelo nó (versão do protocolo de federação que ele fala).
+    ///
+    /// Vazio significa **não declarado** — é o caso do ingresso por API (M1),
+    /// onde não há sessão TLS para casar. O transporte (M2) exige que o valor
+    /// declarado seja exatamente o ALPN negociado: a versão do protocolo está
+    /// no conteúdo assinado, não só no handshake. Campo estendido pela fatia
+    /// M2; a serialização é retrocompatível porque `serde(default)` aceita
+    /// manifesto antigo sem a chave.
+    #[serde(default)]
+    pub alpn: String,
     /// Capacidades declaradas (conjunto; a ordem não é assinada).
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -109,6 +126,11 @@ pub enum ManifestError {
     },
     /// `issued_at` no futuro além da tolerância de relógio.
     NotYetValid { issued_at: i64, now: i64 },
+    /// Frame acima de [`MAX_MANIFEST_FRAME_BYTES`].
+    FrameTooLarge { len: usize },
+    /// Frame ilegível como manifesto desta versão (JSON inválido, campo
+    /// desconhecido ou byte sobrando).
+    FrameMalformed(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -142,6 +164,11 @@ impl fmt::Display for ManifestError {
                 f,
                 "manifesto emitido no futuro: issued_at={issued_at}, now={now}"
             ),
+            Self::FrameTooLarge { len } => write!(
+                f,
+                "frame de manifesto com {len} bytes; máximo {MAX_MANIFEST_FRAME_BYTES}"
+            ),
+            Self::FrameMalformed(detail) => write!(f, "frame de manifesto ilegível: {detail}"),
         }
     }
 }
@@ -190,6 +217,7 @@ impl SignedManifest {
             "software_version",
             self.software_version.as_bytes(),
         );
+        push_field(&mut out, "alpn", self.alpn.as_bytes());
         let capabilities = normalise(&self.capabilities);
         push_field(
             &mut out,
@@ -244,6 +272,41 @@ impl SignedManifest {
         Ok(())
     }
 
+    /// Serializa o manifesto para transporte em stream: o JSON do contrato (o
+    /// mesmo corpo do ingresso por API), com teto de tamanho.
+    ///
+    /// O frame **não** é a forma assinada — a assinatura cobre
+    /// [`Self::canonical_bytes`], que é independente de serializador. O frame é
+    /// só o envelope de fio: um único formato para o mesmo dado evita um segundo
+    /// codec com as mesmas regras duplicadas.
+    ///
+    /// # Errors
+    /// [`ManifestError::FrameTooLarge`] se o resultado passar do teto.
+    pub fn to_frame(&self) -> Result<Vec<u8>, ManifestError> {
+        let bytes =
+            serde_json::to_vec(self).map_err(|e| ManifestError::FrameMalformed(e.to_string()))?;
+        if bytes.len() > MAX_MANIFEST_FRAME_BYTES {
+            return Err(ManifestError::FrameTooLarge { len: bytes.len() });
+        }
+        Ok(bytes)
+    }
+
+    /// Lê um frame **sem** verificar a assinatura.
+    ///
+    /// `verify`/`verify_fresh` continuam obrigatórios antes de qualquer decisão;
+    /// esta separação existe para que erro de formato e erro de assinatura sejam
+    /// distinguíveis (códigos de fechamento diferentes).
+    ///
+    /// # Errors
+    /// [`ManifestError::FrameTooLarge`] sem parsear; [`ManifestError::FrameMalformed`]
+    /// para JSON inválido, campo desconhecido ou byte sobrando.
+    pub fn from_frame(bytes: &[u8]) -> Result<Self, ManifestError> {
+        if bytes.len() > MAX_MANIFEST_FRAME_BYTES {
+            return Err(ManifestError::FrameTooLarge { len: bytes.len() });
+        }
+        serde_json::from_slice(bytes).map_err(|e| ManifestError::FrameMalformed(e.to_string()))
+    }
+
     /// Verifica a assinatura **e** o frescor de `issued_at`.
     ///
     /// Rejeita manifesto velho (`now - issued_at > max_age_seconds`) e manifesto
@@ -292,6 +355,14 @@ impl SignedManifest {
                 });
             }
         }
+        // `alpn` é opcional no contrato (ingresso por API não tem sessão TLS),
+        // mas quando declarado obedece ao mesmo teto de campo.
+        if self.alpn.len() > MAX_FIELD_LEN {
+            return Err(ManifestError::FieldTooLong {
+                field: "alpn",
+                len: self.alpn.len(),
+            });
+        }
         for (field, items) in [
             ("capabilities", &self.capabilities),
             ("endpoints", &self.endpoints),
@@ -329,6 +400,7 @@ mod tests {
             cluster: "cluster-br-sul".to_owned(),
             region: "br-sul".to_owned(),
             software_version: "0.1.0".to_owned(),
+            alpn: "godmesh/1".to_owned(),
             capabilities: vec!["sync".to_owned(), "events".to_owned()],
             endpoints: vec!["quic://10.0.0.1:7000".to_owned()],
             epoch: 3,
@@ -426,5 +498,87 @@ mod tests {
         manifest
             .verify_fresh(manifest.issued_at + 301, 3_600)
             .expect("janela configurada aceita");
+    }
+
+    #[test]
+    fn alpn_declarado_entra_nos_bytes_assinados() {
+        use crate::identity::NodeIdentity;
+        use crate::manifest::SignedManifest;
+        let identity = NodeIdentity::generate_in_memory().expect("identidade");
+        let mut base = SignedManifest {
+            node_id: String::new(),
+            public_key: String::new(),
+            cluster: "cluster-br-sul".to_owned(),
+            region: "br-sul".to_owned(),
+            software_version: "0.1.0".to_owned(),
+            capabilities: vec![],
+            endpoints: vec![],
+            alpn: "godmesh/1".to_owned(),
+            epoch: 1,
+            issued_at: 1_700_000_000,
+            signature: String::new(),
+        };
+        base.sign(&identity);
+        base.verify().expect("assinatura válida");
+
+        // Trocar a versão de protocolo declarada invalida a assinatura: a
+        // versão não é campo decorativo.
+        let mut outro_alpn = base.clone();
+        outro_alpn.alpn = "godmesh/2".to_owned();
+        assert_eq!(outro_alpn.verify(), Err(ManifestError::SignatureInvalid));
+    }
+
+    #[test]
+    fn frame_faz_round_trip_e_verifica() {
+        let identity = crate::identity::NodeIdentity::generate_in_memory().expect("identidade");
+        let signed = manifest(&identity);
+        let frame = signed.to_frame().expect("frame");
+        let parsed = crate::manifest::SignedManifest::from_frame(&frame).expect("lê frame");
+        assert_eq!(parsed, signed);
+        parsed.verify().expect("assinatura válida depois do frame");
+    }
+
+    #[test]
+    fn frame_acima_do_teto_e_recusado_antes_do_parse() {
+        let bytes = vec![b'{'; MAX_MANIFEST_FRAME_BYTES + 1];
+        assert_eq!(
+            crate::manifest::SignedManifest::from_frame(&bytes),
+            Err(ManifestError::FrameTooLarge {
+                len: MAX_MANIFEST_FRAME_BYTES + 1
+            })
+        );
+    }
+
+    #[test]
+    fn frame_com_campo_desconhecido_e_recusado() {
+        // `deny_unknown_fields` vale no fio: campo extra não é ignorado em
+        // silêncio, é recusado na fronteira.
+        let identity = crate::identity::NodeIdentity::generate_in_memory().expect("identidade");
+        let signed = manifest(&identity);
+        let mut value = serde_json::to_value(&signed).expect("json");
+        value["campo_extra"] = serde_json::json!(1);
+        let bytes = serde_json::to_vec(&value).expect("json");
+        assert!(matches!(
+            crate::manifest::SignedManifest::from_frame(&bytes),
+            Err(ManifestError::FrameMalformed(_))
+        ));
+    }
+
+    #[test]
+    fn manifesto_sem_alpn_continua_legivel() {
+        // Retrocompatibilidade: manifesto de ingresso M1 não tem `alpn`.
+        let identity = crate::identity::NodeIdentity::generate_in_memory().expect("identidade");
+        let mut signed = manifest(&identity);
+        signed.alpn = String::new();
+        signed.sign(&identity);
+        let mut value = serde_json::to_value(&signed).expect("json");
+        value
+            .as_object_mut()
+            .expect("objeto")
+            .remove("alpn");
+        let bytes = serde_json::to_vec(&value).expect("json");
+        let parsed = crate::manifest::SignedManifest::from_frame(&bytes).expect("lê sem alpn");
+        assert_eq!(parsed.alpn, "");
+        parsed.verify().expect("vazio é a forma assinada correta");
     }
 }

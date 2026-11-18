@@ -37,6 +37,12 @@ pub const KEY_FILE_MODE: u32 = 0o600;
 /// Permissão do diretório criado para conter a chave.
 pub const KEY_DIR_MODE: u32 = 0o700;
 
+/// Tamanho da chave pública Ed25519 em bytes.
+pub const PUBLIC_KEY_LEN: usize = 32;
+
+/// Tamanho da assinatura Ed25519 em bytes.
+pub const SIGNATURE_LEN: usize = 64;
+
 /// Tamanho da semente Ed25519 em bytes.
 const SEED_LEN: usize = 32;
 
@@ -55,6 +61,9 @@ pub enum IdentityError {
     NotARegularFile { path: PathBuf },
     /// O RNG do sistema não respondeu: sem entropia não se inventa chave.
     RandomnessUnavailable(String),
+    /// A chave não pôde ser exportada em PKCS#8 (exigida pelo certificado
+    /// autoemitido do transporte). O nó não sobe com identidade duvidosa.
+    KeyExport(String),
     /// Chave pública fora do formato (hex de 32 bytes).
     InvalidPublicKey(String),
     /// Assinatura fora do formato (hex de 64 bytes).
@@ -93,6 +102,7 @@ impl fmt::Display for IdentityError {
                     "RNG do sistema indisponível; nenhuma chave foi criada: {detail}"
                 )
             }
+            Self::KeyExport(detail) => write!(f, "chave não exportável em PKCS#8: {detail}"),
             Self::InvalidPublicKey(detail) => write!(f, "chave pública inválida: {detail}"),
             Self::InvalidSignatureEncoding(detail) => {
                 write!(f, "assinatura inválida: {detail}")
@@ -380,7 +390,32 @@ impl NodeIdentity {
     /// Chave pública Ed25519 em hex minúsculo.
     #[must_use]
     pub fn public_key_hex(&self) -> String {
-        hex::encode(self.signing_key.verifying_key().to_bytes())
+        hex::encode(self.public_key_bytes())
+    }
+
+    /// Chave pública Ed25519 crua (32 bytes).
+    ///
+    /// Usada pelo transporte: a chave do certificado TLS é comparada byte a
+    /// byte com a chave do manifesto, sem passar por hex.
+    #[must_use]
+    pub fn public_key_bytes(&self) -> [u8; PUBLIC_KEY_LEN] {
+        self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// Chave privada em PKCS#8 DER, para o certificado autoemitido do transporte
+    /// usar **a mesma** chave da identidade.
+    ///
+    /// O DER nunca é gravado nem logado: existe só para `rcgen` emitir o
+    /// certificado em memória. Nenhum `Debug` desta estrutura o mostra.
+    ///
+    /// # Errors
+    /// [`IdentityError::KeyExport`] se a serialização falhar.
+    pub fn pkcs8_der(&self) -> Result<Vec<u8>, IdentityError> {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        self.signing_key
+            .to_pkcs8_der()
+            .map(|doc| doc.as_bytes().to_vec())
+            .map_err(|e| IdentityError::KeyExport(e.to_string()))
     }
 
     /// Arquivo da identidade, quando ela veio de disco.
@@ -486,5 +521,25 @@ mod tests {
         assert!(!verify_node_id(identity.node_id(), &other.public_key_hex()));
         assert!(!is_node_id("gmn_curto"));
         assert!(!is_node_id("xyz"));
+    }
+
+    #[test]
+    fn chave_publica_crua_e_a_mesma_do_public_key_hex() {
+        let identity = NodeIdentity::generate_in_memory().expect("identidade");
+        assert_eq!(identity.public_key_hex(), hex::encode(identity.public_key_bytes()));
+        assert_eq!(identity.public_key_bytes().len(), PUBLIC_KEY_LEN);
+    }
+
+    #[test]
+    fn pkcs8_exporta_a_mesma_chave_da_identidade() {
+        // O certificado TLS tem que provar posse da chave da identidade; se o
+        // export divergisse, o handshake recusaria o próprio nó.
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        let identity = NodeIdentity::generate_in_memory().expect("identidade");
+        let der = identity.pkcs8_der().expect("export pkcs8");
+        let reloaded = SigningKey::from_pkcs8_der(&der).expect("recarrega pkcs8");
+        assert_eq!(reloaded.verifying_key().to_bytes(), identity.public_key_bytes());
+        // O DER carrega a semente: nunca pode aparecer no Debug.
+        assert!(!format!("{identity:?}").contains(&hex::encode(&der)));
     }
 }
