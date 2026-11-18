@@ -1,6 +1,13 @@
 -- Verificação de invariantes da migração 0002 (ADR-062/065/066).
--- Executar com: psql -v ON_ERROR_STOP=1 -f migrations/tests/0002_invariants.sql
--- Esperado: 7 blocos com "OK". Qualquer outro resultado é regressão.
+-- Requer o esquema vigente: `0001_core.sql` **e** `0002_incident_tenancy.sql`.
+--
+-- Execute com `migrations/tests/run_all.sh`, que cria um banco descartável,
+-- aplica 0001+0002 e falha com exit != 0 se algum bloco `OK` faltar. Rodar
+-- `psql` direto não basta: com `ON_ERROR_STOP off` o psql devolve 0 mesmo
+-- depois de um ERROR, então a contagem dos `NOTICE: OK` é a prova.
+--
+-- Esperado: 8 blocos `OK` (1, 2a, 2b, 3, 4, 5, 6, 7). Qualquer outro resultado
+-- é regressão.
 
 \set ON_ERROR_STOP off
 

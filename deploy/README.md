@@ -16,13 +16,23 @@ docker compose -f deploy/dev/compose.yaml down -v
 docker compose -f deploy/dev/compose.yaml up -d
 ```
 
-Verificação dos invariantes no banco:
+Verificação dos invariantes no banco — comando único, contra banco criado do zero:
 
 ```bash
-docker exec -i godmesh-pg psql -U godmesh -d godmesh -f - < migrations/tests/0001_invariants.sql
+PGHOST=127.0.0.1 PGPORT=55432 PGUSER=godmesh PGPASSWORD=godmesh_dev_only \
+  migrations/tests/run_all.sh
 ```
 
-Esperado: cinco `NOTICE: OK`.
+O script cria um banco descartável (`godmesh_inv_*`), aplica
+`migrations/0001_core.sql` + `migrations/0002_incident_tenancy.sql`, roda
+`migrations/tests/0001_invariants.sql` e `migrations/tests/0002_invariants.sql`
+e falha com exit != 0 se qualquer bloco `NOTICE: OK` esperado faltar. Esperado:
+`RESULTADO: OK — 14 invariantes verificados em banco criado do zero.`
+
+O banco de desenvolvimento compartilhado não é tocado — nada de `DROP`/`TRUNCATE`
+nele. Só o banco descartável do próprio script é removido ao final (`--keep`
+preserva para inspeção). `--sabotage <arquivo.sql>` aplica SQL extra antes dos
+testes, apenas para provar que a falha é detectada.
 
 ## Produção — contêiner
 
