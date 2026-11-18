@@ -3,79 +3,118 @@
 //! Cada teste usa um grupo `(origin, tenant, stream, partition, epoch)` próprio,
 //! então os testes deste binário podem rodar em paralelo no mesmo banco.
 //!
-//! Banco: `GODMESH_TEST_DATABASE_URL` (ou `DATABASE_URL`). O esquema é aplicado
-//! do zero — migrações 0001, 0002 e 0003 — quando `outbox_sink` ainda não existe.
-//! Sem URL, cada teste é pulado com `SKIP:`; nenhum teste finge sucesso.
+//! Banco: descartável por processo, `godmesh_sx_<pid>` (nome configurável por
+//! `GODMESH_SX_TEST_DB`), **criado do zero** por este binário no servidor de
+//! `GODMESH_TEST_DATABASE_URL` (ou `DATABASE_URL`) — só o nome do banco da URL é
+//! trocado. O esquema vem de `godmesh_server::migrate::migrate`, o runner de
+//! produção: aplica em ordem, é idempotente por `schema_migration` e falha alto.
+//! Nenhuma lista de migrações é mantida aqui. Sem URL, cada teste é pulado com
+//! `SKIP:`; nenhum teste finge sucesso.
 //!
-//!   psql "$ADMIN" -c 'CREATE DATABASE godmesh_sd'
-//!   GODMESH_TEST_DATABASE_URL=postgres://godmesh:godmesh_dev_only@localhost:55432/godmesh_sd \
+//!   GODMESH_TEST_DATABASE_URL=postgres://godmesh:godmesh_dev_only@localhost:55432/godmesh \
 //!     cargo test -p godmesh-server --test outbox_publicador -- --test-threads=4
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use godmesh_server::migrate;
 use godmesh_server::publisher::{Publisher, Stats};
 use godmesh_sync::pg_outbox::{
     OutboxError, PartitionKey, PendingEntry, PersistedEffect, PgOutbox, PgSink, PublishOutcome, Sink,
     SinkError,
 };
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 /// Sequência só para gerar identidades únicas por chamada.
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Schema esperado: a presença de `outbox_sink` indica a migração 0003 aplicada.
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../../migrations/0001_core.sql"),
-    include_str!("../../../migrations/0002_incident_tenancy.sql"),
-    include_str!("../../../migrations/0003_outbox_publisher.sql"),
-];
+/// Serializa criação do banco + migrações. Os testes deste binário rodam em
+/// paralelo: `CREATE DATABASE` concorrente no mesmo nome falharia. As migrações
+/// em si já são seguras entre processos (advisory lock do runner); aqui é só
+/// para o setup de banco ser feito uma vez, sem corrida.
+static SETUP: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn pool() -> Option<PgPool> {
-    let url = std::env::var("GODMESH_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(8)
-        .connect(&url)
-        .await
-        .ok()?;
-    ensure_schema(&pool).await;
-    Some(pool)
+/// Banco descartável deste processo: `godmesh_sx_<pid>`.
+///
+/// `GODMESH_SX_TEST_DB` permite reusar o mesmo banco entre execuções de propósito
+/// — é assim que a idempotência do runner é provada entre processos.
+fn db_name() -> String {
+    match std::env::var("GODMESH_SX_TEST_DB") {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_owned(),
+        _ => format!("godmesh_sx_{}", std::process::id()),
+    }
 }
 
-/// Aplica as migrações quando o esquema ainda não existe, sob lock consultivo
-/// para que dois binários de teste não apliquem 0001 ao mesmo tempo.
-async fn ensure_schema(pool: &PgPool) {
-    let existe: bool = sqlx::query_scalar("SELECT to_regclass('public.outbox_sink') IS NOT NULL")
-        .fetch_one(pool)
-        .await
-        .expect("consulta de esquema");
-    if existe {
-        return;
+/// Troca só o nome do banco na URL (preserva credenciais, host, porta e query).
+fn with_database(url: &str, db: &str) -> String {
+    let (sem_query, query) = match url.split_once('?') {
+        Some((a, b)) => (a, Some(b)),
+        None => (url, None),
+    };
+    let corte = sem_query
+        .rfind('/')
+        .expect("URL de banco precisa terminar em /banco");
+    let raiz = &sem_query[..corte];
+    match query {
+        Some(q) => format!("{raiz}/{db}?{q}"),
+        None => format!("{raiz}/{db}"),
     }
+}
 
-    sqlx::query("SELECT pg_advisory_lock(hashtextextended('godmesh.test.schema', 0))")
-        .execute(pool)
-        .await
-        .expect("lock de esquema");
+/// Diretório de migrações do repositório, resolvido pelo próprio manifesto.
+fn migrations_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations")
+}
 
-    let ainda_nao: bool = sqlx::query_scalar("SELECT to_regclass('public.outbox_sink') IS NULL")
-        .fetch_one(pool)
+async fn pool() -> Option<PgPool> {
+    let base = std::env::var("GODMESH_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()?;
+    let db = db_name();
+    // O nome vai para DDL (`CREATE DATABASE`), onde identificador não aceita
+    // bind de parâmetro: é validado aqui, não escapado.
+    assert!(
+        !db.is_empty() && db.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "nome de banco de teste inválido: {db}"
+    );
+
+    let _guard = SETUP.lock().await;
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&with_database(&base, "postgres"))
         .await
-        .expect("recheque de esquema");
-    if ainda_nao {
-        for migracao in MIGRATIONS {
-            sqlx::raw_sql(*migracao)
-                .execute(pool)
-                .await
-                .expect("migração aplicada");
-        }
+        .expect("Postgres de teste acessível pelo pool de administração");
+    let existe: Option<String> =
+        sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname = $1")
+            .bind(&db)
+            .fetch_optional(&admin)
+            .await
+            .expect("consulta pg_database");
+    if existe.is_none() {
+        // `AssertSqlSafe` auditado: `db` vem de `db_name()` e passou pela
+        // validação de identificador acima, nunca de rede.
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {db}")))
+            .execute(&admin)
+            .await
+            .expect("criação do banco descartável de teste");
     }
+    admin.close().await;
 
-    sqlx::query("SELECT pg_advisory_unlock(hashtextextended('godmesh.test.schema', 0))")
-        .execute(pool)
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&with_database(&base, &db))
         .await
-        .expect("unlock de esquema");
+        .expect("conexão ao banco descartável de teste");
+
+    // Caminho de produção: o runner aplica em ordem, registra em
+    // `schema_migration` e é idempotente — chamar de novo não repete DDL.
+    migrate::migrate(&pool, &migrations_dir())
+        .await
+        .expect("migrações aplicadas pelo runner");
+
+    Some(pool)
 }
 
 /// Grupo isolado por teste.
@@ -486,6 +525,56 @@ async fn falha_do_sink_mantem_pendente_com_attempts() {
 
     limpar(&pool, &key).await;
 }
+
+/// O runner é o único caminho de migração: rodar de novo no mesmo banco não
+/// repete DDL nem reescreve o histórico — é o que impede a colisão de
+/// `CREATE TABLE` relatada (`42P07 relation "retention_class" already exists`).
+#[tokio::test]
+async fn runner_e_idempotente_no_mesmo_banco() {
+    let Some(pool) = pool().await else {
+        eprintln!("SKIP: GODMESH_TEST_DATABASE_URL/DATABASE_URL ausente");
+        return;
+    };
+    let dir = migrations_dir();
+    let arquivos = {
+        let mut nomes: Vec<String> = std::fs::read_dir(&dir)
+            .expect("lê migrations")
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                if path.extension().and_then(std::ffi::OsStr::to_str) != Some("sql") {
+                    return None;
+                }
+                path.file_name()?.to_str().map(str::to_owned)
+            })
+            .collect();
+        nomes.sort();
+        nomes
+    };
+
+    let segunda = migrate::migrate(&pool, &dir)
+        .await
+        .expect("segunda execução do runner no mesmo banco");
+    assert!(
+        segunda.applied.is_empty(),
+        "nada pode ser reaplicado: {:?}",
+        segunda.applied
+    );
+    assert_eq!(
+        segunda.skipped, arquivos,
+        "toda migração do repositório já está registrada"
+    );
+
+    let controle: i64 = sqlx::query_scalar("SELECT count(*) FROM schema_migration")
+        .fetch_one(&pool)
+        .await
+        .expect("contagem do controle");
+    assert_eq!(
+        controle as usize,
+        arquivos.len(),
+        "uma linha de controle por arquivo"
+    );
+}
+
 #[tokio::test]
 async fn loop_publica_e_encerra_no_sinal() {
     let Some(pool) = pool().await else {

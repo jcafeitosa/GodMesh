@@ -10,8 +10,11 @@
 --
 -- O que esta migração NÃO faz: não cria broker, fila, bridge, retry infinito
 -- nem garantia de entrega. `outbox_sink` é um sink de TESTE local (tabela).
-
-BEGIN;
+--
+-- Transação: o arquivo NÃO abre `BEGIN`/`COMMIT`. Quem é dono da transação é o
+-- runner (`src/migrate.rs`), que envia o arquivo + o registro de controle em um
+-- único script, executado pelo Postgres como bloco transacional implícito. Um
+-- `BEGIN` aqui aninharia/quebraria esse bloco.
 
 -- Contador de tentativas de execução do efeito. Fica em 0 até a primeira falha.
 ALTER TABLE outbox_entry
@@ -55,5 +58,3 @@ CREATE TABLE outbox_sink (
 
 COMMENT ON TABLE outbox_sink IS
     'Sink de TESTE do publicador (ADR-061). Não representa integração externa e não prova entrega a bridge, rádio ou notificação.';
-
-COMMIT;
