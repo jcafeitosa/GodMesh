@@ -1,0 +1,18 @@
+[package]
+name = "godmesh-host"
+description = "Observação read-only do host (ADR-073, camada 1: observar)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Única dependência nova: espaço livre de volume exige statfs(2), que `/proc`
+# não expõe e que sem `unsafe` não se chama diretamente. `sysinfo` 0.40.4 está
+# resolvido em ADR-073 (fonte: crates.io, 18/11/2026) e é usado **só** para
+# volumes; CPU/memória/PSI/rede são lidos de `/proc` diretamente, onde o crate
+# não agrega valor.
+sysinfo = { version = "0.40.4", default-features = false, features = ["disk"] }
+
+[lints]
+workspace = true

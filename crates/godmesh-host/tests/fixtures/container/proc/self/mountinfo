@@ -1,0 +1,3 @@
+28 21 0:27 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime master - cgroup2 cgroup2 rw,nsdelegate,memory_recursiveprot
+29 21 0:28 / /proc rw,nosuid,nodev - proc proc rw
+30 21 8:2 / / rw,relatime - overlay overlay rw,lowerdir=/a,upperdir=/b

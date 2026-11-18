@@ -21,6 +21,7 @@ Arquitetura lógica completa, com **monólito modular em Rust** para regras de d
 | `godmesh-bridge-sdk` | Contratos para redes externas opcionais |
 | `godmesh-adapters` | ChirpStack, BLE, GPS, MQTT, LoRa, FRN, Mumble |
 | `godmesh-observability` | Métricas, traces, auditabilidade |
+| `godmesh-host` | **implementado** (18/11/2026, ADR-073 camada 1): telemetria read-only do host do nó — CPU, memória, PSI/cgroup, discos, descritores, TCP, conntrack por arquivo, interfaces. É a fatia de "observar" de `godmesh-observability` aplicada ao host; não contém política de admissão, readiness por pressão nem qualquer ação privilegiada |
 
 ## Workspace proposto
 ```text
@@ -38,6 +39,7 @@ GodMesh/
 │   ├── godmesh-location/
 │   ├── godmesh-messaging/
 │   ├── godmesh-emergency/
+│   ├── godmesh-host/
 │   ├── godmesh-voice-control/
 │   ├── godmesh-media-edge/
 │   ├── godmesh-bridge-sdk/

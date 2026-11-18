@@ -240,11 +240,18 @@ fn operation(spec: &RouteSpec) -> OperationBuilder {
             Schema::Text(m) => *m,
             _ => "application/json",
         };
+        // Exemplo real do `/healthz` (o bloco `capacity` é parte do corpo e o
+        // teste de contrato compara o corpo real com as propriedades deste
+        // schema; exemplo ausente aqui seria documento mudo sobre o campo).
+        let example = match schema {
+            Schema::Ref("HealthResponse") => Some(health_example(*status)),
+            _ => None,
+        };
         responses = responses.response(
             status.to_string(),
             ResponseBuilder::new()
                 .description(format!("HTTP {status} esperado por contrato"))
-                .content(media, json_content(schema_of(*schema), None))
+                .content(media, json_content(schema_of(*schema), example))
                 .build(),
         );
     }
@@ -378,8 +385,13 @@ fn components() -> Components {
                 .property("status", primitive("string"))
                 .property("ack_class", primitive("string"))
                 .property("dependency", primitive("string"))
+                .property("capacity", health_capacity_schema())
                 .required("status")
-                .description(Some("`dependency` só aparece no 503: nomeia o que não respondeu."))
+                .description(Some(
+                    "`dependency` só aparece no 503: nomeia o que não respondeu. `capacity` é \
+                     dado de host (ADR-073 camada 1), publicado também no 503, e não julga \
+                     saúde: pressão alta continua 200 por decisão desta fatia.",
+                ))
                 .build(),
         )
         .security_scheme(
@@ -395,6 +407,70 @@ fn components() -> Components {
                     .build(),
             ),
         )
+        .build()
+}
+
+/// Bloco `capacity` do `/healthz` (ADR-073 camada 1): o resumo que o handler
+/// publica em `HostTelemetry::capacity_json`. `null` é "não medido" — os tipos
+/// abaixo descrevem o valor medido; a ausência é declarada na descrição e
+/// provada pelo teste de contrato (corpo real ↔ propriedades do schema).
+/// Exemplo do corpo de `/healthz` por status: mesmo formato do handler, com
+/// `capacity` medido no 200 e `null` no 503 (dependência fora não apaga o
+/// painel de disponibilidade do host).
+fn health_example(status: u16) -> serde_json::Value {
+    let capacity = serde_json::json!({
+        "cpu_pressure": 1.5,
+        "memory_pressure": 0.75,
+        "disk_free_ratio": 0.42,
+        "source": "proc",
+        "container": false,
+        "snapshot_age_seconds": 2.0,
+        "pressure_is_not_a_health_signal": true,
+    });
+    if status == 200 {
+        serde_json::json!({
+            "status": "ok",
+            "ack_class": "transport_accepted",
+            "capacity": capacity,
+        })
+    } else {
+        serde_json::json!({
+            "status": "unavailable",
+            "dependency": "postgres",
+            "ack_class": "transport_accepted",
+            "capacity": {
+                "cpu_pressure": null,
+                "memory_pressure": null,
+                "disk_free_ratio": null,
+                "source": "none",
+                "container": false,
+                "snapshot_age_seconds": null,
+                "pressure_is_not_a_health_signal": true,
+            },
+        })
+    }
+}
+
+fn health_capacity_schema() -> Object {
+    ObjectBuilder::new()
+        .schema_type(Type::Object)
+        .property("cpu_pressure", primitive("number"))
+        .property("memory_pressure", primitive("number"))
+        .property("disk_free_ratio", primitive("number"))
+        .property("source", primitive("string"))
+        .property("container", primitive("boolean"))
+        .property("snapshot_age_seconds", primitive("number"))
+        .property("pressure_is_not_a_health_signal", primitive("boolean"))
+        .required("source")
+        .required("container")
+        .required("pressure_is_not_a_health_signal")
+        .description(Some(
+            "Pressão de CPU/memória (% de tempo stall, janela do PSI) e fração livre do \
+             volume raiz. `cpu_pressure`, `memory_pressure`, `disk_free_ratio` e \
+             `snapshot_age_seconds` são `null` quando não medidos — série ausente não é \
+             zero. `source` ∈ `proc` | `cgroup` | `statfs` | `none`; `container` diz se a \
+             leitura é do namespace. Pressão **não** é sinal de saúde nesta fatia.",
+        ))
         .build()
 }
 

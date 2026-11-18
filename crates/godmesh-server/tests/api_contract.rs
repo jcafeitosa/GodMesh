@@ -589,6 +589,81 @@ async fn documento_declara_bearer_e_ref_resolvem() {
     }
 }
 
+/// Guarda do bloco `capacity` do `/healthz` (ADR-073 camada 1): o corpo real
+/// e o schema do documento são lidos do **mesmo** servidor e comparados chave
+/// por chave, em dois níveis. Se o handler publicar `capacity` sem o campo
+/// estar no `HealthResponse` do contrato (ou o inverso), este teste cai — é a
+/// regra da ADR-074: documento que mente derruba o teste.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corpo_de_healthz_bate_com_o_schema_do_documento() {
+    let addr = serve_sem_banco().await;
+    let doc = openapi(addr);
+    let schema = &doc["components"]["schemas"]["HealthResponse"];
+    let props = schema["properties"]
+        .as_object()
+        .expect("HealthResponse.properties");
+    assert!(
+        props.contains_key("capacity"),
+        "o contrato não declara o bloco capacity do /healthz"
+    );
+    let capacity_props = props["capacity"]["properties"]
+        .as_object()
+        .expect("capacity é objeto inline com propriedades declaradas");
+    for campo in [
+        "cpu_pressure",
+        "memory_pressure",
+        "disk_free_ratio",
+        "source",
+        "container",
+        "snapshot_age_seconds",
+        "pressure_is_not_a_health_signal",
+    ] {
+        assert!(
+            capacity_props.contains_key(campo),
+            "capacity.{campo} publicado pelo handler e ausente do schema"
+        );
+    }
+
+    // E o corpo real (aqui o 503 honesto, com banco preguiçoso morto) só tem
+    // chaves declaradas, com o bloco de capacidade presente nos dois casos.
+    let res = get(addr, "/healthz", None);
+    assert!(
+        res.status == 200 || res.status == 503,
+        "healthz fora do contrato: {}",
+        res.status
+    );
+    let body = res.json();
+    for chave in body.as_object().expect("corpo é objeto").keys() {
+        assert!(
+            props.contains_key(chave),
+            "/healthz publica {chave} que o documento não declara"
+        );
+    }
+    let capacity = body["capacity"]
+        .as_object()
+        .unwrap_or_else(|| panic!("/healthz sem bloco capacity: {body}"));
+    for chave in capacity.keys() {
+        assert!(
+            capacity_props.contains_key(chave),
+            "capacity.{chave} não declarada no schema do documento"
+        );
+    }
+    for campo in [
+        "source",
+        "container",
+        "pressure_is_not_a_health_signal",
+    ] {
+        assert!(
+            capacity.contains_key(campo),
+            "capacity.{campo} obrigatória por contrato faltando no corpo"
+        );
+    }
+    assert_eq!(
+        capacity["pressure_is_not_a_health_signal"], true,
+        "pressão não julga saúde nesta fatia e o corpo tem que dizer isso"
+    );
+}
+
 /// Guarda estrutural do registro: nenhuma rota pode nascer de `.route()` à
 /// mão fora do `Registry`. Se alguém voltar a compor router diretamente,
 /// este teste falha — é a garantia de que o contrato não pode ficar para

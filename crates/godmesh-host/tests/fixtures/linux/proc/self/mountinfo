@@ -1,0 +1,4 @@
+24 21 0:23 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw,nsdelegate
+25 21 0:24 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+26 21 8:1 / / rw,relatime - ext4 /dev/sda1 rw
+27 26 0:26 / /dev/shm rw,nosuid,nodev - tmpfs shm rw,size=65536k

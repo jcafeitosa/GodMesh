@@ -1,0 +1,4 @@
+nr_periods 1000
+nr_throttled 25
+throttled_usec 5000000
+burst_usec 0

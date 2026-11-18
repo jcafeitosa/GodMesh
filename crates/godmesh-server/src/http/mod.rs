@@ -40,6 +40,8 @@ use crate::federation::JoinWindow;
 use crate::metrics::{Gauges, Metrics};
 use crate::observability::{observe, RequestContext, RequestLog, StderrRequestLog};
 use godmesh_federation::link::PeerLinks;
+use godmesh_host::collect::{SharedSnapshot, unix_millis};
+use godmesh_host::snapshot::Snapshot;
 
 mod admin;
 mod contract;
@@ -81,6 +83,86 @@ pub struct AppState {
     openapi_json: Arc<String>,
     /// Derivado do registro: `/metrics` foi montado neste processo.
     host_metrics_available: bool,
+    /// Telemetria de host (ADR-073 camada 1): o **último snapshot coletado em
+    /// background**. Nenhum handler lê `/proc` — o custo de abrir 16 arquivos
+    /// do kernel no caminho de um scrape cairia sobre quem está observando o
+    /// incidente.
+    pub host: HostTelemetry,
+}
+
+/// Telemetria de host anexada ao router.
+///
+/// `stale_after_millis` é a idade máxima de um snapshot ainda servível.
+/// `None` desliga o julgamento (é o estado de um router construído sem
+/// coletor, onde nunca haverá snapshot).
+#[derive(Clone)]
+pub struct HostTelemetry {
+    pub snapshot: SharedSnapshot,
+    pub stale_after_millis: Option<u64>,
+}
+
+impl Default for HostTelemetry {
+    /// Sem coletor anexado: o `/metrics` publica o painel de disponibilidade
+    /// com `source="none"` e nada além disso.
+    fn default() -> Self {
+        Self {
+            snapshot: SharedSnapshot::new(),
+            stale_after_millis: None,
+        }
+    }
+}
+
+impl HostTelemetry {
+    #[must_use]
+    pub fn new(snapshot: SharedSnapshot, stale_after: std::time::Duration) -> Self {
+        Self {
+            snapshot,
+            stale_after_millis: Some(stale_after.as_millis() as u64),
+        }
+    }
+
+    /// Snapshot do momento, ou um snapshot vazio honesto.
+    #[must_use]
+    pub fn observed(&self) -> Snapshot {
+        self.snapshot.latest().map_or_else(Snapshot::empty, |arc| Snapshot::clone(&arc))
+    }
+
+    /// Seção `godmesh_host_*` do `/metrics`, sempre presente.
+    #[must_use]
+    pub fn metrics_section(&self) -> String {
+        godmesh_host::expose::render(
+            &self.observed(),
+            unix_millis(),
+            self.stale_after_millis,
+        )
+    }
+
+    /// Resumo de capacidade para o `/healthz`.
+    #[must_use]
+    pub fn capacity_json(&self) -> serde_json::Value {
+        let snapshot = self.observed();
+        let capacity = snapshot.capacity();
+        let idade = if snapshot.taken_at_millis == 0 {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::from(
+                (unix_millis().saturating_sub(snapshot.taken_at_millis) / 1_000) as f64 / 1.0,
+            )
+        };
+        serde_json::json!({
+            // `null` é "não medido". Pressão medida em 0.0 é outra afirmação.
+            "cpu_pressure": capacity.cpu_pressure,
+            "memory_pressure": capacity.memory_pressure,
+            "disk_free_ratio": capacity.disk_free_ratio,
+            "source": snapshot.source.as_str(),
+            "container": snapshot.container,
+            "snapshot_age_seconds": idade,
+            // Afirmado no corpo para o leitor não inferir saúde de pressão:
+            // readiness por pressão é a camada 2 de ADR-073 e ainda não tem
+            // limiar nem histerese aprovados.
+            "pressure_is_not_a_health_signal": true,
+        })
+    }
 }
 
 /// Rotas do servidor com a composição de produção (relógio do sistema,
@@ -109,6 +191,7 @@ pub fn router_with_admission(
         None,
         admission,
         false,
+        HostTelemetry::default(),
     )
 }
 
@@ -126,6 +209,7 @@ pub fn router_with_log(
         None,
         AdmissionConfig::default(),
         false,
+        HostTelemetry::default(),
     )
 }
 
@@ -145,6 +229,7 @@ pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
         None,
         AdmissionConfig::default(),
         false,
+        HostTelemetry::default(),
     )
 }
 
@@ -166,6 +251,7 @@ pub fn router_with_federation(
         Some(links),
         AdmissionConfig::default(),
         false,
+        HostTelemetry::default(),
     )
 }
 
@@ -187,6 +273,7 @@ pub fn router_with_federation_and_admission(
         federation,
         admission,
         false,
+        HostTelemetry::default(),
     )
 }
 
@@ -206,6 +293,29 @@ pub fn router_runtime(
     admission: AdmissionConfig,
     outbox_enabled: bool,
 ) -> Router {
+    router_runtime_with_host(
+        pool,
+        grants,
+        federation,
+        admission,
+        outbox_enabled,
+        HostTelemetry::default(),
+    )
+}
+
+/// Composição completa do binário com a telemetria de host coletada em
+/// background anexada (ADR-073 camada 1). É a porta que `main.rs` usa; as
+/// demais constroem sem coletor e publicam `source="none"`, que é o piso
+/// honesto de um router de teste.
+#[allow(clippy::too_many_arguments)]
+pub fn router_runtime_with_host(
+    pool: PgPool,
+    grants: GrantRegistry,
+    federation: Option<Arc<PeerLinks>>,
+    admission: AdmissionConfig,
+    outbox_enabled: bool,
+    host: HostTelemetry,
+) -> Router {
     let authorization = Authorization::new(grants, pool.clone());
     build_router(
         pool,
@@ -214,6 +324,27 @@ pub fn router_runtime(
         federation,
         admission,
         outbox_enabled,
+        host,
+    )
+}
+
+/// Rotas com a telemetria de host anexada, sem runtime de malha e com cotas
+/// padrão. Existe para os testes de telemetria no fio ([`crate::http`] é a
+/// porta real do binário, [`router_runtime_with_host`]).
+pub fn router_with_host(
+    pool: PgPool,
+    authorization: Authorization,
+    links: Option<Arc<PeerLinks>>,
+    host: HostTelemetry,
+) -> Router {
+    build_router(
+        pool,
+        authorization,
+        Arc::new(StderrRequestLog),
+        links,
+        AdmissionConfig::default(),
+        false,
+        host,
     )
 }
 
@@ -224,6 +355,7 @@ fn build_router(
     federation: Option<Arc<PeerLinks>>,
     admission: AdmissionConfig,
     outbox_enabled: bool,
+    host: HostTelemetry,
 ) -> Router {
     let join_window = JoinWindow::from_env();
 
@@ -256,7 +388,7 @@ fn build_router(
         "/healthz",
         contract::Access::Public,
         contract::RouteDoc {
-            summary: "Liveness com dependência real: 200 só com Postgres respondendo",
+            summary: "Liveness com dependência real: 200 só com Postgres respondendo; bloco capacity publica pressão/disco como dado, sem julgar saúde (ADR-073 camada 1)",
             request: None,
             success: &[
                 (200, contract::Schema::Ref("HealthResponse")),
@@ -321,6 +453,7 @@ fn build_router(
         route_specs,
         openapi_json,
         host_metrics_available,
+        host,
     };
 
     // 2. O portão de autenticação é a camada mais externa do grupo protegido
@@ -359,19 +492,30 @@ pub(super) struct ScopeGate(pub(super) Scope);
 async fn healthz(State(state): State<AppState>) -> Response {
     // Dependência real: 200 só com o pool respondendo. Um healthz estático fica
     // `healthy` com o banco morto e esconde indisponibilidade.
+    // A decisão de saúde desta fatia é **só** a dependência. A capacidade do
+    // host sai junto como dado, sem julgar nada: transformar pressão em
+    // readiness é a camada 2 de ADR-073 e ainda não tem limiar nem histerese
+    // aprovados. Um nó com CPU a 100% responde 200 hoje, de propósito.
+    let capacity = state.host.capacity_json();
     match tokio::time::timeout(
         std::time::Duration::from_millis(500),
         sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.pool),
     )
     .await
     {
-        Ok(Ok(_)) => Json(json!({ "status": "ok", "ack_class": "transport_accepted" })).into_response(),
+        Ok(Ok(_)) => Json(json!({
+            "status": "ok",
+            "ack_class": "transport_accepted",
+            "capacity": capacity,
+        }))
+        .into_response(),
         Ok(Err(_)) | Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "unavailable",
                 "dependency": "postgres",
-                "ack_class": "transport_accepted"
+                "ack_class": "transport_accepted",
+                "capacity": capacity,
             })),
         )
             .into_response(),
@@ -454,7 +598,14 @@ async fn get_metrics(State(state): State<AppState>) -> Response {
         pool_idle: state.pool.num_idle(),
         outbox_pending,
     };
-    let body = state.metrics.render(&gauges);
+    // A seção de host vem depois da de aplicação, com prefixo próprio. O
+    // painel de disponibilidade de host é sempre escrito: a ausência de
+    // telemetria é afirmada, não silenciosa.
+    let body = format!(
+        "{}{}",
+        state.metrics.render(&gauges),
+        state.host.metrics_section()
+    );
     (
         StatusCode::OK,
         [(

@@ -29,6 +29,12 @@
 //! - `GODMESH_ENV` (opcional; ausente é tratado como `production`)
 //! - `GODMESH_OUTBOX` (opcional; `off` desliga o publicador, default `on`)
 //! - `GODMESH_OUTBOX_INTERVAL_MS` (opcional; default 1000 ms)
+//! - `GODMESH_HOST_METRICS_INTERVAL_MS` (opcional; default 5000): intervalo da
+//!   coleta de host (ADR-073 camada 1). É leitura pura de `/proc`/cgroup/`statfs`
+//!   e roda em background; o scrape serve o último snapshot. `0` é recusado —
+//!   um laço apertado lendo o kernel seria um DoS autoinfligido.
+//! - `GODMESH_HOST_PROC_ROOT` (opcional; default `/`): raiz de leitura, para
+//!   evidência reproduzível (`host-evidence proc-fs`). Precisa ser absoluta.
 //! - Portão de abuso (cotas/tetos/admissão — ver `godmesh_server::admission`):
 //!   todos opcionais, com default declarado e validado na subida; valor
 //!   inválido derruba o processo com EX_CONFIG em vez de servir com default
@@ -61,8 +67,10 @@ use godmesh_federation::link::LinkState;
 use godmesh_federation::node::{FederationConfig, FederationNode};
 use godmesh_federation::peer::PeerRegistry;
 use godmesh_federation::NodeIdentity;
+use godmesh_host::collect::{Collector, SharedSnapshot};
 use godmesh_server::admission::AdmissionConfig;
 use godmesh_server::auth::GrantRegistry;
+use godmesh_server::http::HostTelemetry;
 use godmesh_server::publisher::{OutboxConfig, Publisher};
 use godmesh_server::{federation, migrate, runtime};
 use godmesh_sync::pg_outbox::{PgOutbox, PgSink};
@@ -145,6 +153,8 @@ enum Mode {
         grants: GrantRegistry,
         bind_addr: String,
         outbox: OutboxConfig,
+        /// Configuração da coleta de host (camada 1 de ADR-073).
+        host: godmesh_host::Config,
         /// Em `Box` porque o runtime de federação é a maior parte do enum e
         /// `MigrateOnly` não carrega nada.
         federation: Box<FederationRuntime>,
@@ -193,6 +203,8 @@ impl Config {
                     .map_err(|e| format!("registro de grants indisponível: {e}"))?;
                 let outbox =
                     OutboxConfig::from_env().map_err(|e| format!("configuração do outbox: {e}"))?;
+                let host = godmesh_host::Config::from_env()
+                    .map_err(|e| format!("configuração da telemetria de host: {e}"))?;
                 let federation = federation_runtime_from_env()?;
                 // O portão de abuso valida o ambiente na subida: tetos
                 // inválidos derrubam o processo (EX_CONFIG) em vez de virar
@@ -203,6 +215,7 @@ impl Config {
                     grants,
                     bind_addr,
                     outbox,
+                    host,
                     federation: Box::new(federation),
                     admission: Box::new(admission),
                 }
@@ -382,6 +395,7 @@ async fn run(config: Config) -> Result<(), String> {
         grants,
         bind_addr,
         outbox,
+        host,
         federation,
         admission,
     } = config.mode
@@ -491,19 +505,31 @@ async fn run(config: Config) -> Result<(), String> {
         None
     };
 
+    // Coleta de host (ADR-073 camada 1): um snapshot a cada intervalo, lido em
+    // background. O handler de `/metrics` e o `/healthz` só leem o último.
+    // Nenhuma ação sobre o host acontece aqui — é observação pura.
+    let host_snapshot = SharedSnapshot::new();
+    let host_task = spawn_host_collector(
+        host.clone(),
+        host_snapshot.clone(),
+        shutdown_rx.clone(),
+    );
+
     let mut encerrar = shutdown_rx;
-    // `router_runtime`: a única porta que declara capacidades efetivas —
-    // publicador ligado/desligado, federação anexada/ausente e as cotas
-    // validadas no boot aparecem exatamente como este processo é, em
-    // `GET /v1/meta`. Sem `GODMESH_FEDERATION_BIND` o diagnóstico responde
-    // `unknown` — não "saúde" por omissão.
+    // `router_runtime_with_host`: a única porta que declara capacidades
+    // efetivas — publicador ligado/desligado, federação anexada/ausente, cotas
+    // validadas no boot e telemetria de host — exatamente como este processo
+    // é, em `GET /v1/meta`. Sem `GODMESH_FEDERATION_BIND` o diagnóstico
+    // responde `unknown` — não "saúde" por omissão. Sem coletor de host o
+    // `/metrics` declararia `source="none"`; aqui há coletor de verdade.
     let federation_links = runtime_federation.as_ref().map(|node| node.links());
-    let app = godmesh_server::http::router_runtime(
+    let app = godmesh_server::http::router_runtime_with_host(
         pool.clone(),
         grants,
         federation_links,
         *admission,
         outbox.enabled,
+        HostTelemetry::new(host_snapshot.clone(), host.stale_after()),
     );
     let served = runtime::serve(listener, app, pool.clone(), async move {
         let _ = encerrar.changed().await;
@@ -515,6 +541,9 @@ async fn run(config: Config) -> Result<(), String> {
     }
     if let Some(publisher) = publisher {
         let _ = publisher.await;
+    }
+    if let Some(task) = host_task {
+        let _ = task.await;
     }
 
     println!(
@@ -562,6 +591,74 @@ fn spawn_peers_maintenance(
             dial_pending_peers(&node).await;
         }
     });
+}
+
+/// Coleta o host no intervalo configurado e publica o snapshot.
+///
+/// Por que `spawn_blocking`: a leitura de `/proc` é I/O síncuo de ~1 ms
+/// (medido em `crates/godmesh-host/tests/cost.rs`) e não pertence à thread de
+/// um worker async, onde atrasaria handlers. O custo é pago uma vez por
+/// intervalo, nunca por scrape.
+///
+/// A primeira coleta acontece **antes** do primeiro tick: sem isso, o nó
+/// nasceria com `/metrics` dizendo "nenhuma leitura" durante um intervalo
+/// inteiro, e um painel recém-subido é justamente quando alguém olha.
+fn spawn_host_collector(
+    config: godmesh_host::Config,
+    published: SharedSnapshot,
+    mut parar: tokio::sync::watch::Receiver<bool>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let interval = config.interval;
+    let raiz = config.proc_root.display().to_string();
+    println!(
+        "godmesh-server: telemetria de host ativa (camada 1, read-only): snapshot a cada \
+         {} ms, raiz {raiz}, /metrics com prefixo godmesh_host_",
+        interval.as_millis()
+    );
+
+    Some(tokio::spawn(async move {
+        let collector = Collector::with_read(
+            godmesh_host::read::Read::new(&config.proc_root),
+            std::sync::Arc::new(godmesh_host::collect::SysinfoVolumes),
+        );
+        publicar(&collector, &published).await;
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = parar.changed() => return,
+            }
+            publicar(&collector, &published).await;
+        }
+    }))
+}
+
+/// Uma coleta, executada fora das threads do runtime.
+///
+/// `spawn_blocking` porque a leitura de `/proc` é I/O síncuo: ~1 ms medidos,
+/// mas um kernel sob pressão pode demorar muito mais, e isso não pode atrasar
+/// um handler de incidente. O `await` aqui é o que garante uma coleta por vez
+/// — sem ele, um ciclo lento se sobreporia ao próximo.
+///
+/// Falha não apaga o painel: se a tarefa de background entrar em pânico, o
+/// último snapshot publicado continua servido, e `snapshot_age_seconds` passa
+/// a envelhecer até o `/metrics` declarar o número velho como indisponível.
+async fn publicar(collector: &Collector, published: &SharedSnapshot) {
+    let collector = collector.clone();
+    let published = published.clone();
+    if tokio::task::spawn_blocking(move || {
+        let snapshot = collector.collect();
+        published.store(snapshot);
+    })
+    .await
+    .is_err()
+    {
+        eprintln!(
+            "godmesh-server: a coleta de host falhou; mantendo o último snapshot \
+             publicado (idade visível em godmesh_host_snapshot_age_seconds)"
+        );
+    }
 }
 
 /// Disca para os pares autorizados que não têm enlace `ready`.

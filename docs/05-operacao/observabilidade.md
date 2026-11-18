@@ -81,6 +81,51 @@ Para consultas e API, propor p95/p99 separados por rota/operação, medindo tamb
 
 Custos devem ser comparados por cenário e implantação escolhidos, com unidade, fonte e data: compute, memória, armazenamento/backup, rede/egress, fila/replicação, mídia, telemetria, suporte e operação. Separar recorrente de variável e custos transferidos ao operador autogerido. Sem topologia, região, retenção, volume e fonte de preço, nenhum custo total pode ser estimado de forma rastreável.
 
+#### Painel de host `godmesh_host_*` (implementação da camada 1 de ADR-073)
+
+Status: **implementado e testado em ambiente de desenvolvimento**; não é prova
+de capacidade, de SLO nem de prontidão operacional. Evidência e o que não foi
+provado: [evidência da fatia](../09-equipe/evidencias/2026-11-18-host-telemetria.md).
+
+O nó expõe em `GET /metrics` (escopo `admin:metrics`, texto Prometheus) um
+painel de host com prefixo `godmesh_host_`, cobrindo CPU (classes user/nice/
+system/idle/io_wait/irq/soft_irq/steal, load 1/5/15, threads), memória e swap,
+pressão PSI (`/proc/pressure` e `*.pressure` do cgroup próprio), disco por
+volume, descritores e limites do processo, sockets, conexões TCP agregadas por
+estado, conntrack por arquivo e contadores por interface. Em contêiner o que
+vem de cgroup é o **namespace**, não o hipervisor físico; a `HELP` de cada
+família declara fonte, unidade e janela, e a série de memória de `/proc/meminfo`
+declara o contrário explícito: em contêiner ela ainda é a memória do host.
+
+Três regras que o consumidor do painel pode assumir:
+
+1. **série ausente não é zero.** A leitura que falhou não é publicada como 0; a
+   afirmação da falha é `godmesh_host_metrics_available{source="proc"|"cgroup"|"statfs"|"none"}`
+   e `godmesh_host_group_available{group=…}`. Uma média sobre série inexistente
+   é um artefato do PromQL, não do expositor.
+2. **cardinalidade é limitada por construção.** Vocabulário fechado de rótulos
+   mais, no máximo, 16 `volume` e 16 `interface`, com
+   `godmesh_host_cardinality_truncated` declarando o corte. Nunca série por
+   conexão, porta, peer, tenant ou identificador.
+3. **o scrape não custa leitura de kernel.** O handler serve o último snapshot
+   coletado em background (`GODMESH_HOST_METRICS_INTERVAL_MS`, default 5 s);
+   a idade do número é pública (`godmesh_host_snapshot_age_seconds`) e snapshot
+   velho é servido como indisponível, não como atual.
+
+Lacunas abertas, declaradas na fonte e no painel: **inodes por volume não são
+publicados** (a interface `statfs` os tem; a dependência resolvida em ADR-073
+não os expõe, e ler a chamada direta é `unsafe` proibido no workspace);
+**conntrack não usa netlink** nesta fatia, então `nf_conntrack_max` pode faltar
+por privilégio — e nesse caso falta, não vira 0.
+
+**Pressão não julga saúde nesta camada.** `/healthz` publica o resumo
+`capacity` (`cpu_pressure`, `memory_pressure`, `disk_free_ratio`, `source`,
+`container`, `snapshot_age_seconds`) como **dado**, com `null` para o que não
+foi medido, e com `pressure_is_not_a_health_signal: true` no corpo. Um host com
+100 % de stall responde 200 se a dependência responde. Transformar pressão em
+readiness/admissão é a camada 2 de ADR-073 e exige limiar, histerese, classe
+preservada (SOS) e aprovação antes de existir código.
+
 ## SLI, SLO e orçamento de erro
 
 Os itens abaixo são candidatos, não SLI/SLO aprovado. Para cada SLI futuro, publicar um registro contendo serviço/rota; evento elegível e exclusões; numerador; denominador; fórmula e unidade; janela; fonte e versão; segmentação permitida; tratamento de dados ausentes; owner; alvo SLO aprovado; orçamento de erro e regra de consumo; alertas e ação associada. Se qualquer elemento necessário faltar, o SLI permanece `proposed` e não autoriza decisão de tráfego.

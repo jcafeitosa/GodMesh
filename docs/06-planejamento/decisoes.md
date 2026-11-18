@@ -350,6 +350,22 @@ Decisão do usuário: "shadcn fica". Regras para não virar dois sistemas:
 | **Consequências** | Métricas de host entram no orçamento de observabilidade (cardinalidade controlada por agregar por interface/volume, nunca por conexão). Ação privilegiada cria superfície: exige capability separada, auditoria e teste negativo de "sem autorização não executa". |
 | **Verificação** | Leitura: valores conferem com `top`/`free`/`ss` numa janela; `/metrics` mantém cardinalidade limitada; cgroup em contêiner lido corretamente (não host). Decisão: pressão de memória sintética rebaixa classe baixa e preserva SOS. Ação: sem `host:admin` → 403; `dry-run` devolve o que faria sem fazer; auditoria grava antes/depois; falha de privilégio retorna erro explícito, nunca sucesso silencioso. |
 
+**Registro da implementação da camada 1 (18/11/2026):** as versões resolvidas
+acima foram **confirmadas** como estáveis mais recentes no crates.io em
+18/11/2026 (`sysinfo` 0.40.4, `procfs` 0.18.0, `if-addrs` 0.15.0,
+`netlink-packet-utils` 0.6.0 — consulta literal em
+[evidência da fatia](../09-equipe/evidencias/2026-11-18-host-telemetria.md) §2).
+Da lista, apenas `sysinfo` foi introduzido, com `default-features = false,
+features = ["disk"]`: espaço livre de filesystem é `statvfs(2)`, que `/proc` não
+expõe, e chamar a syscall diretamente seria `unsafe`, proibido no workspace.
+`procfs` e `if-addrs` **não** entraram, aplicando o critério desta decisão
+("preferir leitura direta de `/proc` onde o crate não agrega valor"): os
+contadores pedidos são os de `/proc/net/dev`, e os 16 arquivos lidos têm formato
+estável documentado em `proc(5)`. Netlink continua fora (conntrack por arquivo).
+Inodes por volume **não** são publicados: `sysinfo` 0.40.4 não expõe
+`f_files`/`f_ffree`; a série fica ausente de propósito e a `HELP` diz isso —
+ver a mesma evidência §6.
+
 ## ADR-074 — Superfície de uso para agentes e humanos: contrato antes de interface
 
 | Campo | Conteúdo |

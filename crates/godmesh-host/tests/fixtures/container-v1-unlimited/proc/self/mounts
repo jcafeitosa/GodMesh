@@ -1,0 +1,4 @@
+cgroup /sys/fs/cgroup tmpfs rw,relatime,mode=755 0 0
+cgroup /sys/fs/cgroup/memory cgroup rw,memory 0 0
+cgroup /sys/fs/cgroup/cpu,cpuacct cgroup rw,cpu,cpuacct 0 0
+proc /proc proc rw 0 0

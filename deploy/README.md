@@ -64,6 +64,8 @@ repontada.
 | `GODMESH_FEDERATION_BIND` | **sim** | opcional; **desligada por default**. Ligada, abre o listener QUIC/mTLS em `IP:porta` (UDP) e exige `GODMESH_FEDERATION_CLUSTER` e `GODMESH_FEDERATION_REGION` |
 | `GODMESH_FEDERATION_CLUSTER` / `_REGION` | **sim** | obrigatórias com o listener ligado (sem default silencioso) |
 | `GODMESH_FEDERATION_PEERS_REFRESH_MS` | **sim** | opcional; default `5000`. Intervalo de recarga da allowlist de pares a partir de `federation_peer` |
+| `GODMESH_HOST_METRICS_INTERVAL_MS` | **não** | opcional; default `5000`. Intervalo da coleta de telemetria de host (ADR-073 camada 1, read-only). `0` ou valor não inteiro → exit 78. O scrape **não** lê `/proc`: serve o último snapshot; snapshot mais velho que 3× o intervalo é declarado indisponível |
+| `GODMESH_HOST_PROC_ROOT` | **não** | opcional; default `/`. Raiz de leitura de `/proc`/`/sys`, só para evidência reproduzível (`host-evidence proc-fs`). Precisa ser caminho absoluto; relativo → exit 78. Em contêiner **não** há nada a mudar: o `/proc` montado no contêiner já é o do namespace, e os números de cgroup saem com `source="cgroup"` |
 | `GODMESH_MIGRATIONS_DIR` | **não** | definida no Dockerfile como reserva; o binário atual não aplica migração. **Não** conte com ela |
 | `RUST_BACKTRACE` | indireto | só afeta mensagem de panic; `0` na imagem |
 

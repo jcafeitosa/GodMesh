@@ -1,0 +1,9 @@
+Name:	godmesh-server
+Umask:	0022
+State:	S (sleeping)
+Tgid:	4242
+Pid:	4242
+Threads:	9
+SigPnd:	0000000000000000
+VmPeak:	  540000 kB
+VmRSS:	   98765 kB
