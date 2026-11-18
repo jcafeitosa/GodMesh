@@ -36,7 +36,9 @@ use sqlx::PgPool;
 
 use crate::api::ApiError;
 use crate::auth::VerifiedGrant;
-use crate::events::{contiguous_prefix, resolve_retention_class, resolve_jurisdiction};
+use crate::events::{
+    begin_event_write, contiguous_prefix, resolve_jurisdiction, resolve_retention_class,
+};
 
 /// Teto de posições por lote. Limite desta fatia, declarado e recusado — nunca
 /// truncado em silêncio.
@@ -186,7 +188,14 @@ pub async fn receive_batch(
     let authority_epoch = i64::try_from(anchor.authority_epoch)
         .map_err(|_| ApiError::InvalidRequest("authority_epoch fora do intervalo".to_owned()))?;
 
-    let mut tx = pool.begin().await.map_err(ApiError::Storage)?;
+    let mut tx = begin_event_write(
+        pool,
+        &anchor.origin_node,
+        tenant_id,
+        &anchor.stream_id,
+        partition,
+    )
+    .await?;
     let jurisdiction = resolve_jurisdiction(&mut tx, tenant_id).await?;
     let class = resolve_retention_class(&mut tx, &payload.retention_class, &jurisdiction).await?;
 
@@ -231,9 +240,8 @@ pub async fn receive_batch(
         let received = position.seq();
         match inbox.accept(position) {
             Ok(InboxOutcome::Accepted { .. }) => {
-                // `ON CONFLICT DO NOTHING` cobre a corrida com `POST /v1/events`:
-                // se a posição já está durável, nada é reescrito e ela conta como
-                // repetição, não como aceitação nova.
+                // A restrição única também cobre escritas externas ao
+                // fluxo normal, que já está serializado por namespace.
                 let inserted = sqlx::query(
                     "INSERT INTO event_position \
                          (origin_node, tenant_id, stream_id, partition, authority_epoch, seq, \

@@ -74,7 +74,7 @@ async fn pool() -> Option<PgPool> {
 async fn declare_tenant(pool: &PgPool, tenant: &str) {
     sqlx::query(
         "INSERT INTO tenant_region (tenant_id, jurisdiction) VALUES ($1, 'BR') \
-         ON CONFLICT (tenant_id) DO UPDATE SET jurisdiction = EXCLUDED.jurisdiction",
+         ON CONFLICT (tenant_id) DO NOTHING",
     )
     .bind(tenant)
     .execute(pool)
@@ -94,6 +94,13 @@ async fn declare_tenant(pool: &PgPool, tenant: &str) {
     .execute(pool)
     .await
     .expect("cópia primária presente");
+}
+
+async fn no_autorizado(pool: &PgPool, stream: &str) -> NodeIdentity {
+    let node = NodeIdentity::generate_in_memory().expect("identidade de teste");
+    common::registrar_no(pool, &node, "authorized").await;
+    common::conceder_escopo(pool, node.node_id(), TENANT, stream).await;
+    node
 }
 
 async fn serve(pool: PgPool) -> SocketAddr {
@@ -134,11 +141,11 @@ async fn evento_assinado_por_no_autorizado_e_201_e_replay_e_200_sem_duplicar() {
     declare_tenant(&pool, TENANT).await;
     let addr = serve(pool.clone()).await;
     let stream = unique("stream-ok");
-    common::no_local_pronto(&pool, TENANT, &stream).await;
+    let node = no_autorizado(&pool, &stream).await;
 
     assert_eq!(rows(&pool, &stream).await, 0, "antes: nada durável");
     let body =
-        common::envelope_assinado(&common::LOCAL_NODE, TENANT, &stream, 1, 7, 1, CLASS);
+        common::envelope_assinado(&node, TENANT, &stream, 1, 7, 1, CLASS);
 
     let (status, ack) = tokio::task::spawn_blocking({
         let body = body.clone();
@@ -169,10 +176,10 @@ async fn assinatura_invalida_e_422_event_signature_invalid_e_nada_e_gravado() {
     declare_tenant(&pool, TENANT).await;
     let addr = serve(pool.clone()).await;
     let stream = unique("stream-assinatura");
-    common::no_local_pronto(&pool, TENANT, &stream).await;
+    let node = no_autorizado(&pool, &stream).await;
 
     let mut body: Value = serde_json::from_str(&common::envelope_assinado(
-        &common::LOCAL_NODE,
+        &node,
         TENANT,
         &stream,
         1,
@@ -271,10 +278,10 @@ async fn authority_epoch_regressivo_e_422_event_epoch_stale() {
     declare_tenant(&pool, TENANT).await;
     let addr = serve(pool.clone()).await;
     let stream = unique("stream-epoch");
-    common::no_local_pronto(&pool, TENANT, &stream).await;
+    let node = no_autorizado(&pool, &stream).await;
 
     let first =
-        common::envelope_assinado(&common::LOCAL_NODE, TENANT, &stream, 1, 7, 1, CLASS);
+        common::envelope_assinado(&node, TENANT, &stream, 1, 7, 1, CLASS);
     let (status, body) = tokio::task::spawn_blocking(move || post_event(addr, &first))
         .await
         .expect("cliente HTTP");
@@ -282,7 +289,7 @@ async fn authority_epoch_regressivo_e_422_event_epoch_stale() {
 
     let before = rows(&pool, &stream).await;
     let stale =
-        common::envelope_assinado(&common::LOCAL_NODE, TENANT, &stream, 1, 5, 1, CLASS);
+        common::envelope_assinado(&node, TENANT, &stream, 1, 5, 1, CLASS);
     let (status, error) = tokio::task::spawn_blocking(move || post_event(addr, &stale))
         .await
         .expect("cliente HTTP");
@@ -294,7 +301,7 @@ async fn authority_epoch_regressivo_e_422_event_epoch_stale() {
 
     // Controle: epoch maior que o vigente é aceito (autoridade nova manda).
     let newer =
-        common::envelope_assinado(&common::LOCAL_NODE, TENANT, &stream, 1, 9, 1, CLASS);
+        common::envelope_assinado(&node, TENANT, &stream, 1, 9, 1, CLASS);
     let (status, ok) = tokio::task::spawn_blocking(move || post_event(addr, &newer))
         .await
         .expect("cliente HTTP");
@@ -312,13 +319,13 @@ async fn issued_at_fora_da_janela_e_422_event_not_fresh() {
     declare_tenant(&pool, TENANT).await;
     let addr = serve(pool.clone()).await;
     let stream = unique("stream-janela");
-    common::no_local_pronto(&pool, TENANT, &stream).await;
+    let node = no_autorizado(&pool, &stream).await;
 
     let before = rows(&pool, &stream).await;
     let now = godmesh_federation::now_unix();
 
     let old = common::envelope(
-        &common::LOCAL_NODE,
+        &node,
         EventDraft {
             tenant_id: TENANT,
             stream_id: &stream,
@@ -336,7 +343,7 @@ async fn issued_at_fora_da_janela_e_422_event_not_fresh() {
     assert_eq!(error["error"], "event_not_fresh", "{error}");
 
     let future = common::envelope(
-        &common::LOCAL_NODE,
+        &node,
         EventDraft {
             tenant_id: TENANT,
             stream_id: &stream,
@@ -411,10 +418,10 @@ async fn tenant_assinado_diferente_do_grant_e_422_event_scope_denied() {
     declare_tenant(&pool, TENANT).await;
     let addr = serve(pool.clone()).await;
     let stream = unique("stream-tenant");
-    common::no_local_pronto(&pool, TENANT, &stream).await;
+    let node = no_autorizado(&pool, &stream).await;
 
     let body =
-        common::envelope_assinado(&common::LOCAL_NODE, OTHER_TENANT, &stream, 1, 7, 1, CLASS);
+        common::envelope_assinado(&node, OTHER_TENANT, &stream, 1, 7, 1, CLASS);
     let before = rows(&pool, &stream).await;
     let (status, error) = tokio::task::spawn_blocking(move || post_event(addr, &body))
         .await
@@ -450,4 +457,296 @@ async fn corpo_sem_assinatura_e_recusado_na_fronteira_sem_efeito() {
     assert_eq!(status, 422, "formato antigo não tem mais porta: {error}");
     assert_eq!(error["error"], "invalid_request", "{error}");
     assert_eq!(rows(&pool, &stream).await, 0, "recusa na fronteira não grava");
+}
+
+/// Sincroniza pelo bloqueador observado no PostgreSQL. O prazo só limita
+/// falhas; a ordem do teste não depende de atrasos entre os pedidos.
+async fn aguardar_bloqueio(pool: &PgPool, waiter: i32, blocker: i32, lock_type: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT $2 = ANY(pg_blocking_pids($1)) AND EXISTS ( \
+                     SELECT 1 FROM pg_locks WHERE pid = $1 AND locktype = $3 AND NOT granted)",
+            )
+            .bind(waiter)
+            .bind(blocker)
+            .bind(lock_type)
+            .fetch_one(pool)
+            .await
+            .expect("estado dos locks");
+            if waiting {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("esperava bloqueio {lock_type} de {waiter} por {blocker}"));
+}
+
+// Detém a escrita na política de retenção exclusiva do cenário, após o lock
+// do namespace e, no ingest, após as leituras de autoridade e escopo.
+async fn bloquear_retencao(
+    pool: &PgPool,
+    class: &str,
+) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    sqlx::query(
+        "INSERT INTO retention_class (class, jurisdiction, finality, months, discard_trigger) \
+         VALUES ($1, 'BR', 'historico', 24, 'expiry')",
+    )
+    .bind(class)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO retention_copy (class, jurisdiction, copy_scope) VALUES ($1, 'BR', 'primary')",
+    )
+    .bind(class)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let mut gate = pool.begin().await.unwrap();
+    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await
+        .unwrap();
+    sqlx::query(
+        "SELECT class FROM retention_copy \
+         WHERE class = $1 AND jurisdiction = 'BR' AND copy_scope = 'primary' FOR UPDATE",
+    )
+    .bind(class)
+    .fetch_one(&mut *gate)
+    .await
+    .unwrap();
+    (gate, pid)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ingest_e_inbox_serializam_a_primeira_escrita_em_ambas_as_ordens() {
+    let Some(pool) = pool().await else { return };
+    let url = common::database_url().expect("URL do banco de teste");
+    let first_pool = common::pool_para(&url, 1).await;
+    let second_pool = common::pool_para(&url, 1).await;
+    let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&first_pool)
+        .await
+        .unwrap();
+    let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&second_pool)
+        .await
+        .unwrap();
+    let first_addr = serve(first_pool).await;
+    let second_addr = serve(second_pool).await;
+    declare_tenant(&pool, TENANT).await;
+
+    for inbox_first in [false, true] {
+        let stream = unique("stream-lock");
+        let node = no_autorizado(&pool, &stream).await;
+        assert_eq!(rows(&pool, &stream).await, 0);
+        let (inbox_epoch, ingest_epoch) = if inbox_first { (7, 5) } else { (5, 7) };
+        let event = common::envelope_assinado(&node, TENANT, &stream, 1, ingest_epoch, 1, &stream);
+        let batch = serde_json::json!({
+            "retention_class": stream,
+            "positions": [{
+                "origin_node": node.node_id(),
+                "stream_id": stream,
+                "partition": 1,
+                "authority_epoch": inbox_epoch,
+                "seq": 1
+            }]
+        })
+        .to_string();
+
+        let send = move |addr, inbox| {
+            let (path, body) = if inbox {
+                ("/v1/sync/inbox", batch.clone())
+            } else {
+                ("/v1/events", event.clone())
+            };
+            tokio::task::spawn_blocking(move || {
+                let response = common::call(addr, "POST", path, Some(TOKEN), Some(&body));
+                (response.status, response.json())
+            })
+        };
+
+        let (gate, gate_pid) = bloquear_retencao(&pool, &stream).await;
+        let first = send(first_addr, inbox_first);
+        aguardar_bloqueio(&pool, first_pid, gate_pid, "transactionid").await;
+
+        if !inbox_first {
+            for query in [
+                "SELECT node_id FROM federation_peer WHERE node_id = $1 FOR NO KEY UPDATE NOWAIT",
+                "SELECT node_id FROM federation_peer_scope WHERE node_id = $1 FOR UPDATE NOWAIT",
+            ] {
+                let error = sqlx::query(query)
+                    .bind(node.node_id())
+                    .fetch_one(&pool)
+                    .await
+                    .expect_err("o ingest deve manter a linha protegida até o commit");
+                assert_eq!(
+                    error.as_database_error().unwrap().code().as_deref(),
+                    Some("55P03")
+                );
+            }
+        }
+
+        let second = send(second_addr, !inbox_first);
+        aguardar_bloqueio(&pool, second_pid, first_pid, "advisory").await;
+        gate.commit().await.unwrap();
+
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+        let (inbox, ingest) = if inbox_first {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert_eq!(inbox.0, 200, "{}", inbox.1);
+        assert_eq!(inbox.1["accepted"], 1);
+        assert_eq!(inbox.1["contiguous_prefix"], 1);
+        if inbox_first {
+            assert_eq!(ingest.0, 422, "{}", ingest.1);
+            assert_eq!(ingest.1["error"], "event_epoch_stale");
+            assert_eq!(ingest.1["current"], 7);
+            assert_eq!(ingest.1["got"], 5);
+        } else {
+            assert_eq!(ingest.0, 201, "{}", ingest.1);
+        }
+
+        let positions: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT authority_epoch, seq FROM event_position \
+             WHERE tenant_id = $1 AND stream_id = $2 ORDER BY authority_epoch, seq",
+        )
+        .bind(TENANT)
+        .bind(&stream)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let expected = if inbox_first {
+            vec![(7, 1)]
+        } else {
+            vec![(5, 1), (7, 1)]
+        };
+        assert_eq!(positions, expected);
+
+        let checkpoints: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT authority_epoch, contiguous_prefix FROM sync_inbox_state \
+             WHERE tenant_id = $1 AND stream_id = $2",
+        )
+        .bind(TENANT)
+        .bind(&stream)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(checkpoints, [(inbox_epoch, 1)]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ingest_cancelado_no_banco_libera_o_namespace_para_nova_tentativa() {
+    let Some(pool) = pool().await else { return };
+    let url = common::database_url().expect("URL do banco de teste");
+    let writer = common::pool_para(&url, 1).await;
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&writer)
+        .await
+        .unwrap();
+    let addr = serve(writer).await;
+    let stream = unique("stream-retry");
+    declare_tenant(&pool, TENANT).await;
+    let node = no_autorizado(&pool, &stream).await;
+    let body = common::envelope_assinado(&node, TENANT, &stream, 1, 7, 1, &stream);
+
+    let (gate, gate_pid) = bloquear_retencao(&pool, &stream).await;
+    let request = tokio::task::spawn_blocking({
+        let body = body.clone();
+        move || post_event(addr, &body)
+    });
+    aguardar_bloqueio(&pool, writer_pid, gate_pid, "transactionid").await;
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(writer_pid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(cancelled);
+    let (status, error) = request.await.unwrap();
+    assert_eq!(status, 503, "{error}");
+    assert_eq!(error["error"], "storage_unavailable");
+    gate.rollback().await.unwrap();
+    assert_eq!(rows(&pool, &stream).await, 0);
+
+    // Outro pool comprova a liberação do lock entre sessões.
+    let retry_addr = serve(common::pool_para(&url, 1).await).await;
+    let (status, ack) = tokio::task::spawn_blocking(move || post_event(retry_addr, &body))
+        .await
+        .unwrap();
+    assert_eq!(status, 201, "{ack}");
+    assert_eq!(rows(&pool, &stream).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_observa_remocao_de_escopo_e_revogacao_ja_confirmadas() {
+    let Some(pool) = pool().await else { return };
+    let addr = serve(pool.clone()).await;
+    let stream = unique("stream-replay-policy");
+    declare_tenant(&pool, TENANT).await;
+    let node = no_autorizado(&pool, &stream).await;
+    let send = |class: &str| {
+        let body = common::envelope_assinado(&node, TENANT, &stream, 1, 7, 1, class);
+        tokio::task::spawn_blocking(move || post_event(addr, &body))
+    };
+
+    let (status, ack) = send(CLASS).await.unwrap();
+    assert_eq!(status, 201, "{ack}");
+    sqlx::query(
+        "DELETE FROM federation_peer_scope WHERE node_id = $1 AND tenant_id = $2 AND stream_id = $3",
+    )
+    .bind(node.node_id())
+    .bind(TENANT)
+    .bind(&stream)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, error) = send("posicao").await.unwrap();
+    assert_eq!(status, 422, "{error}");
+    assert_eq!(error["error"], "event_scope_denied");
+    assert_eq!(rows(&pool, &stream).await, 1);
+
+    common::conceder_escopo(&pool, node.node_id(), TENANT, &stream).await;
+    let (status, replay) = send("posicao").await.unwrap();
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(replay, ack);
+    common::registrar_no(&pool, &node, "revoked").await;
+    let (status, error) = send("posicao").await.unwrap();
+    assert_eq!(status, 422, "{error}");
+    assert_eq!(error["error"], "event_node_unauthorized");
+    assert_eq!(rows(&pool, &stream).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ingest_aceita_reenvio_depois_de_preencher_lacuna() {
+    let Some(pool) = pool().await else { return };
+    let addr = serve(pool.clone()).await;
+    let stream = unique("stream-gap-retry");
+    declare_tenant(&pool, TENANT).await;
+    let node = no_autorizado(&pool, &stream).await;
+    let first = common::envelope_assinado(&node, TENANT, &stream, 1, 7, 1, CLASS);
+    let next = common::envelope_assinado(&node, TENANT, &stream, 1, 7, 2, CLASS);
+    let send = |body: String| tokio::task::spawn_blocking(move || post_event(addr, &body));
+
+    let (status, gap) = send(next.clone()).await.unwrap();
+    assert_eq!(status, 409, "{gap}");
+    assert_eq!(gap["error"], "sequence_gap");
+    let detail = gap["detail"].as_str().expect("detalhe da lacuna");
+    assert!(detail.contains("posição 2"), "{detail}");
+    assert!(detail.contains("espera 1"), "{detail}");
+    assert_eq!(rows(&pool, &stream).await, 0);
+
+    let (status, ack) = send(first).await.unwrap();
+    assert_eq!(status, 201, "{ack}");
+    let (status, ack) = send(next).await.unwrap();
+    assert_eq!(status, 201, "{ack}");
+    assert_eq!(ack["seq"], 2);
+    assert_eq!(rows(&pool, &stream).await, 2);
 }
