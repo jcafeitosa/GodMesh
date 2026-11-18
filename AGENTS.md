@@ -23,6 +23,11 @@
 - Remova arquivos/código somente depois de verificar referências, uso em geração/distribuição e documentação. Não remova artefatos apenas por parecerem antigos.
 - Solicite revisão independente para alterações de código. Não enfraqueça testes, verificações ou controles para obter um resultado verde.
 
+## Versões e documentação
+- Use somente versões **latest estáveis**. Resolva a versão e registre fonte e data; quando for imagem, registre também o digest.
+- Antes de desenvolver com uma biblioteca, consulte a documentação oficial. Se não estiver acessível, declare "não verificado" e não suponha API de memória.
+- Atualização de dependência exige nova resolução de versão e nova evidência.
+
 ## Git e colaboração
 - Antes de stage/commit/push, confira estado, branch, arquivos não rastreados, remotos, diff e possíveis segredos. Use commits pequenos e mensagens claras.
 - Não sobrescreva, remova ou troque remotos sem autorização explícita. Criar/alterar remotos, publicar código, abrir PR, configurar CI/CD ou operar serviços exige autorização para a ação e o destino.

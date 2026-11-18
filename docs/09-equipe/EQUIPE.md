@@ -123,6 +123,8 @@ flowchart LR
 - Número proposto não é medição; ACK técnico não é recebimento; recebimento não é atendimento humano.
 - Achado de revisão inclui contraexemplo e critério de fechamento verificável.
 - Nenhum agente declara cobertura, aprovação ou teste sem registro correspondente.
+- Nenhum pod ou worker implementa com base em memória de API: documentação oficial da versão resolvida é pré-requisito de implementação (ADR-069).
+- O CTO **orquestra**: decisão e gate são dele; a execução é dos pods e workers.
 
 ## 9. Escalonamento aberto ao usuário
 

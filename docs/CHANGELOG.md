@@ -1,5 +1,11 @@
 # Histórico da documentação
 
+## Versões latest e documentação oficial — 17/11/2026
+- ADR-069: versões latest estáveis somente, com versão resolvida, fonte, data e digest de imagem registrados; documentação oficial da versão é pré-requisito de implementação; atualização de dependência exige nova resolução e nova evidência.
+- `AGENTS.md`: nova seção "Versões e documentação" com a mesma regra vinculante.
+- `09-equipe/EQUIPE.md` §8: nenhum pod ou worker implementa por memória de API; o CTO orquestra, e decisão e gate são dele.
+- Risco de breaking change em `latest` mitigado por lockfile e testes de contrato. Nada instalado, nada compilado.
+
 ## Cliente único em tecnologia web — 17/11/2026
 - ADR-068: React 19 + Astryx + shadcn/ui + Tailwind, empacotado com Tauri 2 (macOS, Windows, Linux, iOS, Android) e núcleo Rust embarcado via comandos/eventos tipados; plugins nativos só onde o SO não expõe API web. **Supera a ADR-055.**
 - Emenda à ADR-067: shadcn/ui permanece, com regra de convivência (um componente, um dono; tema único; fronteira `web/ui/`; remoção quando o Astryx cobrir o padrão).
