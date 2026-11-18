@@ -61,6 +61,16 @@ pub enum ApiError {
     RetentionScopeUnresolved,
     /// O `incident_id` já pertence a outro tenant.
     IncidentIdConflict,
+    /// Incidente inexistente **ou** de outro tenant: a resposta é a mesma (404)
+    /// para não confirmar a existência do identificador em outro tenant.
+    IncidentNotFound,
+    /// Transição fora de ordem para o estado atual; o corpo carrega o estado.
+    IllegalTransition {
+        /// Estado persistido no momento da recusa.
+        current: String,
+    },
+    /// `acknowledged_human` exige prova de pessoa (`responder`).
+    MissingHumanProof,
     /// O contrato do incidente recusou a transição; nunca deveria sair do servidor.
     Invariant(IncidentError),
     Storage(sqlx::Error),
@@ -68,7 +78,7 @@ pub enum ApiError {
 
 /// Nome persistido do estado: espelha o CHECK de `sos_incident.state` em
 /// `migrations/0001_core.sql`. É adaptador de armazenamento, não regra de domínio.
-const fn state_name(state: IncidentState) -> &'static str {
+pub(crate) const fn state_name(state: IncidentState) -> &'static str {
     match state {
         IncidentState::TriggeredLocally => "triggered_locally",
         IncidentState::PersistedLocal => "persisted_local",
@@ -82,7 +92,7 @@ const fn state_name(state: IncidentState) -> &'static str {
 }
 
 /// Inverso de [`state_name`]: lê o estado persistido de volta para o domínio.
-const fn parse_state(name: &str) -> Option<IncidentState> {
+pub(crate) const fn parse_state(name: &str) -> Option<IncidentState> {
     match name.as_bytes() {
         b"triggered_locally" => Some(IncidentState::TriggeredLocally),
         b"persisted_local" => Some(IncidentState::PersistedLocal),
@@ -296,7 +306,7 @@ fn response_for(
 }
 
 /// Reconstrói o incidente no estado persistido, sem gravar nada.
-fn rehydrate(
+pub(crate) fn rehydrate(
     incident_id: &str,
     tenant: &str,
     principal: &str,
