@@ -34,8 +34,17 @@ async fn post_incident(
     Json(payload): Json<IncidentPayload>,
 ) -> Result<(StatusCode, Json<IncidentResponse>), ApiErrorResponse> {
     match create_incident(&state.pool, payload).await {
-        Ok(resp) => Ok((StatusCode::CREATED, Json(resp))),
+        Ok(outcome) => Ok((created_status(outcome.created), Json(outcome.response))),
         Err(e) => Err(ApiErrorResponse::from(e)),
+    }
+}
+
+/// 201 na primeira gravação, 200 no replay idempotente do mesmo tenant.
+const fn created_status(created: bool) -> StatusCode {
+    if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
     }
 }
 
@@ -55,7 +64,17 @@ impl IntoResponse for ApiErrorResponse {
             ApiError::RetentionPolicyMissing => (
                 StatusCode::CONFLICT,
                 "retention_policy_missing",
-                "classe incidente_sos sem política aplicável".to_owned(),
+                "classe incidente_sos sem política aplicável à jurisdição do tenant".to_owned(),
+            ),
+            ApiError::RetentionScopeUnresolved => (
+                StatusCode::CONFLICT,
+                "retention_scope_unresolved",
+                "tenant sem jurisdição declarada".to_owned(),
+            ),
+            ApiError::IncidentIdConflict => (
+                StatusCode::CONFLICT,
+                "incident_id_conflict",
+                "incident_id já pertence a outro tenant".to_owned(),
             ),
             ApiError::Invariant(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -66,5 +85,17 @@ impl IntoResponse for ApiErrorResponse {
         };
         let _ = GrantDecision::Allow;
         (status, Json(json!({ "error": code, "detail": detail, "ack_class": "transport_accepted" }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::created_status;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn replay_is_200_and_first_write_is_201() {
+        assert_eq!(created_status(false), StatusCode::OK);
+        assert_eq!(created_status(true), StatusCode::CREATED);
     }
 }

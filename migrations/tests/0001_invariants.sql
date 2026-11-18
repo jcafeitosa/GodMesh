@@ -33,8 +33,14 @@ EXCEPTION
 END $$;
 
 -- 4) Trilha de ACK é append-only.
-INSERT INTO sos_incident (id, tenant_id, principal, state) VALUES ('inc-1','t1','p1','persisted_local');
-INSERT INTO sos_ack (incident_id, ack_class, source, at_unix) VALUES ('inc-1','persisted_local','inbox:1',0);
+-- A partir da migração 0002 o incidente exige a política que autorizou a
+-- persistência (ADR-062): os inserts abaixo declaram a classe e a jurisdição
+-- para continuarem provando o que este arquivo se propõe a provar.
+INSERT INTO sos_incident (id, tenant_id, principal, state, retention_class, retention_jurisdiction)
+VALUES ('inc-1','t1','p1','persisted_local','incidente_sos','BR')
+ON CONFLICT DO NOTHING;
+INSERT INTO sos_ack (incident_id, ack_class, source, at_unix) VALUES ('inc-1','persisted_local','inbox:1',0)
+ON CONFLICT DO NOTHING;
 DO $$
 BEGIN
     UPDATE sos_ack SET source = 'adulterado' WHERE incident_id = 'inc-1';
@@ -47,8 +53,11 @@ END $$;
 
 -- 5) State do incidente é conjunto fechado.
 DO $$
+DECLARE
+    novo_id text := 'inc-check-' || floor(random() * 1000000)::text;
 BEGIN
-    INSERT INTO sos_incident (id, tenant_id, principal, state) VALUES ('inc-2','t1','p1','enviado');
+    INSERT INTO sos_incident (id, tenant_id, principal, state, retention_class, retention_jurisdiction)
+    VALUES (novo_id, 't1', 'p1', 'enviado', 'incidente_sos', 'BR');
     RAISE EXCEPTION 'FALHA: estado inventado aceito';
 EXCEPTION
     WHEN check_violation THEN RAISE NOTICE 'OK 5: estado inventado recusado';
