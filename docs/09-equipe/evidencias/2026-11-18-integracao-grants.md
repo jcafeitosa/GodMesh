@@ -3,6 +3,7 @@
 **Worker:** T3 — integração da fatia de grants emitidos e renumeração da migração.
 **Branch:** `room/t3-integra-grants-emitidos-e-migracao-00-vkxu`.
 **Base integrada:** `main` @ `51be18e` + T1 `room/t1-emissao-e-revogacao-de-grant-tkuy` @ `f3db92c`.
+**Commits:** merge `fe31156` (integração) + este commit de evidência.
 **Ambiente:** macOS arm64, Postgres 18.7 em `localhost:55432`, Rust do workspace. **Sem contêiner** para a verificação (ADR-070).
 **Natureza deste documento:** relato do que foi executado. **Não** é aprovação de SPEC, de contrato publicado ou de prontidão para produção.
 
