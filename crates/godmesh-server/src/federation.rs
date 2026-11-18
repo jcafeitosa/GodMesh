@@ -483,7 +483,7 @@ async fn verify_approval_certificate(
     certificate: &ApprovalCertificate,
     action: DecisionAction,
     clock: impl FnOnce() -> i64,
-) -> Result<i64, ApiError> {
+) -> Result<(i64, i64), ApiError> {
     // Primeiro a autoridade e a assinatura, depois o que os campos dizem: um
     // campo de um certificado não verificado não é evidência, é alegação. E
     // nada acima disto escreveu no banco — as recusas saem da transação.
@@ -563,23 +563,24 @@ async fn verify_approval_certificate(
     // reescrever o presente. `max()` sobre zero linhas devolve uma linha com
     // NULL: `Option<i64>` é o tipo certo, e `None` significa "este nó ainda não
     // assinou decisão nenhuma".
+    let epoch = i64::try_from(certificate.epoch)
+        .map_err(|_| ApiError::InvalidRequest("epoch de decisão excede bigint".to_owned()))?;
     let recorded = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT max(approval_epoch) FROM federation_join_request WHERE approved_by_node = $1",
     )
     .bind(&certificate.node_id)
     .fetch_one(&mut *tx)
     .await?;
-    if let Some(recorded) = recorded {
-        let piso = u64::try_from(recorded).unwrap_or(0);
-        if certificate.epoch < piso {
-            return Err(ApiError::ApprovalEpochRegressed {
-                recorded: piso,
-                presented: certificate.epoch,
-            });
-        }
+    if let Some(recorded) = recorded
+        && epoch < recorded
+    {
+        return Err(ApiError::ApprovalEpochRegressed {
+            recorded: recorded as u64,
+            presented: certificate.epoch,
+        });
     }
 
-    Ok(now)
+    Ok((now, epoch))
 }
 
 macro_rules! peer_query {
@@ -637,7 +638,7 @@ pub async fn approve_join_request(
     if nodes[0] != nodes[1] {
         lock_decision_node(&mut tx, nodes[1]).await?;
     }
-    let now = verify_approval_certificate(
+    let (now, approval_epoch) = verify_approval_certificate(
         &mut tx,
         &config.genesis,
         &request,
@@ -678,8 +679,6 @@ pub async fn approve_join_request(
         return Ok((request, peer));
     }
 
-    let approval_epoch = i64::try_from(certificate.epoch)
-        .map_err(|_| ApiError::InvalidRequest("epoch de aprovação excede bigint".to_owned()))?;
     let mut peer = PeerRecord::from_manifest(&request.manifest, now);
     if let Some(existing) = existing {
         peer.trust_state = existing.trust_state;

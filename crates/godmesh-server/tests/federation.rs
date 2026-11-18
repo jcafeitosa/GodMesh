@@ -1698,3 +1698,44 @@ async fn falha_de_persistencia_reverte_par_e_permite_repetir_decisao() {
         Some("authorized")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn epoch_bigint_preserva_limite_e_recusa_valor_fora_da_faixa() {
+    let Some(env) = env().await else { return };
+    let pool = pool(env).await;
+    let approver = genesis_approver("epoch-bigint");
+    let candidate = node_with_key("epoch-bigint-candidato");
+    let server = serve_with_genesis(pool.clone(), genesis_of(&[&approver])).await;
+    let pending = join_pending(&server, &candidate, 1);
+    let id = pending["join_request_id"].as_str().unwrap();
+
+    let limit = i64::MAX as u64;
+    let mut cert = fresh_certificate(&approver, &pending);
+    cert.epoch = limit + 1;
+    cert.sign(&approver.identity);
+    let response = approve_with(&server, id, &cert);
+    assert_eq!(response.status, 422, "{}", response.body);
+    assert_eq!(response.json()["error"], "invalid_request");
+    assert_eq!(stored_approval(&pool, id).await, (None, None, None, None));
+    assert!(peer_state(&pool, candidate.identity.node_id()).await.is_none());
+
+    let mut rejection = cert.clone();
+    rejection.sign_for(&approver.identity, DecisionAction::Reject);
+    let response = reject_with(&server, id, &rejection);
+    assert_eq!(response.status, 422, "{}", response.body);
+    assert_eq!(response.json()["error"], "invalid_request");
+
+    let mut valid = cert.clone();
+    valid.epoch = limit;
+    valid.sign(&approver.identity);
+    let response = approve_with(&server, id, &valid);
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.json()["approval_epoch"], limit);
+    let before = stored_approval(&pool, id).await;
+    assert_eq!(before.2, Some(i64::MAX));
+
+    let response = approve_with(&server, id, &cert);
+    assert_eq!(response.status, 422, "{}", response.body);
+    assert_eq!(response.json()["error"], "invalid_request");
+    assert_eq!(stored_approval(&pool, id).await, before);
+}
