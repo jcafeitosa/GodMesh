@@ -11,13 +11,16 @@
 #     índice multi-arch: sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 #     linux/arm64:       sha256:24a01011d10eba3a023bc8585b9650b8b29021240d4217c05b905e09ef4a5232
 #
-# Estado em 18/11/2026: o binário `godmesh-server` ainda NÃO existe no workspace
-# (crates/godmesh-server não foi criado). O build falha de propósito em
-# `cargo build -p godmesh-server` com "package ID specification ... did not match
-# any packages". Nada aqui é simulado para esconder isso.
+# Estado em 18/11/2026 (após o merge de crates/godmesh-server em `main`, 70f0a57):
+# o build real completa e a imagem roda. A verificação de 17/11/2026 falhou aqui
+# porque o pacote ainda não existia ("package ID specification ... did not match
+# any packages"); essa seção da evidência foi mantida e marcada como build com stub.
 
-ARG RUST_IMAGE=rust:1.100-slim-bookworm
-ARG RUNTIME_IMAGE=debian:trixie-slim
+# Base fixada por tag explícita + digest do índice multi-arch: o build não pode
+# andar sozinho quando a tag for repontada. Para atualizar, ver a consulta em
+# docs/09-equipe/evidencias/2026-11-17-container-prod.md e trocar tag e digest juntos.
+ARG RUST_IMAGE=rust:1.100-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37
+ARG RUNTIME_IMAGE=debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 # ---------- builder ----------
 FROM ${RUST_IMAGE} AS builder
@@ -62,5 +65,11 @@ ENV GODMESH_ENV=production \
 USER 10001:10001
 
 EXPOSE 8080
+
+# Healthcheck sem dependência extra: a imagem de runtime não traz curl/wget/nc.
+# `bash` + /dev/tcp fazem o GET em /healthz; a porta vem de BIND_ADDR quando
+# definido (o servidor escuta em loopback por padrão).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD /bin/bash -c 'port="${BIND_ADDR:-127.0.0.1:8080}"; port="${port##*:}"; exec 3<>/dev/tcp/127.0.0.1/$port || exit 1; printf "GET /healthz HTTP/1.0\r\n\r\n" >&3; grep -q "transport_accepted" <&3'
 
 ENTRYPOINT ["/usr/local/bin/godmesh-server"]
