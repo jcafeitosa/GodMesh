@@ -7,7 +7,7 @@ use godmesh_federation::config_bundle::{
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 
-use crate::portable_join::{PortableJoin, PortableJoinError, require_cluster_lock};
+use crate::portable_join::{ClusterGuard, PortableJoin, PortableJoinError};
 
 type Tx<'a> = Transaction<'a, Postgres>;
 type Hash = [u8; 32];
@@ -45,13 +45,13 @@ impl Preflight {
     /// A ausência de política só é um estado válido após o preflight.
     pub async fn classify_fence_in_tx(
         &self,
-        tx: &mut Tx<'_>,
+        guard: &mut ClusterGuard<'_, '_>,
         protocol: u64,
         now: i64,
     ) -> Result<Fence, WriteError> {
         match self {
             Self::Disabled => Ok(Fence::Disabled),
-            Self::Enabled(service) => service.classify_fence_in_tx(tx, protocol, now).await,
+            Self::Enabled(service) => service.classify_fence_in_tx(guard, protocol, now).await,
         }
     }
 }
@@ -418,11 +418,15 @@ impl BundleService {
 
     async fn check_context(
         &self,
-        tx: &mut Tx<'_>,
+        guard: &mut ClusterGuard<'_, '_>,
         expected_role: Option<Role>,
     ) -> Result<(), WriteError> {
-        require_cluster_lock(tx, self.cluster()).await?;
-        let stored = stored_policy(tx).await?.ok_or_else(corrupt)?;
+        if guard.cluster() != self.cluster() {
+            return Err(Rejection::Policy.into());
+        }
+        let stored = stored_policy(guard.transaction())
+            .await?
+            .ok_or_else(corrupt)?;
         if expected_role.is_some_and(|role| stored.5 != role.as_str()) {
             return Err(Rejection::WrongRole.into());
         }
@@ -438,12 +442,10 @@ impl BundleService {
 
     async fn begin(&self, portable: &PortableJoin) -> Result<Tx<'static>, WriteError> {
         self.check_portable(portable)?;
-        let mut tx = self
+        Ok(self
             .pool
             .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
-            .await?;
-        portable.lock_cluster(&mut tx).await?;
-        Ok(tx)
+            .await?)
     }
 
     fn authenticate(&self, raw: &[u8]) -> Result<AuthenticatedBundle, WriteError> {
@@ -496,13 +498,17 @@ impl BundleService {
             incompatible.filter(|(v, _)| highest.as_ref().is_none_or(|(a, _)| v > a));
         // Os marcadores não podem retroceder nem apagar um conflito que a
         // auditoria ainda não registrou como resolvido.
-        let (last_effective, open_conflict): (Option<String>, Option<String>) = sqlx::query_as(
+        let (last_effective, open_conflict, recovering): (Option<String>, Option<String>, bool) = sqlx::query_as(
             "SELECT
                 (SELECT hash FROM federation_config_audit WHERE transition = 'activated'
                   ORDER BY id DESC LIMIT 1),
                 (SELECT hash FROM federation_config_audit WHERE transition = 'conflict'
                    AND id > COALESCE((SELECT max(id) FROM federation_config_audit WHERE transition = 'resolved'), 0)
-                  ORDER BY id LIMIT 1)",
+                  ORDER BY id LIMIT 1),
+                COALESCE((SELECT max(id) FROM federation_config_audit
+                            WHERE transition IN ('resolved', 'recovery_required')), 0)
+                  > COALESCE((SELECT max(id) FROM federation_config_audit
+                                WHERE transition = 'activated'), 0)",
         ).fetch_one(&mut **tx).await?;
         let expected_published = match self.policy.role {
             Role::Publisher => state.accepted.as_ref(),
@@ -513,6 +519,7 @@ impl BundleService {
             || state.published.as_ref() != expected_published
             || state.effective != last_effective
             || state.conflict != open_conflict
+            || state.recovering != recovering
         {
             return Err(corrupt());
         }
@@ -591,13 +598,13 @@ impl BundleService {
     /// Prepara a publicação na transação da fronteira autorizada.
     pub async fn publish_in_tx(
         &self,
-        tx: &mut Tx<'_>,
+        guard: &mut ClusterGuard<'_, '_>,
         portable: &PortableJoin,
         frame: &[u8],
         now: i64,
     ) -> Result<WriteOutcome, WriteError> {
         self.submit(
-            tx,
+            guard,
             portable,
             frame,
             now,
@@ -609,13 +616,13 @@ impl BundleService {
     /// Prepara a aceitação no receptor, incluindo a evidência quando aplicável.
     pub async fn accept_in_tx(
         &self,
-        tx: &mut Tx<'_>,
+        guard: &mut ClusterGuard<'_, '_>,
         portable: &PortableJoin,
         frame: &[u8],
         now: i64,
     ) -> Result<WriteOutcome, WriteError> {
         self.submit(
-            tx,
+            guard,
             portable,
             frame,
             now,
@@ -632,7 +639,11 @@ impl BundleService {
         clock: impl FnOnce() -> i64,
     ) -> Result<WriteOutcome, WriteError> {
         let mut tx = self.begin(portable).await?;
-        match self.accept_in_tx(&mut tx, portable, frame, clock()).await {
+        let mut guard = portable.lock_cluster_guard(&mut tx).await?;
+        match self
+            .accept_in_tx(&mut guard, portable, frame, clock())
+            .await
+        {
             Ok(result) => {
                 tx.commit().await?;
                 Ok(result)
@@ -647,7 +658,7 @@ impl BundleService {
     /// Prepara a recuperação auditada. O ator vem da fronteira confiável.
     pub async fn resolve_conflict_in_tx(
         &self,
-        tx: &mut Tx<'_>,
+        guard: &mut ClusterGuard<'_, '_>,
         portable: &PortableJoin,
         frame: &[u8],
         role: Role,
@@ -655,7 +666,7 @@ impl BundleService {
         now: i64,
     ) -> Result<WriteOutcome, WriteError> {
         self.submit(
-            tx,
+            guard,
             portable,
             frame,
             now,
@@ -666,16 +677,17 @@ impl BundleService {
 
     async fn submit(
         &self,
-        tx: &mut Tx<'_>,
+        guard: &mut ClusterGuard<'_, '_>,
         portable: &PortableJoin,
         frame: &[u8],
         now: i64,
         submission: Submission<'_>,
     ) -> Result<WriteOutcome, WriteError> {
         self.check_portable(portable)?;
-        self.check_context(tx, Some(submission.role())).await?;
+        self.check_context(guard, Some(submission.role())).await?;
         let authenticated = self.authenticate(frame)?;
-        portable.authorize_local_at(tx, now).await?;
+        portable.authorize_local_at(guard, now).await?;
+        let tx = guard.transaction();
         let body = authenticated.body();
         let hash = hex::encode(authenticated.hash());
         let version = body.version as i64;
@@ -769,7 +781,9 @@ impl BundleService {
         let pending = reference(tx, state.pending.as_deref()).await?;
         let incompatible_due =
             incompatible_due(tx, accepted.as_ref().map(|record| record.version), now).await?;
-        state.recovering |= pending.is_some_and(|record| record.due(now)) || incompatible_due;
+        let starts_recovery = !state.recovering
+            && (pending.is_some_and(|record| record.due(now)) || incompatible_due);
+        state.recovering |= starts_recovery;
         if incompatible
             .as_ref()
             .is_some_and(|record| version >= record.version)
@@ -787,6 +801,9 @@ impl BundleService {
         }
         self.set_pending(tx, &mut state, hash).await?;
         audit(tx, authenticated.hash(), now, "accepted", None).await?;
+        if starts_recovery {
+            audit(tx, authenticated.hash(), now, "recovery_required", None).await?;
+        }
         Ok(WriteOutcome::Accepted)
     }
 
@@ -845,11 +862,13 @@ impl BundleService {
         clock: impl FnOnce() -> i64,
     ) -> Result<Activation, WriteError> {
         let mut tx = self.begin(portable).await?;
+        let mut guard = portable.lock_cluster_guard(&mut tx).await?;
         let now = clock();
-        self.check_context(&mut tx, None).await?;
-        portable.authorize_local_at(&mut tx, now).await?;
-        let mut state = State::load(&mut tx).await?;
-        let result = self.activate_in_tx(&mut tx, &mut state, now).await?;
+        self.check_context(&mut guard, None).await?;
+        portable.authorize_local_at(&mut guard, now).await?;
+        let tx_ref = guard.transaction();
+        let mut state = State::load(tx_ref).await?;
+        let result = self.activate_in_tx(tx_ref, &mut state, now).await?;
         tx.commit().await?;
         Ok(result)
     }
@@ -890,11 +909,12 @@ impl BundleService {
     /// Prepara corpo e hash sob o lock do leitor autorizado; não faz I/O externo.
     pub async fn select_published_in_tx(
         &self,
-        tx: &mut Tx<'_>,
+        guard: &mut ClusterGuard<'_, '_>,
         conditional: Option<&Hash>,
         now: i64,
     ) -> Result<Published, WriteError> {
-        self.check_context(tx, Some(Role::Publisher)).await?;
+        self.check_context(guard, Some(Role::Publisher)).await?;
+        let tx = guard.transaction();
         let state = State::load(tx).await?;
         if state.conflict.is_some() {
             return Ok(Published::BlockedConflict);
@@ -919,13 +939,22 @@ impl BundleService {
     }
 
     /// Classificação no mesmo lock e transação que protegem o efeito.
+    ///
+    /// ```compile_fail
+    /// # use godmesh_server::config_bundle::BundleService;
+    /// # use sqlx::{Postgres, Transaction};
+    /// # async fn run(service: &BundleService, tx: &mut Transaction<'_, Postgres>) {
+    /// service.classify_fence_in_tx(tx, 1, 0).await.unwrap();
+    /// # }
+    /// ```
     pub async fn classify_fence_in_tx(
         &self,
-        tx: &mut Tx<'_>,
+        guard: &mut ClusterGuard<'_, '_>,
         protocol: u64,
         now: i64,
     ) -> Result<Fence, WriteError> {
-        self.check_context(tx, None).await?;
+        self.check_context(guard, None).await?;
+        let tx = guard.transaction();
         let state = State::load(tx).await?;
         if state.conflict.is_some() {
             return Ok(Fence::Blocked(Block::Conflict));

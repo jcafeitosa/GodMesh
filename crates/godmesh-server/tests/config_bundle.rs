@@ -217,7 +217,12 @@ impl Fixture {
     ) -> Result<WriteOutcome, WriteError> {
         let mut tx = self.tx().await;
         let result = service
-            .publish_in_tx(&mut tx, &self.portable, frame, now)
+            .publish_in_tx(
+                &mut self.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                &self.portable,
+                frame,
+                now,
+            )
             .await;
         if result.is_ok() {
             tx.commit().await.unwrap();
@@ -230,7 +235,11 @@ impl Fixture {
     async fn fence(&self, service: &BundleService, protocol: u64, now: i64) -> Fence {
         let mut tx = self.tx().await;
         let result = service
-            .classify_fence_in_tx(&mut tx, protocol, now)
+            .classify_fence_in_tx(
+                &mut self.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                protocol,
+                now,
+            )
             .await
             .unwrap();
         tx.commit().await.unwrap();
@@ -340,7 +349,11 @@ async fn p_publica_vetor_m3a_recebe_ativa_e_le_sem_reescrita() {
         version,
         hash,
     } = publisher
-        .select_published_in_tx(&mut tx, None, 100)
+        .select_published_in_tx(
+            &mut a.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+            None,
+            100,
+        )
         .await
         .unwrap()
     else {
@@ -350,7 +363,11 @@ async fn p_publica_vetor_m3a_recebe_ativa_e_le_sem_reescrita() {
     assert_eq!(version, 9);
     assert_eq!(
         publisher
-            .select_published_in_tx(&mut tx, Some(&hash), 100)
+            .select_published_in_tx(
+                &mut a.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                Some(&hash),
+                100
+            )
             .await
             .unwrap(),
         Published::NotModified { version, hash }
@@ -398,7 +415,11 @@ async fn p_publica_vetor_m3a_recebe_ativa_e_le_sem_reescrita() {
     let mut tx = a.tx().await;
     assert_eq!(
         publisher
-            .select_published_in_tx(&mut tx, Some(&hash), 200)
+            .select_published_in_tx(
+                &mut a.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                Some(&hash),
+                200
+            )
             .await
             .unwrap(),
         Published::Unavailable
@@ -456,10 +477,33 @@ async fn b_evidencia_exigivel_e_substituicao_futura_fecham_o_fence() {
         fx.fence(&service, 2, 140).await,
         Fence::Blocked(Block::Recovering)
     );
+    sqlx::query("UPDATE federation_config_state SET recovering = false")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    assert!(
+        BundleService::preflight(
+            &fx.pool,
+            Some(&fx.portable),
+            Some(fx.policy(Role::Publisher, software(1)))
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query("UPDATE federation_config_state SET recovering = true")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let service = fx.enabled(fx.policy(Role::Publisher, software(1))).await;
+    assert_eq!(
+        fx.fence(&service, 2, 140).await,
+        Fence::Blocked(Block::Recovering)
+    );
     assert_eq!(
         service.activate_due(&fx.portable, || 150).await.unwrap(),
         Activation::Activated
     );
+    let service = fx.enabled(fx.policy(Role::Publisher, software(1))).await;
     assert_eq!(
         fx.fence(&service, 2, 150).await,
         Fence::Blocked(Block::BelowFloor)
@@ -506,12 +550,22 @@ async fn n_papel_restringe_replay_conflito_e_incompatibilidade() {
             let result = match role {
                 Role::Publisher => {
                     service
-                        .accept_in_tx(&mut tx, &fx.portable, frame, 110)
+                        .accept_in_tx(
+                            &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                            &fx.portable,
+                            frame,
+                            110,
+                        )
                         .await
                 }
                 Role::Receiver => {
                     service
-                        .publish_in_tx(&mut tx, &fx.portable, frame, 110)
+                        .publish_in_tx(
+                            &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                            &fx.portable,
+                            frame,
+                            110,
+                        )
                         .await
                 }
             };
@@ -523,7 +577,14 @@ async fn n_papel_restringe_replay_conflito_e_incompatibilidade() {
             };
             rejected(
                 service
-                    .resolve_conflict_in_tx(&mut tx, &fx.portable, frame, wrong, "auditor", 110)
+                    .resolve_conflict_in_tx(
+                        &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                        &fx.portable,
+                        frame,
+                        wrong,
+                        "auditor",
+                        110,
+                    )
                     .await,
                 Rejection::WrongRole,
             );
@@ -593,7 +654,12 @@ async fn n_conflito_historico_rollback_atomico_e_resolucao_auditada() {
     let mut tx = fx.tx().await;
     assert_eq!(
         service
-            .publish_in_tx(&mut tx, &fx.portable, &conflict, 151)
+            .publish_in_tx(
+                &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                &fx.portable,
+                &conflict,
+                151
+            )
             .await
             .unwrap(),
         WriteOutcome::ConflictRecorded
@@ -638,14 +704,25 @@ async fn n_conflito_historico_rollback_atomico_e_resolucao_auditada() {
     let mut tx = fx.tx().await;
     assert_eq!(
         service
-            .select_published_in_tx(&mut tx, None, 250)
+            .select_published_in_tx(
+                &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                None,
+                250
+            )
             .await
             .unwrap(),
         Published::BlockedConflict
     );
     rejected(
         service
-            .resolve_conflict_in_tx(&mut tx, &fx.portable, &v3, Role::Publisher, "auditor", 156)
+            .resolve_conflict_in_tx(
+                &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                &fx.portable,
+                &v3,
+                Role::Publisher,
+                "auditor",
+                156,
+            )
             .await,
         Rejection::Rollback,
     );
@@ -654,7 +731,14 @@ async fn n_conflito_historico_rollback_atomico_e_resolucao_auditada() {
     let mut tx = fx.tx().await;
     assert_eq!(
         service
-            .resolve_conflict_in_tx(&mut tx, &fx.portable, &v5, Role::Publisher, "auditor", 156)
+            .resolve_conflict_in_tx(
+                &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                &fx.portable,
+                &v5,
+                Role::Publisher,
+                "auditor",
+                156
+            )
             .await
             .unwrap(),
         WriteOutcome::Accepted
@@ -668,16 +752,52 @@ async fn n_conflito_historico_rollback_atomico_e_resolucao_auditada() {
         fx.fence(&service, 5, 159).await,
         Fence::Blocked(Block::Recovering)
     );
+    sqlx::query("UPDATE federation_config_state SET recovering = false")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    assert!(
+        BundleService::preflight(
+            &fx.pool,
+            Some(&fx.portable),
+            Some(fx.policy(Role::Publisher, software(1)))
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query("UPDATE federation_config_state SET recovering = true")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let service = fx.enabled(fx.policy(Role::Publisher, software(1))).await;
+    assert_eq!(
+        fx.fence(&service, 5, 159).await,
+        Fence::Blocked(Block::Recovering)
+    );
     let mut tx = fx.tx().await;
     rejected(
         service
-            .resolve_conflict_in_tx(&mut tx, &fx.portable, &v5, Role::Receiver, "auditor", 160)
+            .resolve_conflict_in_tx(
+                &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                &fx.portable,
+                &v5,
+                Role::Receiver,
+                "auditor",
+                160,
+            )
             .await,
         Rejection::WrongRole,
     );
     assert_eq!(
         service
-            .resolve_conflict_in_tx(&mut tx, &fx.portable, &v5, Role::Publisher, "auditor", 250)
+            .resolve_conflict_in_tx(
+                &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                &fx.portable,
+                &v5,
+                Role::Publisher,
+                "auditor",
+                250
+            )
             .await
             .unwrap(),
         WriteOutcome::Replay
@@ -731,9 +851,14 @@ async fn b_reconsidera_mesmo_hash_com_software_novo_antes_e_depois_da_exigencia(
         let before = fx.snapshot().await;
         let mut tx = fx.tx().await;
         assert_eq!(
-            old.accept_in_tx(&mut tx, &fx.portable, &future, 101)
-                .await
-                .unwrap(),
+            old.accept_in_tx(
+                &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                &fx.portable,
+                &future,
+                101
+            )
+            .await
+            .unwrap(),
             WriteOutcome::IncompatibleRecorded
         );
         tx.rollback().await.unwrap();
@@ -837,7 +962,13 @@ async fn f_classificacao_e_ativacao_observam_a_ordem_do_commit_e_o_relogio_do_lo
 
     let mut effect = fx.tx().await;
     assert!(matches!(
-        svc.classify_fence_in_tx(&mut effect, 1, 119).await.unwrap(),
+        svc.classify_fence_in_tx(
+            &mut fx.portable.lock_cluster_guard(&mut effect).await.unwrap(),
+            1,
+            119
+        )
+        .await
+        .unwrap(),
         Fence::Allowed { floor: 1, .. }
     ));
     sqlx::query("INSERT INTO test_fenced_effect VALUES (1)")
@@ -871,17 +1002,12 @@ async fn f_classificacao_e_ativacao_observam_a_ordem_do_commit_e_o_relogio_do_lo
         .await
         .unwrap();
     assert_eq!(protocol, 1);
-    let mut unlocked = fx.pool.begin().await.unwrap();
-    assert!(matches!(
-        svc.classify_fence_in_tx(&mut unlocked, 10, 120).await,
-        Err(WriteError::Rejected(Rejection::LockRequired))
-    ));
-    unlocked.rollback().await.unwrap();
     let mut locked = fx.tx().await;
     let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *locked)
         .await
         .unwrap();
+    let mut locked_guard = fx.portable.lock_cluster_guard(&mut locked).await.unwrap();
     let killed: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(backend)
         .fetch_one(&fx.pool)
@@ -889,7 +1015,7 @@ async fn f_classificacao_e_ativacao_observam_a_ordem_do_commit_e_o_relogio_do_lo
         .unwrap();
     assert!(killed);
     assert!(matches!(
-        svc.classify_fence_in_tx(&mut locked, 10, 120).await,
+        svc.classify_fence_in_tx(&mut locked_guard, 10, 120).await,
         Err(WriteError::Transient(_))
     ));
 }
@@ -1010,14 +1136,19 @@ async fn f_revogacao_serializa_frame_condicional_e_os_dois_puts() {
         }
 
         let mut authorized = fx.tx().await;
+        let mut guard = fx
+            .portable
+            .lock_cluster_guard(&mut authorized)
+            .await
+            .unwrap();
         fx.portable
-            .authorize_local_at(&mut authorized, now)
+            .authorize_local_at(&mut guard, now)
             .await
             .unwrap();
         assert_eq!(
             fx.portable
                 .authorize_peer_at(
-                    &mut authorized,
+                    &mut guard,
                     member.identity.node_id(),
                     &member.identity.public_key_hex(),
                     now
@@ -1039,7 +1170,7 @@ async fn f_revogacao_serializa_frame_condicional_e_os_dois_puts() {
         match operation {
             ProtectedOperation::Frame => assert_eq!(
                 service
-                    .select_published_in_tx(&mut authorized, None, now)
+                    .select_published_in_tx(&mut guard, None, now)
                     .await
                     .unwrap(),
                 Published::Frame {
@@ -1050,14 +1181,14 @@ async fn f_revogacao_serializa_frame_condicional_e_os_dois_puts() {
             ),
             ProtectedOperation::Conditional => assert_eq!(
                 service
-                    .select_published_in_tx(&mut authorized, Some(&hash), now)
+                    .select_published_in_tx(&mut guard, Some(&hash), now)
                     .await
                     .unwrap(),
                 Published::NotModified { version: 1, hash }
             ),
             ProtectedOperation::Publish => assert_eq!(
                 service
-                    .publish_in_tx(&mut authorized, &fx.portable, &v2, now)
+                    .publish_in_tx(&mut guard, &fx.portable, &v2, now)
                     .await
                     .unwrap(),
                 WriteOutcome::Accepted
@@ -1065,7 +1196,7 @@ async fn f_revogacao_serializa_frame_condicional_e_os_dois_puts() {
             ProtectedOperation::Resolve => assert_eq!(
                 service
                     .resolve_conflict_in_tx(
-                        &mut authorized,
+                        &mut guard,
                         &fx.portable,
                         &v2,
                         Role::Publisher,
@@ -1088,7 +1219,7 @@ async fn f_revogacao_serializa_frame_condicional_e_os_dois_puts() {
         assert!(matches!(
             fx.portable
                 .authorize_peer_at(
-                    &mut denied,
+                    &mut fx.portable.lock_cluster_guard(&mut denied).await.unwrap(),
                     member.identity.node_id(),
                     &member.identity.public_key_hex(),
                     now
@@ -1129,31 +1260,26 @@ async fn f_autoridade_propria_e_remota_usam_o_segundo_explicito_e_o_mesmo_lock()
             .unwrap()
     );
     let mut local_tx = member_pool.begin().await.unwrap();
-    assert!(matches!(
-        local
-            .authorize_local_at(&mut local_tx, member.lease.issued_at)
-            .await,
-        Err(PortableJoinError::Configuration(_))
-    ));
-    local.lock_cluster(&mut local_tx).await.unwrap();
+    let mut local_guard = local.lock_cluster_guard(&mut local_tx).await.unwrap();
     let expiry = member.lease.expires_at;
     assert_eq!(
         local
-            .authorize_local_at(&mut local_tx, expiry - 1)
+            .authorize_local_at(&mut local_guard, expiry - 1)
             .await
             .unwrap(),
         Some(expiry)
     );
     assert!(matches!(
-        local.authorize_local_at(&mut local_tx, expiry).await,
+        local.authorize_local_at(&mut local_guard, expiry).await,
         Err(PortableJoinError::Validity)
     ));
     local_tx.rollback().await.unwrap();
     let mut peer_tx = fx.tx().await;
+    let mut peer_guard = fx.portable.lock_cluster_guard(&mut peer_tx).await.unwrap();
     assert_eq!(
         fx.portable
             .authorize_peer_at(
-                &mut peer_tx,
+                &mut peer_guard,
                 member.identity.node_id(),
                 &member.identity.public_key_hex(),
                 expiry - 1
@@ -1165,7 +1291,7 @@ async fn f_autoridade_propria_e_remota_usam_o_segundo_explicito_e_o_mesmo_lock()
     assert!(matches!(
         fx.portable
             .authorize_peer_at(
-                &mut peer_tx,
+                &mut peer_guard,
                 member.identity.node_id(),
                 &member.identity.public_key_hex(),
                 expiry
@@ -1194,7 +1320,11 @@ async fn f_selecao_observa_publicacao_e_conflito_apenas_apos_commit() {
     let mut first = fx.tx().await;
     assert_eq!(
         service
-            .select_published_in_tx(&mut first, None, 100)
+            .select_published_in_tx(
+                &mut fx.portable.lock_cluster_guard(&mut first).await.unwrap(),
+                None,
+                100
+            )
             .await
             .unwrap(),
         Published::Unavailable
@@ -1218,7 +1348,11 @@ async fn f_selecao_observa_publicacao_e_conflito_apenas_apos_commit() {
     };
     wait_for_m1c_lock_waiter(&fx.pool).await;
     let prepared = service
-        .select_published_in_tx(&mut reader, None, 110)
+        .select_published_in_tx(
+            &mut fx.portable.lock_cluster_guard(&mut reader).await.unwrap(),
+            None,
+            110,
+        )
         .await
         .unwrap();
     reader.commit().await.unwrap();
@@ -1233,9 +1367,10 @@ async fn f_selecao_observa_publicacao_e_conflito_apenas_apos_commit() {
     );
 
     let mut witness = fx.tx().await;
+    let mut witness_guard = fx.portable.lock_cluster_guard(&mut witness).await.unwrap();
     assert_eq!(
         service
-            .select_published_in_tx(&mut witness, Some(&hash1), 110)
+            .select_published_in_tx(&mut witness_guard, Some(&hash1), 110)
             .await
             .unwrap(),
         Published::Frame {
@@ -1246,7 +1381,7 @@ async fn f_selecao_observa_publicacao_e_conflito_apenas_apos_commit() {
     );
     assert_eq!(
         service
-            .publish_in_tx(&mut witness, &fx.portable, &alternative, 110)
+            .publish_in_tx(&mut witness_guard, &fx.portable, &alternative, 110)
             .await
             .unwrap(),
         WriteOutcome::ConflictRecorded
@@ -1256,7 +1391,11 @@ async fn f_selecao_observa_publicacao_e_conflito_apenas_apos_commit() {
         tokio::spawn(async move {
             let mut tx = fx.tx().await;
             let prepared = service
-                .select_published_in_tx(&mut tx, Some(&hash2), 110)
+                .select_published_in_tx(
+                    &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+                    Some(&hash2),
+                    110,
+                )
                 .await
                 .unwrap();
             tx.commit().await.unwrap();
@@ -1284,9 +1423,13 @@ async fn n_conflito_com_evidencia_incompativel_precede_ausencia_de_publicacao() 
     );
     let mut tx = fx.tx().await;
     assert_eq!(
-        svc.select_published_in_tx(&mut tx, None, 100)
-            .await
-            .unwrap(),
+        svc.select_published_in_tx(
+            &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+            None,
+            100
+        )
+        .await
+        .unwrap(),
         Published::Unavailable
     );
     tx.commit().await.unwrap();
@@ -1297,9 +1440,13 @@ async fn n_conflito_com_evidencia_incompativel_precede_ausencia_de_publicacao() 
     let svc = fx.enabled(policy).await;
     let mut tx = fx.tx().await;
     assert_eq!(
-        svc.select_published_in_tx(&mut tx, None, 140)
-            .await
-            .unwrap(),
+        svc.select_published_in_tx(
+            &mut fx.portable.lock_cluster_guard(&mut tx).await.unwrap(),
+            None,
+            140
+        )
+        .await
+        .unwrap(),
         Published::BlockedConflict
     );
     tx.commit().await.unwrap();
@@ -1307,4 +1454,63 @@ async fn n_conflito_com_evidencia_incompativel_precede_ausencia_de_publicacao() 
         fx.fence(&svc, 10, 140).await,
         Fence::Blocked(Block::Conflict)
     );
+}
+
+#[tokio::test]
+async fn f_lock_de_sessao_liberado_nao_remove_o_lock_do_guard() {
+    let Some(fx) = Fixture::new("session_guard").await else {
+        return;
+    };
+    let fx = Arc::new(fx);
+    let mut tx = fx
+        .pool
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .await
+        .unwrap();
+    let key = format!("godmesh.federation.portable.v2:{}", fx.portable.cluster());
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&key)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    {
+        let mut guard = fx.portable.lock_cluster_guard(&mut tx).await.unwrap();
+        let released: bool =
+            sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+                .bind(&key)
+                .fetch_one(guard.connection())
+                .await
+                .unwrap();
+        assert!(released);
+        assert_eq!(
+            fx.portable
+                .authorize_local_at(&mut guard, 100)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+    let waiter = {
+        let fx = fx.clone();
+        tokio::spawn(async move {
+            let mut tx = fx.pool.begin().await.unwrap();
+            let _guard = fx.portable.lock_cluster_guard(&mut tx).await.unwrap();
+            tx.commit().await.unwrap();
+        })
+    };
+    wait_for_m1c_lock_waiter(&fx.pool).await;
+    assert!(!waiter.is_finished());
+    tx.commit().await.unwrap();
+    waiter.await.unwrap();
+
+    let mut snapshot = fx
+        .pool
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        .await
+        .unwrap();
+    assert!(matches!(
+        fx.portable.lock_cluster_guard(&mut snapshot).await,
+        Err(godmesh_server::portable_join::PortableJoinError::Configuration(_))
+    ));
+    snapshot.rollback().await.unwrap();
 }

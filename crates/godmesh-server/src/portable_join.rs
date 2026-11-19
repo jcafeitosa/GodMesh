@@ -223,31 +223,26 @@ fn cluster_lock_name(cluster: &str) -> String {
     format!("godmesh.federation.portable.v2:{cluster}")
 }
 
-/// Confere a proteção adquirida pelo chamador antes de amostrar seu relógio.
-pub(crate) async fn require_cluster_lock(
-    tx: &mut Transaction<'_, Postgres>,
-    cluster: &str,
-) -> Result<(), PortableJoinError> {
-    // pg_locks expõe a chave bigint nos dois OIDs de 32 bits (objsubid=1).
-    let held: bool = sqlx::query_scalar(
-        "SELECT current_setting('transaction_isolation') = 'read committed'
-            AND EXISTS (
-                SELECT 1 FROM pg_locks, hashtextextended($1, 0) AS key
-                 WHERE locktype = 'advisory' AND mode = 'ExclusiveLock' AND granted
-                   AND pid = pg_backend_pid() AND objsubid = 1
-                   AND classid::bigint = ((key >> 32) & 4294967295)
-                   AND objid::bigint = (key & 4294967295)
-            )",
-    )
-    .bind(cluster_lock_name(cluster))
-    .fetch_one(&mut **tx)
-    .await?;
-    if !held {
-        return Err(PortableJoinError::Configuration(
-            "a transação exige READ COMMITTED e o lock do cluster",
-        ));
+/// Evidência de que a transação mantém o lock M1C para este cluster.
+pub struct ClusterGuard<'tx, 'db> {
+    tx: &'tx mut Transaction<'db, Postgres>,
+    cluster: String,
+}
+
+impl<'db> ClusterGuard<'_, 'db> {
+    pub fn cluster(&self) -> &str {
+        &self.cluster
     }
-    Ok(())
+
+    /// Executa SQL do efetor na mesma transação. Reserve comandos de controle
+    /// transacional para o handle original, depois de liberar o empréstimo.
+    pub fn connection(&mut self) -> &mut sqlx::PgConnection {
+        self.tx
+    }
+
+    pub(crate) fn transaction(&mut self) -> &mut Transaction<'db, Postgres> {
+        self.tx
+    }
 }
 
 impl PortableJoin {
@@ -334,6 +329,18 @@ impl PortableJoin {
         Ok(())
     }
 
+    /// Adquire o lock transacional em READ COMMITTED e empresta a transação.
+    pub async fn lock_cluster_guard<'tx, 'db>(
+        &self,
+        tx: &'tx mut Transaction<'db, Postgres>,
+    ) -> Result<ClusterGuard<'tx, 'db>, PortableJoinError> {
+        self.lock_cluster(tx).await?;
+        Ok(ClusterGuard {
+            tx,
+            cluster: self.cluster().to_owned(),
+        })
+    }
+
     async fn begin(&self) -> Result<Transaction<'static, Postgres>, PortableJoinError> {
         let mut tx = self
             .pool
@@ -347,17 +354,29 @@ impl PortableJoin {
         &self,
         tx: &mut Transaction<'_, Postgres>,
     ) -> Result<Option<i64>, PortableJoinError> {
-        self.lock_cluster(tx).await?;
-        self.authorize_local_at(tx, now_unix()).await
+        let mut guard = self.lock_cluster_guard(tx).await?;
+        self.authorize_local_at(&mut guard, now_unix()).await
     }
 
     /// Autoridade local no segundo amostrado sob o lock do cluster pelo chamador.
+    ///
+    /// Uma transação crua não serve de evidência, ainda que a sessão possua lock.
+    /// ```compile_fail
+    /// # use godmesh_server::portable_join::PortableJoin;
+    /// # use sqlx::{Postgres, Transaction};
+    /// # async fn run(portable: &PortableJoin, tx: &mut Transaction<'_, Postgres>) {
+    /// portable.authorize_local_at(tx, 0).await.unwrap();
+    /// # }
+    /// ```
     pub async fn authorize_local_at(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        guard: &mut ClusterGuard<'_, '_>,
         now: i64,
     ) -> Result<Option<i64>, PortableJoinError> {
-        require_cluster_lock(tx, self.cluster()).await?;
+        if guard.cluster() != self.cluster() {
+            return Err(PortableJoinError::Configuration("guard de outro cluster"));
+        }
+        let tx = guard.transaction();
         let id = self.identity.node_id();
         let key = self.identity.public_key_hex();
         if self.config.pin(id).is_some_and(|pin| pin.public_key == key) {
@@ -380,20 +399,23 @@ impl PortableJoin {
         node_id: &str,
         public_key: &str,
     ) -> Result<Option<i64>, PortableJoinError> {
-        self.lock_cluster(tx).await?;
-        self.authorize_peer_at(tx, node_id, public_key, now_unix())
+        let mut guard = self.lock_cluster_guard(tx).await?;
+        self.authorize_peer_at(&mut guard, node_id, public_key, now_unix())
             .await
     }
 
     /// Autoridade do par no segundo amostrado sob o lock do cluster pelo chamador.
     pub async fn authorize_peer_at(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        guard: &mut ClusterGuard<'_, '_>,
         node_id: &str,
         public_key: &str,
         now: i64,
     ) -> Result<Option<i64>, PortableJoinError> {
-        require_cluster_lock(tx, self.cluster()).await?;
+        if guard.cluster() != self.cluster() {
+            return Err(PortableJoinError::Configuration("guard de outro cluster"));
+        }
+        let tx = guard.transaction();
         let proof = self
             .load_import(tx, node_id)
             .await?

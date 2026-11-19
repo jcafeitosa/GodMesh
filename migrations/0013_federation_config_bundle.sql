@@ -52,7 +52,7 @@ CREATE TABLE federation_config_audit (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     hash text NOT NULL REFERENCES federation_config_frame,
     happened_at bigint NOT NULL,
-    transition text NOT NULL CHECK (transition IN ('accepted', 'incompatible', 'conflict', 'resolved', 'activated')),
+    transition text NOT NULL CHECK (transition IN ('accepted', 'incompatible', 'conflict', 'resolved', 'recovery_required', 'activated')),
     actor text,
     CHECK ((transition = 'resolved') = (actor IS NOT NULL)),
     CHECK (actor IS NULL OR btrim(actor) <> '')
