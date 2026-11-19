@@ -11,6 +11,8 @@ Preferir o máximo de bibliotecas nativas Rust, sujeito a manutenção, seguran�
 
 Conforme ordem posterior transmitida por Ada, a autoria de todas as SPECs avança em paralelo à conclusão do planejamento integral, correções e decisões bloqueadoras. Conclusão do planejamento e aprovação de todas as SPECs, com as revisões exigidas, precedem a implementação; rascunhos locais não antecipam esse gate. Os gates de execução nos programas abaixo são de implementação/validação futura, não exigência de produto passando para encerrar planejamento. Todos os resultados observados de produto continuam NOT_EXECUTED até execução autorizada e evidência.
 
+Para a federação, a [ADR-075](decisoes.md#adr-075--aprovação-por-fatia-da-federação) estabelece revisão e aprovação por fatia. Os resultados observados ficam vinculados à versão e ao ambiente de cada ensaio.
+
 ## Programa A — Linguagem do sistema, identidade e contratos
 GMP v1, envelope de eventos, autenticação de usuário/nó/dispositivo, tenants, permissões, observabilidade, Rust workspace, OpenAPI/Protobuf, CI e cadeia de releases assinadas.
 **Gate:** contrato de interoperabilidade versionado, autenticação, migrações, teste multi-tenant e threat model revisados.
@@ -22,6 +24,17 @@ PTT/floor control, Opus, WebRTC para web, media edge nativo, prioridade/ACL, sal
 ## Programa C — Federação de nós e operação regional
 Identidade persistente, IPv6-first/IPv4, libp2p QUIC/TCP, bootstrap autorizado, manifests, readiness, balanceamento regional, controle distribuído e leases.
 **Gate:** diversos servidores na mesma região operando active-active, sem ingresso anônimo nem split brain em recursos exclusivos.
+
+### Sequência de entrega da malha
+
+1. **Ingresso M1C.** Emitir e consumir prova de ingresso v2 verificável a partir de genesis, com histórico durável e revogação assinada. Provar A → B → C pela API, com bancos e identidades próprios. [ADR-076](decisoes.md#adr-076--prova-portátil-e-revogação-de-ingresso)
+2. **Transporte M2.** Integrar a cadeia ao registro de pares, ao QUIC/mTLS e ao ingresso de eventos. Verificar que expiração, revogação e perda de conectividade degradam os estados e que recuperação exige evidência nova.
+3. **Configuração M3.** Distribuir bundles assinados por escopo, com defesa contra rollback, quórum declarado onde exigido, ativação atômica e recuperação documentada. [ADR-072](decisoes.md#adr-072--adoção-da-rede-alvo-de-cinco-planos)
+4. **Replicação M4.** Exercitar eventos e snapshots autorizados entre bancos independentes, retomada por prefixo, revogação de escopos e ausência de posição duplicada após partição.
+5. **Borda M5.** Especificar e verificar relay autorizado, alternativa de conectividade e comportamento de nós que perdem o caminho direto.
+6. **Aceite ponta a ponta.** Executar em pelo menos três hosts Linux independentes. Registrar identidade, versão, topologia, autorização, evidências do protocolo e resultados de queda, revogação, retomada e bloqueio de cópias fora do escopo.
+
+O ensaio inicial de QUIC/mTLS em três processos locais já tem [evidência](../09-equipe/evidencias/2026-11-18-integracao-m1b.md#aceite-local-da-v13). A prova de ingresso portátil, a replicação e o ensaio em hosts independentes têm aceites próprios.
 
 ## Programa D — Dados, sincronização e localização
 PostgreSQL/PostGIS, sharding/autoridade por tenant, outbox/inbox, snapshots assinados, histórico, observações, dispositivos, retenção e consentimento.
