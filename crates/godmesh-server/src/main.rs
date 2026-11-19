@@ -87,11 +87,17 @@ use godmesh_server::config_bundle::{
 use godmesh_server::config_https::{self, HttpsClient};
 use godmesh_server::config_operational::{ConfigPlane, ConfigPlaneConfig, limit_statement_time};
 use godmesh_server::http::HostTelemetry;
-use godmesh_server::portable_join::{PortableJoin, PortableJoinConfig, PortableJoinError};
+use godmesh_server::portable_join::{PortableJoin, PortableJoinConfig};
 use godmesh_server::publisher::{OutboxConfig, Publisher};
+use godmesh_server::replica_operational::{
+    EffectError, ReplicaConfig, ReplicaService, with_sql_deadline,
+};
 use godmesh_server::{federation, migrate, runtime};
 use godmesh_sync::pg_outbox::{PgOutbox, PgSink};
 use sqlx::postgres::PgPoolOptions;
+
+mod replica_runtime;
+use replica_runtime::ReplicaRuntime;
 
 /// Endereço padrão aceito **apenas** em ambiente de desenvolvimento: só loopback.
 /// Expor a interface exige configuração deliberada.
@@ -182,6 +188,7 @@ enum Mode {
         decisions: Arc<godmesh_server::federation::DecisionConfig>,
         portable: Option<Box<PortableJoinConfig>>,
         configuration: Option<Box<ConfigPlaneConfig>>,
+        replica: Option<Box<ReplicaConfig>>,
     },
 }
 
@@ -234,6 +241,9 @@ impl Config {
                 let configuration = ConfigPlaneConfig::from_env()
                     .map_err(|error| error.to_string())?
                     .map(Box::new);
+                let replica = ReplicaConfig::from_env()
+                    .map_err(|error| error.to_string())?
+                    .map(Box::new);
                 // O portão de abuso valida o ambiente na subida: tetos
                 // inválidos derrubam o processo (EX_CONFIG) em vez de virar
                 // default silencioso servindo tráfego.
@@ -249,6 +259,7 @@ impl Config {
                     decisions,
                     portable,
                     configuration,
+                    replica,
                 }
             }
         };
@@ -410,27 +421,52 @@ impl LinkAuthorizer for PortableLinkAuthorizer {
         local: &'a LinkIdentity,
         remote: &'a LinkIdentity,
     ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
-        Box::pin(async move {
+        self.authorize_in_tx(local, remote, None)
+    }
+
+    fn authorize_until<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+        deadline: tokio::time::Instant,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
+        self.authorize_in_tx(local, remote, Some(deadline))
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.clone()
+    }
+}
+
+impl PortableLinkAuthorizer {
+    fn authorize_in_tx<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
+        let operation = async move {
             if self.portable.cluster() != local.cluster || local.cluster != remote.cluster {
                 return Err(LinkAuthorizationError::Denied);
             }
+            let map = |error| link_authorization_error(error, deadline.is_some());
             let mut transaction = self
                 .portable
                 .pool()
                 .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
                 .await
-                .map_err(|_| LinkAuthorizationError::Unavailable)?;
+                .map_err(|error| map(error.into()))?;
             let mut guard = self
                 .portable
                 .lock_cluster_guard(&mut transaction)
                 .await
-                .map_err(link_authorization_error)?;
+                .map_err(|error| map(error.into()))?;
             let now = SystemClock.now_unix();
             let local_expiry = self
                 .portable
                 .authorize_local_at(&mut guard, now)
                 .await
-                .map_err(link_authorization_error)?;
+                .map_err(|error| map(error.into()))?;
             let remote_expiry = self
                 .portable
                 .authorize_peer_at(
@@ -440,13 +476,16 @@ impl LinkAuthorizer for PortableLinkAuthorizer {
                     now,
                 )
                 .await
-                .map_err(link_authorization_error)?;
+                .map_err(|error| map(error.into()))?;
             // O transporte validou o ALPN godmesh/1 antes deste callback.
             let config_expiry = if let Some(configuration) = &self.configuration {
                 match configuration
                     .classify_fence_in_tx(&mut guard, 1, now)
                     .await
-                    .map_err(|_| LinkAuthorizationError::Unavailable)?
+                    .map_err(|error| match EffectError::from(error) {
+                        EffectError::Timeout if deadline.is_some() => LinkAuthorizationError::Timeout,
+                        _ => LinkAuthorizationError::Unavailable,
+                    })?
                 {
                     Fence::Allowed { recheck_at, .. } => Some(recheck_at),
                     Fence::Blocked(_) | Fence::Disabled => {
@@ -464,18 +503,21 @@ impl LinkAuthorizer for PortableLinkAuthorizer {
                 .transpose()?;
             // O crate aplica a decisão com a transação ainda protegendo o cluster.
             Ok(LinkPermit::new(Box::new(transaction), expires_at))
+        };
+        Box::pin(async move {
+            match deadline {
+                Some(deadline) => with_sql_deadline(deadline, operation).await,
+                None => operation.await,
+            }
         })
-    }
-
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.changes.clone()
     }
 }
 
-fn link_authorization_error(error: PortableJoinError) -> LinkAuthorizationError {
+fn link_authorization_error(error: EffectError, with_deadline: bool) -> LinkAuthorizationError {
     match error {
-        PortableJoinError::Storage(_) => LinkAuthorizationError::Unavailable,
-        _ => LinkAuthorizationError::Denied,
+        EffectError::Timeout if with_deadline => LinkAuthorizationError::Timeout,
+        EffectError::M1c(_) => LinkAuthorizationError::Denied,
+        _ => LinkAuthorizationError::Unavailable,
     }
 }
 
@@ -613,6 +655,7 @@ async fn run(config: Config) -> Result<(), String> {
         decisions,
         portable,
         configuration,
+        replica,
     } = config.mode
     else {
         pool.close().await;
@@ -639,10 +682,29 @@ async fn run(config: Config) -> Result<(), String> {
     let preflight = BundleService::preflight(&pool, portable.as_deref(), policy)
         .await
         .map_err(|error| format!("preflight da configuração M3: {error}"))?;
-    let config_plane = match (preflight, configuration, portable.as_ref()) {
-        (Preflight::Disabled, None, _) => None,
+    let (config_plane, replica_runtime) = match (preflight, configuration, portable.as_ref()) {
+        (Preflight::Disabled, None, _) if replica.is_some() => {
+            return Err("m4_preflight_mismatch: a réplica exige M1C e M3 configuradas".to_owned());
+        }
+        (Preflight::Disabled, None, _) => (None, None),
         (Preflight::Enabled(service), Some(config), Some(portable)) => {
             let service = Arc::new(service);
+            let replica_runtime = if let Some(replica) = replica {
+                if federation_listener.is_none() {
+                    return Err("m4_preflight_mismatch: a réplica exige o listener QUIC".to_owned());
+                }
+                let replica = ReplicaService::preflight(
+                    *replica,
+                    Arc::clone(portable),
+                    Arc::clone(&service),
+                    &identity,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Some(Arc::new(ReplicaRuntime::new(replica)))
+            } else {
+                None
+            };
             // Nós novos precisam do plano de controle para ingressar; autoridade
             // ausente bloqueia seus efetores, mas permite o bootstrap M1C.
             match observe_configuration(portable, &service, &SystemClock, None).await {
@@ -669,7 +731,7 @@ async fn run(config: Config) -> Result<(), String> {
             let tls_listener = tokio::net::TcpListener::bind(https_addr)
                 .await
                 .map_err(|error| format!("listener HTTPS de configuração: {error}"))?;
-            Some((plane, tls_listener, client, limits, pins, interval))
+            (Some((plane, tls_listener, client, limits, pins, interval)), replica_runtime)
         }
         _ => return Err("estado de preflight incoerente para a configuração M3".to_owned()),
     };
@@ -742,13 +804,27 @@ async fn run(config: Config) -> Result<(), String> {
                         .unwrap_or_else(|| service.trust_changes()),
                 }) as Arc<dyn LinkAuthorizer>
             });
-            let node = FederationNode::bind_with_authorizer(
-                Arc::clone(&identity),
-                listener_config,
-                Arc::clone(&registry),
-                listener_bind,
-                authorizer,
-            )
+            let node = match (replica_runtime, authorizer) {
+                (Some(handler), Some(authorizer)) => FederationNode::bind_with_session_handler(
+                    Arc::clone(&identity),
+                    listener_config,
+                    Arc::clone(&registry),
+                    listener_bind,
+                    authorizer,
+                    handler.session_limits(),
+                    handler,
+                ),
+                (Some(_), None) => {
+                    return Err("m4_preflight_mismatch: a réplica exige autorização portátil".to_owned());
+                }
+                (None, authorizer) => FederationNode::bind_with_authorizer(
+                    Arc::clone(&identity),
+                    listener_config,
+                    Arc::clone(&registry),
+                    listener_bind,
+                    authorizer,
+                ),
+            }
             .map_err(|e| format!("listener de federação não abriu: {e}"))?;
             let addr = node
                 .local_addr()

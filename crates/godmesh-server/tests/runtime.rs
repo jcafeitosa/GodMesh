@@ -887,3 +887,88 @@ async fn m4a1_aplica_0014_sem_converter_posicao_e_checkpoint_legados() {
     assert_eq!(counts, (0, 0));
     std::fs::remove_dir_all(prior).unwrap();
 }
+
+#[tokio::test]
+async fn m4a2_boot_recusa_configuracao_parcial_ou_sem_m3_antes_dos_listeners() {
+    let Some(base) = base_url() else {
+        eprintln!("SKIP: DATABASE_URL ausente");
+        return;
+    };
+    let _guard = sole_lock().await;
+    recreate_sa(&admin_pool(&base).await).await;
+    let origin = godmesh_federation::NodeIdentity::generate_in_memory().unwrap();
+    let origin_pin = format!("{}:{}", origin.node_id(), origin.public_key_hex());
+    let complete = [
+        ("CLUSTER", "m4a-test"),
+        ("TENANT_ID", "tenant-sintetico"),
+        ("STREAM_ID", "m4a.metadata.sintetica"),
+        ("PARTITION", "0"),
+        ("AUTHORITY_EPOCH", "1"),
+        ("ORIGIN_PIN", origin_pin.as_str()),
+        ("MAX_FRAME_BYTES", "8192"),
+        ("MAX_ENVELOPE_BYTES", "4096"),
+        ("MAX_EVENTS", "10"),
+        ("MAX_STREAMS_PER_CONNECTION", "2"),
+        ("MAX_ATTEMPTS", "2"),
+        ("ATTEMPT_TIMEOUT_MS", "1000"),
+        ("RETRY_INTERVAL_MS", "50"),
+        ("ACL_RECHECK_INTERVAL_MS", "100"),
+        ("PULL_INTERVAL_MS", "100"),
+    ];
+    let max_streams = tokio::sync::Semaphore::MAX_PERMITS;
+    for (fields, stream_cap, code, diagnosis) in [
+        (&[][..], None, 78, "m4_config_invalid"),
+        (
+            complete.as_slice(),
+            Some(max_streams + 1),
+            78,
+            "m4_config_invalid",
+        ),
+        (
+            complete.as_slice(),
+            Some(max_streams),
+            1,
+            "m4_preflight_mismatch",
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind = listener.local_addr().unwrap();
+        drop(listener);
+        let mut cmd = Command::new(binario());
+        cmd.env_clear()
+            .env("DATABASE_URL", sa_url(&base))
+            .env("GODMESH_MIGRATIONS_DIR", migrations_dir())
+            .env("GODMESH_GRANTS", "{\"grants\":[]}")
+            .env("GODMESH_NODE_KEY", caminho_chave_no())
+            .env("GODMESH_ENV", "dev")
+            .env("BIND_ADDR", bind.to_string())
+            .env("GODMESH_FEDERATION_M4_ROLE", "receiver")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (name, value) in fields {
+            cmd.env(format!("GODMESH_FEDERATION_M4_{name}"), value);
+        }
+        if let Some(cap) = stream_cap {
+            cmd.env("GODMESH_FEDERATION_M4_MAX_STREAMS_PER_CONNECTION", cap.to_string());
+        }
+        let mut process = cmd.spawn().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let exposed_http = loop {
+            if TcpStream::connect_timeout(&bind, Duration::from_millis(25)).is_ok() {
+                break true;
+            }
+            if process.try_wait().unwrap().is_some() || std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        if process.try_wait().unwrap().is_none() {
+            process.kill().unwrap();
+        }
+        let result = process.wait_with_output().unwrap();
+        let stderr = stderr_of(&result);
+        assert!(!exposed_http, "HTTP abriu antes do gate M4: {stderr}");
+        assert_eq!(result.status.code(), Some(code), "{stderr}");
+        assert!(stderr.contains(diagnosis), "{stderr}");
+    }
+}
