@@ -577,7 +577,7 @@ async fn run_operational(shared: NodeShared, link: OperationalLink) {
         biased;
         rejection = link.invalidated() => Err(rejection),
         _ = connection.closed() => Ok(()),
-        result = send_heartbeats(connection, shared.config.heartbeat_interval, Some(&link)) => result,
+        result = send_heartbeats(connection, shared.config.heartbeat_interval, Some((&link, &shared.links))) => result,
         result = receive_heartbeats(connection, node_id, &shared, Some(&link)) => result,
     };
     if let Err(rejection) = result {
@@ -654,7 +654,7 @@ fn spawn_heartbeat(shared: &NodeShared, connection: &Connection, node_id: String
 async fn send_heartbeats(
     connection: &Connection,
     interval: Duration,
-    operational: Option<&OperationalLink>,
+    operational: Option<(&OperationalLink, &PeerLinks)>,
 ) -> Result<(), Rejection> {
     let mut ticker = tokio::time::interval(interval);
     let mut counter: u64 = 0;
@@ -663,8 +663,11 @@ async fn send_heartbeats(
             _ = ticker.tick() => {}
             _ = connection.closed() => return Ok(()),
         }
-        if let Some(link) = operational {
-            drop(link.authorize().await?);
+        if let Some((link, links)) = operational {
+            let _permit = link.authorize().await?;
+            if !links.operational_is_ready(&link.remote.node_id, connection) {
+                return Ok(());
+            }
         }
         counter = counter.wrapping_add(1);
         let mut frame = [0u8; HEARTBEAT_FRAME_LEN];
@@ -704,9 +707,10 @@ async fn receive_heartbeats(
         if let Some(link) = operational {
             let _permit = link.authorize().await?;
             let seen_at = now_unix();
-            if shared.links.beat_operational(node_id, connection, seen_at) {
-                shared.registry.touch(node_id, seen_at);
+            if !shared.links.beat_operational(node_id, connection, seen_at) {
+                return Ok(());
             }
+            shared.registry.touch(node_id, seen_at);
             continue;
         }
         let seen_at = now_unix();

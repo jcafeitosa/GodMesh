@@ -107,8 +107,17 @@ impl Entry {
             .is_none_or(|validity| validity.is_current(now))
     }
 
-    fn is_ready(&self, now: Instant) -> bool {
-        self.state == LinkState::Ready && self.is_current(now)
+    fn is_ready(&self, now: Instant, freshness: Duration) -> bool {
+        self.state == LinkState::Ready
+            && self.is_current(now)
+            && (self.validity.is_none()
+                || now.saturating_duration_since(self.last_beat) <= freshness)
+    }
+
+    fn belongs_to(&self, connection: &Connection) -> bool {
+        self.validity
+            .as_ref()
+            .is_some_and(|validity| validity.connection.stable_id() == connection.stable_id())
     }
 }
 
@@ -183,6 +192,16 @@ impl PeerLinks {
         true
     }
 
+    pub(crate) fn operational_is_ready(&self, node_id: &str, connection: &Connection) -> bool {
+        let guard = self.lock();
+        let now = Instant::now();
+        guard.get(node_id).is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.belongs_to(connection) && entry.is_ready(now, self.freshness))
+        })
+    }
+
     pub(crate) fn beat_operational(
         &self,
         node_id: &str,
@@ -192,12 +211,9 @@ impl PeerLinks {
         let mut guard = self.lock();
         let now = Instant::now();
         if let Some(entry) = guard.get_mut(node_id).and_then(|entries| {
-            entries.iter_mut().find(|entry| {
-                entry.validity.as_ref().is_some_and(|validity| {
-                    validity.connection.stable_id() == connection.stable_id()
-                        && validity.is_current(now)
-                })
-            })
+            entries
+                .iter_mut()
+                .find(|entry| entry.belongs_to(connection) && entry.is_ready(now, self.freshness))
         }) {
             entry.last_seen_at = Some(seen_at);
             entry.last_beat = now;
@@ -209,11 +225,9 @@ impl PeerLinks {
     pub(crate) fn close_operational(&self, node_id: &str, connection: &Connection) {
         let mut guard = self.lock();
         if let Some(entries) = guard.get_mut(node_id)
-            && let Some(index) = entries.iter().position(|entry| {
-                entry.validity.as_ref().is_some_and(|validity| {
-                    validity.connection.stable_id() == connection.stable_id()
-                })
-            })
+            && let Some(index) = entries
+                .iter()
+                .position(|entry| entry.belongs_to(connection))
         {
             if entries.len() > 1 {
                 entries.remove(index);
@@ -285,7 +299,8 @@ impl PeerLinks {
         }
     }
 
-    /// Expira enlaces silenciosos. Devolve os `node_id` que passaram a `unknown`
+    /// Expira enlaces silenciosos e fecha as conexões operacionais afetadas.
+    /// Devolve os `node_id` que passaram a `unknown`
     /// (para log/telemetria; sem conteúdo de dados).
     pub fn expire(&self, now: Instant) -> Vec<String> {
         let mut expired = Vec::new();
@@ -298,10 +313,19 @@ impl PeerLinks {
                 {
                     entry.state = LinkState::Unknown;
                     entry.rtt_ms = None;
+                    if let Some(validity) = &entry.validity {
+                        validity
+                            .connection
+                            .close(0u32.into(), b"heartbeat expirado");
+                    }
                     changed = true;
                 }
             }
-            if changed && !entries.iter().any(|entry| entry.is_ready(now)) {
+            if changed
+                && !entries
+                    .iter()
+                    .any(|entry| entry.is_ready(now, self.freshness))
+            {
                 expired.push(node_id.clone());
             }
         }
@@ -317,9 +341,10 @@ impl PeerLinks {
         let entry = entries
             .iter()
             .rev()
-            .find(|entry| entry.is_ready(now))
+            .find(|entry| entry.is_ready(now, self.freshness))
             .or_else(|| entries.last())?;
-        let invalid = !entry.is_current(now);
+        let invalid = !entry.is_current(now)
+            || (entry.state == LinkState::Ready && !entry.is_ready(now, self.freshness));
         Some(LinkSnapshot {
             state: if invalid {
                 LinkState::Unknown

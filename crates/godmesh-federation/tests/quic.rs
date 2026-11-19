@@ -760,3 +760,154 @@ async fn fechamento_de_uma_conexao_preserva_outro_enlace_do_mesmo_par() {
     wait_for_state(&managed.links(), &peer.id, LinkState::Unknown).await;
     managed.node.shutdown();
 }
+
+async fn send_test_heartbeat(connection: &Connection, counter: u64) {
+    let mut send = connection.open_uni().await.unwrap();
+    let mut frame = [0; 12];
+    frame[..4].copy_from_slice(b"GMH1");
+    frame[4..].copy_from_slice(&counter.to_be_bytes());
+    send.write_all(&frame).await.unwrap();
+    send.finish().unwrap();
+}
+
+#[tokio::test]
+async fn silencio_fecha_apenas_o_enlace_operacional_afetado() {
+    let auth = TestAuthorizer::new(Ok(None));
+    let managed = node_with_authorizer(
+        config().with_heartbeat(Duration::from_millis(100), 8),
+        Some(auth),
+    );
+    let peer = RawPeer::new(config());
+    managed.registry.insert(peer.record(TrustState::Authorized));
+    peer.trust(&managed);
+
+    let live = peer.connect(managed.addr()).await;
+    handshake::initiate(&live, &peer.identity, &peer.config, &peer.registry)
+        .await
+        .unwrap();
+    let keep_alive = tokio::spawn({
+        let live = live.clone();
+        async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(40));
+            let mut counter = 0u64;
+            loop {
+                ticker.tick().await;
+                counter = counter.wrapping_add(1);
+                send_test_heartbeat(&live, counter).await;
+            }
+        }
+    });
+
+    let silent = peer.connect(managed.addr()).await;
+    let mut silent_config = peer.config.clone();
+    silent_config.software_version = "0.2.0".into();
+    handshake::initiate(&silent, &peer.identity, &silent_config, &peer.registry)
+        .await
+        .unwrap();
+    let mut initial = tokio::time::timeout(Duration::from_secs(2), silent.accept_uni())
+        .await
+        .unwrap()
+        .unwrap();
+    initial.read_to_end(12).await.unwrap();
+    let links = managed.links();
+    assert_eq!(
+        links
+            .snapshot_or_never_seen(&peer.id)
+            .peer_version
+            .as_deref(),
+        Some("0.2.0")
+    );
+
+    // Ambos os enlaces estão autorizados sem lease. Apenas o segundo ficou mudo.
+    assert!(
+        matches!(
+            tokio::time::timeout(Duration::from_secs(3), silent.closed()).await,
+            Ok(ConnectionError::ApplicationClosed(_))
+        ),
+        "o silêncio precisa fechar a conexão QUIC"
+    );
+    assert!(
+        silent.open_uni().await.is_err(),
+        "sessão expirada não aceita mais streams"
+    );
+    assert!(live.close_reason().is_none());
+    let snapshot = links.snapshot_or_never_seen(&peer.id);
+    assert_eq!(snapshot.state, LinkState::Ready);
+    assert_eq!(snapshot.peer_version.as_deref(), Some(VERSION));
+
+    keep_alive.abort();
+    live.close(0u32.into(), b"fim do enlace de controle");
+    wait_for_state(&links, &peer.id, LinkState::Unknown).await;
+    let fresh = peer.connect(managed.addr()).await;
+    handshake::initiate(&fresh, &peer.identity, &peer.config, &peer.registry)
+        .await
+        .unwrap();
+    wait_for_state(&links, &peer.id, LinkState::Ready).await;
+    managed.node.shutdown();
+}
+
+#[tokio::test]
+async fn heartbeat_atrasado_entre_varreduras_nao_renova_evidencia() {
+    let interval = Duration::from_secs(2);
+    let managed = node_with_authorizer(
+        config().with_heartbeat(interval, 1),
+        Some(TestAuthorizer::new(Ok(None))),
+    );
+    let peer = RawPeer::new(config());
+    managed.registry.insert(peer.record(TrustState::Authorized));
+    peer.trust(&managed);
+    let connection = peer.connect(managed.addr()).await;
+    handshake::initiate(&connection, &peer.identity, &peer.config, &peer.registry)
+        .await
+        .unwrap();
+    let mut initial = tokio::time::timeout(Duration::from_secs(2), connection.accept_uni())
+        .await
+        .unwrap()
+        .unwrap();
+    initial.read_to_end(12).await.unwrap();
+
+    // Desloque o último heartbeat em relação ao monitor e ao emissor local.
+    sleep(Duration::from_millis(400)).await;
+    managed.registry.touch(&peer.id, 1);
+    send_test_heartbeat(&connection, 1).await;
+    tokio::time::timeout(Duration::from_millis(400), async {
+        while managed.registry.record(&peer.id).unwrap().last_seen_at == 1 {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("primeiro heartbeat aceito");
+    let links = managed.links();
+    let last_seen = links.snapshot_or_never_seen(&peer.id).last_seen_at.unwrap();
+    assert_eq!(
+        managed.registry.record(&peer.id).unwrap().last_seen_at,
+        last_seen
+    );
+
+    sleep(interval + Duration::from_millis(150)).await;
+    assert!(
+        connection.close_reason().is_none(),
+        "antes da próxima varredura"
+    );
+    assert_eq!(
+        links.snapshot_or_never_seen(&peer.id).state,
+        LinkState::Unknown
+    );
+    send_test_heartbeat(&connection, 2).await;
+    assert!(
+        matches!(
+            tokio::time::timeout(Duration::from_millis(600), connection.closed()).await,
+            Ok(ConnectionError::ApplicationClosed(_))
+        ),
+        "o heartbeat atrasado deve encerrar a sessão"
+    );
+    assert_eq!(
+        links.snapshot_or_never_seen(&peer.id).last_seen_at,
+        Some(last_seen)
+    );
+    assert_eq!(
+        managed.registry.record(&peer.id).unwrap().last_seen_at,
+        last_seen
+    );
+    managed.node.shutdown();
+}
