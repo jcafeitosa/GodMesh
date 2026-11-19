@@ -21,6 +21,7 @@ use crate::{
 use super::{
     Direction, Error, Probe, SendCredit, Usage,
     quotas::{OPEN_TIMEOUT, Quotas, Reservation},
+    scheduling::Scheduler,
 };
 
 const CHECK_BUDGET: Duration = Duration::from_millis(100);
@@ -115,6 +116,7 @@ fn valid_route_id(id: &str) -> bool {
 pub struct RelayAdmission {
     registry: Registry,
     quotas: Quotas,
+    scheduler: Scheduler,
     allowed: Mutex<HashSet<String>>,
     portable: Arc<PortableJoin>,
     m3: Arc<BundleService>,
@@ -147,6 +149,7 @@ impl RelayAdmission {
                     .unwrap_or_default()
             }),
             quotas: Quotas::new(started_at),
+            scheduler: Scheduler::default(),
         })
     }
 
@@ -371,6 +374,12 @@ impl RouteInstance {
     }
 
     pub async fn next_credit(&self, direction: Direction) -> Result<Option<SendCredit>, Error> {
+        let mut cancelled = self.cancellation();
+        let _turn = tokio::select! {
+            biased;
+            _ = cancelled.wait_for(|cancelled| *cancelled) => return Err(Error::Cancelled),
+            turn = self.admission.scheduler.credit() => turn,
+        };
         self.authorize(Instant::now() + CHECK_BUDGET, |_, checked_now| {
             self.reservation.take(direction, checked_now)
         })
@@ -379,7 +388,23 @@ impl RouteInstance {
 
     /// Chamar independentemente das tarefas de I/O, no prazo retornado.
     pub async fn recheck(&self) -> Result<Instant, Error> {
-        self.authorize(Instant::now() + CHECK_BUDGET, |next, _| {
+        self.recheck_until(Instant::now() + CHECK_BUDGET).await
+    }
+
+    async fn recheck_until(&self, deadline: Instant) -> Result<Instant, Error> {
+        let mut cancelled = self.cancellation();
+        let _turn = tokio::select! {
+            biased;
+            _ = cancelled.wait_for(|cancelled| *cancelled) => return Err(Error::Cancelled),
+            result = timeout_at(deadline, self.admission.scheduler.recheck()) => match result {
+                Ok(turn) => turn,
+                Err(_) => {
+                    self.cancel();
+                    return Err(Error::RouteUnavailable);
+                }
+            },
+        };
+        self.authorize(deadline, |next, _| {
             if *self.reservation.cancellation().borrow() {
                 return Err(Error::Cancelled);
             }
@@ -397,14 +422,14 @@ impl RouteInstance {
         let mut cancelled = self.cancellation();
         let mut trust = Some(self.admission.trust_changes());
         while !*cancelled.borrow_and_update() {
-            tokio::select! {
+            let triggered_at = tokio::select! {
                 biased;
                 _ = cancelled.changed() => return Ok(()),
-                _ = changed(&mut trust) => {},
-                _ = changed(&mut m3_changes) => {},
-                _ = tokio::time::sleep_until(next) => {},
-            }
-            next = self.recheck().await?;
+                _ = changed(&mut trust) => Instant::now().min(next),
+                _ = changed(&mut m3_changes) => Instant::now().min(next),
+                _ = tokio::time::sleep_until(next) => next,
+            };
+            next = self.recheck_until(triggered_at + CHECK_BUDGET).await?;
         }
         Ok(())
     }

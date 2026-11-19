@@ -293,6 +293,21 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
     d2_route.recollect();
     lock.rollback().await.unwrap();
 
+    let missed = admission
+        .open(&r2.id, &pin(&e), Instant::now())
+        .await
+        .unwrap();
+    missed.confirm_token().await.unwrap();
+    let past_due = Instant::now() - Duration::from_millis(100);
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(100),
+        missed.run_rechecks(past_due, None),
+    )
+    .await;
+    assert_eq!(outcome.unwrap(), Err(Error::RouteUnavailable));
+    assert!(*missed.cancellation().borrow());
+    missed.recollect();
+
     let d2_route = admission
         .open(&r2.id, &pin(&e), Instant::now())
         .await
