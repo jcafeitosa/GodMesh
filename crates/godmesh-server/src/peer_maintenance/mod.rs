@@ -15,6 +15,8 @@ mod transport;
 
 pub use transport::spawn;
 #[cfg(test)]
+mod race;
+#[cfg(test)]
 mod tests;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -99,9 +101,7 @@ impl<'a, D: Driver> Scheduler<'a, D> {
     }
 
     fn refreshed(&mut self, records: Vec<PeerRecord>) {
-        self.driver.publish(&records);
-        self.fresh = true;
-        self.current.clear();
+        let mut current = HashMap::with_capacity(records.len());
         let mut ordered = Vec::new();
         for record in &records {
             if record.node_id == self.local {
@@ -118,18 +118,23 @@ impl<'a, D: Driver> Scheduler<'a, D> {
                 continue;
             }
             ordered.push(peer.id.clone());
-            self.current.insert(peer.id.clone(), peer);
+            current.insert(peer.id.clone(), peer);
         }
+        // Feche a janela de promoção antes de expor o novo registro. O
+        // transporte arbitra promoção e cancelamento pela proteção da tentativa.
+        for slot in self.slots.iter_mut().flatten() {
+            if current.get(&slot.peer.id) != Some(&slot.peer) {
+                Self::cancel_slot(slot);
+            }
+        }
+        self.driver.publish(&records);
+        self.current = current;
+        self.fresh = true;
         self.queue.retain(|id| {
             self.current
                 .get(id)
                 .is_some_and(|peer| self.driver.eligible_now(peer))
         });
-        for slot in self.slots.iter_mut().flatten() {
-            if self.current.get(&slot.peer.id) != Some(&slot.peer) {
-                Self::cancel_slot(slot);
-            }
-        }
         for id in std::mem::take(&mut self.retry).into_iter().chain(ordered) {
             self.enqueue(&id);
         }
