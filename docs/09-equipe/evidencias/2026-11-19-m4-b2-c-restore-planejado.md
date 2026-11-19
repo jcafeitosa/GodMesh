@@ -9,3 +9,7 @@ A coordenação aprova a [SPEC M4-B2-C v1.4](../../08-specs/federacao/m4-b2-c-co
 5. **Aceite em processos.** Exercitar A/B/C com bancos e chaves distintos e ingresso oficial. Verificar C independente, retomada pelo checkpoint reconciliado e bloqueio do efetor antigo antes e depois da promoção. Registrar revisão independente, suíte padrão, suíte com a feature e validações em PostgreSQL descartável.
 
 As sondas PostgreSQL 16.15 comprovaram primitivas de autenticação, fence e restore e reproduziram a exigência de DDL do runner atual. O aceite integrado ainda depende da execução dos cenários acima. Recuperação não planejada, política e custódia de produção, retirada de suspensão e novo namespace continuam sob contratos próprios.
+
+### Ordem do CAS externo
+
+Persistir a autorização com B fechado. Coletar a observação corrente de A fora da transação de B. Adquirir o guard M1C e o lock do namespace em B, revalidar o candidato em `READ COMMITTED` e manter essa proteção até a confirmação do CAS externo sob o mesmo prazo. A ordem é B → fonte externa. O CAS preserva B fechado. Se o efeito ficar indeterminado, a recuperação apura a decisão durável antes de repetir ou abrir. A abertura é posterior e usa uma nova observação de A e a releitura da fonte fora dos locks de abertura. A revisão independente confirmou essa interpretação da v1.4.
