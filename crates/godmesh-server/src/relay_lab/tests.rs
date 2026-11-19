@@ -243,13 +243,16 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
         .unwrap();
     d1_route.confirm_token().await.unwrap();
     d2_route.confirm_token().await.unwrap();
-    d1_route.enqueue(Direction::ToDestination, vec![1]).unwrap();
-    let used = d1_route
-        .next_credit(Direction::ToDestination)
-        .await
-        .unwrap()
-        .unwrap();
-    d1_route.enqueue(Direction::ToDestination, vec![2]).unwrap();
+    let directions = [Direction::ToDestination, Direction::FromDestination];
+    let mut credits = Vec::new();
+    for direction in directions {
+        d1_route.enqueue(direction, vec![1]).unwrap();
+        credits.push(d1_route.next_credit(direction).await.unwrap().unwrap());
+        d1_route.enqueue(direction, vec![2, 3]).unwrap();
+        let before = admission.usage(Some(f.origin.node_id()), direction);
+        assert_eq!((before.queued_frames, before.queued_bytes), (1, 6));
+        assert_eq!((before.debited_frames, before.debited_bytes), (1, 5));
+    }
 
     // Controle durável sem passar pelo sinal local de trust.
     sqlx::query("UPDATE federation_peer SET trust_state='revoked' WHERE node_id=$1")
@@ -266,20 +269,55 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
     );
     assert!(invalidated.elapsed() <= Duration::from_millis(350));
     assert!(*d1_route.cancellation().borrow());
-    let usage = admission.usage(Some(f.origin.node_id()), Direction::ToDestination);
-    assert_eq!((usage.queued_frames, usage.debited_frames), (0, 1));
-    drop(used);
+    for direction in directions {
+        assert!(matches!(
+            d1_route.next_credit(direction).await,
+            Err(Error::Cancelled)
+        ));
+        assert_eq!(d1_route.enqueue(direction, vec![4]), Err(Error::Cancelled));
+        let after = admission.usage(Some(f.origin.node_id()), direction);
+        assert_eq!(
+            (
+                after.queued_frames,
+                after.queued_bytes,
+                after.cancelled_frames
+            ),
+            (0, 0, 1)
+        );
+        assert_eq!((after.debited_frames, after.debited_bytes), (1, 5));
+
+        d2_route.enqueue(direction, vec![7]).unwrap();
+        let credit = d2_route.next_credit(direction).await.unwrap().unwrap();
+        assert_eq!(credit.datagram(), &[7]);
+    }
+    let probe = admission.reserve_probe().unwrap();
+    probe.enqueue(vec![8; 64]).unwrap();
+    assert_eq!(probe.take(Instant::now()).unwrap(), Some(vec![8; 64]));
+
     d1_route.recollect();
-    d2_route
-        .enqueue(Direction::FromDestination, vec![7])
+    // Restabelece a autoridade para medir a ocupação restante da vaga de D1.
+    sqlx::query("UPDATE federation_peer SET trust_state='authorized' WHERE node_id=$1")
+        .bind(f.origin.node_id())
+        .execute(&f.pool)
+        .await
         .unwrap();
-    drop(
-        d2_route
-            .next_credit(Direction::FromDestination)
-            .await
-            .unwrap()
-            .unwrap(),
-    );
+    drop(credits.pop().unwrap());
+    assert!(matches!(
+        admission.open(&r1.id, &pin(&e), Instant::now()).await,
+        Err(Error::QuotaExceeded)
+    ));
+    drop(credits);
+    let replacement = admission
+        .open(&r1.id, &pin(&e), Instant::now())
+        .await
+        .unwrap();
+    replacement.confirm_token().await.unwrap();
+    for direction in directions {
+        assert!(replacement.next_credit(direction).await.unwrap().is_none());
+        let usage = admission.usage(Some(f.origin.node_id()), direction);
+        assert_eq!((usage.debited_frames, usage.debited_bytes), (1, 5));
+    }
+    replacement.recollect();
 
     let mut lock = f.pool.begin().await.unwrap();
     portable.lock_cluster(&mut lock).await.unwrap();
@@ -318,11 +356,6 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
     d2_route.recollect();
 
     clock.store(110, Ordering::SeqCst);
-    sqlx::query("UPDATE federation_peer SET trust_state='authorized' WHERE node_id=$1")
-        .bind(f.origin.node_id())
-        .execute(&f.pool)
-        .await
-        .unwrap();
     let first = admission
         .open(&r1.id, &pin(&e), Instant::now())
         .await
