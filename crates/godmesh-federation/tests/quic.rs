@@ -1436,3 +1436,408 @@ async fn prazo_da_autorizacao_libera_cota_e_preserva_sessao() {
     assert!(guard_deadline < deadline);
     node.shutdown();
 }
+
+#[cfg(feature = "snapshot-harness")]
+mod snapshot_transport {
+    use super::*;
+    use godmesh_federation::node::{SnapshotSessionLimits, StreamOpening};
+
+    fn size(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).unwrap()
+    }
+
+    fn fixture(
+        peer: &RawPeer,
+        auth: Arc<dyn LinkAuthorizer>,
+        opt_in: bool,
+        timeout: Duration,
+    ) -> (
+        FederationNode,
+        tokio::sync::mpsc::UnboundedReceiver<OperationalSession>,
+    ) {
+        fixture_with_streams(peer, auth, opt_in, timeout, 1)
+    }
+
+    fn fixture_with_streams(
+        peer: &RawPeer,
+        auth: Arc<dyn LinkAuthorizer>,
+        opt_in: bool,
+        timeout: Duration,
+        streams: usize,
+    ) -> (
+        FederationNode,
+        tokio::sync::mpsc::UnboundedReceiver<OperationalSession>,
+    ) {
+        let identity = Arc::new(NodeIdentity::generate_in_memory().unwrap());
+        peer.registry.insert(PeerRecord::authorized_from_key(
+            &identity.public_key_bytes(),
+            CLUSTER,
+        ));
+        let registry = Arc::new(PeerRegistry::new());
+        registry.insert(peer.record(TrustState::Authorized));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let handler = Arc::new(SessionSink(tx));
+        let config = config().with_heartbeat(Duration::from_secs(30), 3);
+        let a2 = SessionLimits {
+            max_frame_bytes: size(4),
+            max_streams_per_connection: NonZeroUsize::new(streams).unwrap(),
+            attempt_timeout: timeout,
+        };
+        let addr = ([127, 0, 0, 1], 0).into();
+        let node = if opt_in {
+            FederationNode::bind_with_snapshot_session_handler(
+                identity,
+                config,
+                registry,
+                addr,
+                auth,
+                SnapshotSessionLimits {
+                    a2,
+                    max_session_frame_bytes: size(16),
+                    max_control_bytes: size(6),
+                    max_snapshot_bytes: size(20),
+                },
+                handler,
+            )
+        } else {
+            FederationNode::bind_with_session_handler(
+                identity, config, registry, addr, auth, a2, handler,
+            )
+        }
+        .unwrap();
+        (node, rx)
+    }
+
+    async fn send_raw(
+        connection: &Connection,
+        bytes: &[u8],
+    ) -> (quinn::SendStream, quinn::RecvStream) {
+        let (mut send, recv) = connection.open_bi().await.unwrap();
+        send.write_all(bytes).await.unwrap();
+        (send, recv)
+    }
+
+    #[tokio::test]
+    async fn teto_a2_e_escape_dependem_apenas_do_perfil_da_abertura() {
+        for opt_in in [false, true] {
+            let peer = RawPeer::new(config());
+            let (node, mut callbacks) = fixture(
+                &peer,
+                TestAuthorizer::new(Ok(None)),
+                opt_in,
+                Duration::from_secs(3),
+            );
+            let connection = session_handshake(&node, &peer).await;
+            let session = next_session(&mut callbacks).await;
+            let (mut send, _recv) = send_raw(&connection, b"\0\0\0\x04pull").await;
+            send.finish().unwrap();
+            let mut stream = session.accept_bi().await.unwrap();
+            assert_eq!(
+                stream.read_opening().await.unwrap(),
+                StreamOpening::A2(b"pull".to_vec())
+            );
+            stream.expect_fin().await.unwrap();
+            assert_eq!(
+                stream.write_frame(b"12345").await,
+                Err(SessionError::InvalidFrame)
+            );
+            drop(stream);
+
+            let (holding, _recv) = send_raw(&connection, &5u32.to_be_bytes()).await;
+            let mut stream = session.accept_bi().await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_millis(500), stream.read_opening()).await,
+                Ok(Err(SessionError::InvalidFrame)),
+            );
+            drop(holding);
+            drop(stream);
+
+            let prefix = if opt_in {
+                b"\0\0\0\0\0\0\0\x07".as_slice()
+            } else {
+                b"\0\0\0\0"
+            };
+            let (_holding, _recv) = send_raw(&connection, prefix).await;
+            let mut stream = session.accept_bi().await.unwrap();
+            // Nenhum corpo foi enviado. O teto tem de ser aplicado no prefixo.
+            assert_eq!(
+                tokio::time::timeout(Duration::from_millis(500), stream.read_opening()).await,
+                Ok(Err(SessionError::InvalidFrame)),
+            );
+            node.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn pacote_binario_exato_e_fin_apos_controle() {
+        let peer = RawPeer::new(config());
+        let (node, mut callbacks) = fixture(
+            &peer,
+            TestAuthorizer::new(Ok(None)),
+            true,
+            Duration::from_secs(3),
+        );
+        let connection = session_handshake(&node, &peer).await;
+        let session = next_session(&mut callbacks).await;
+        let deadline = attempt_deadline();
+        let mut outgoing = session.open_bi(deadline).await.unwrap();
+        assert_eq!(
+            outgoing.write_snapshot_opening(b"1234567").await,
+            Err(SessionError::InvalidFrame)
+        );
+        outgoing.write_snapshot_opening(b"123456").await.unwrap();
+        let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+        let mut opening = [0; 14];
+        recv.read_exact(&mut opening).await.unwrap();
+        assert_eq!(&opening, b"\0\0\0\0\0\0\0\x06123456");
+
+        send.write_all(b"\0\0\0\x06header\0\0\0\x08 \0\xffframe")
+            .await
+            .unwrap();
+        send.finish().unwrap();
+        assert_eq!(outgoing.read_snapshot_control().await.unwrap(), b"header");
+        assert_eq!(
+            outgoing.read_snapshot_body(size(8), size(8)).await.unwrap(),
+            b" \0\xffframe"
+        );
+        outgoing.expect_fin().await.unwrap();
+        outgoing.write_snapshot_control(b"ack").await.unwrap();
+        outgoing.finish_send().unwrap();
+        assert_eq!(recv.read_to_end(7).await.unwrap(), b"\0\0\0\x03ack");
+        drop(outgoing);
+
+        let (mut send, mut recv) = send_raw(&connection, b"\0\0\0\0\0\0\0\x03req").await;
+        send.finish().unwrap();
+        let mut inbound = session.accept_bi().await.unwrap();
+        assert_eq!(
+            inbound.read_opening().await.unwrap(),
+            StreamOpening::Snapshot(b"req".to_vec())
+        );
+        inbound.expect_fin().await.unwrap();
+        assert_eq!(
+            inbound
+                .write_snapshot_body(&[0; 17], size(17), size(20))
+                .await,
+            Err(SessionError::InvalidFrame)
+        );
+        assert_eq!(
+            inbound.write_snapshot_body(b"1234", size(5), size(8)).await,
+            Err(SessionError::InvalidFrame)
+        );
+        inbound.write_snapshot_control(b"header").await.unwrap();
+        inbound
+            .write_snapshot_body(&[7; 16], size(16), size(16))
+            .await
+            .unwrap();
+        inbound.finish_send().unwrap();
+        let expected = [b"\0\0\0\x06header\0\0\0\x10".as_slice(), &[7; 16]].concat();
+        assert_eq!(recv.read_to_end(expected.len()).await.unwrap(), expected);
+        node.shutdown();
+    }
+
+    #[tokio::test]
+    async fn pacote_incompativel_recusa_so_o_prefixo_e_respeita_deadline() {
+        let peer = RawPeer::new(config());
+        let (node, mut callbacks) = fixture(
+            &peer,
+            TestAuthorizer::new(Ok(None)),
+            true,
+            Duration::from_secs(3),
+        );
+        let connection = session_handshake(&node, &peer).await;
+        let session = next_session(&mut callbacks).await;
+        for (prefix, expected, negotiated) in [(7, 8, 9), (8, 8, 7), (17, 17, 20)] {
+            let deadline = attempt_deadline();
+            let mut outgoing = session.open_bi(deadline).await.unwrap();
+            outgoing.write_snapshot_opening(b"req").await.unwrap();
+            let (mut send, _recv) = connection.accept_bi().await.unwrap();
+            send.write_all(&size(prefix).get().to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(
+                    Duration::from_millis(500),
+                    outgoing.read_snapshot_body(size(expected), size(negotiated))
+                )
+                .await,
+                Ok(Err(SessionError::InvalidFrame)),
+            );
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let mut outgoing = session.open_bi(deadline).await.unwrap();
+        outgoing.write_snapshot_opening(b"req").await.unwrap();
+        let (mut send, _recv) = connection.accept_bi().await.unwrap();
+        send.write_all(&8u32.to_be_bytes()).await.unwrap();
+        assert_eq!(outgoing.deadline(), deadline);
+        assert_eq!(
+            outgoing.read_snapshot_body(size(8), size(8)).await,
+            Err(SessionError::Timeout)
+        );
+        assert!(session.open_bi(attempt_deadline()).await.is_ok());
+        node.shutdown();
+    }
+
+    #[tokio::test]
+    async fn corpo_snapshot_exige_comprimento_e_fim_de_direcao() {
+        let peer = RawPeer::new(config());
+        let (node, mut callbacks) = fixture(
+            &peer,
+            TestAuthorizer::new(Ok(None)),
+            true,
+            Duration::from_secs(3),
+        );
+        let connection = session_handshake(&node, &peer).await;
+        let session = next_session(&mut callbacks).await;
+
+        for (bytes, finish, expected) in [
+            (
+                b"\0\0\0\x04abc".as_slice(),
+                true,
+                SessionError::InvalidFrame,
+            ),
+            (
+                b"\0\0\0\x04abcdx".as_slice(),
+                true,
+                SessionError::InvalidFrame,
+            ),
+            (b"\0\0\0\x04abcd".as_slice(), false, SessionError::Timeout),
+        ] {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+            let mut outgoing = session.open_bi(deadline).await.unwrap();
+            outgoing.write_snapshot_opening(b"req").await.unwrap();
+            let (mut send, _recv) = connection.accept_bi().await.unwrap();
+            send.write_all(bytes).await.unwrap();
+            if finish {
+                send.finish().unwrap();
+            }
+            let result = async {
+                assert_eq!(
+                    outgoing.read_snapshot_body(size(4), size(4)).await?,
+                    b"abcd"
+                );
+                outgoing.expect_fin().await
+            }
+            .await;
+            assert_eq!(result, Err(expected));
+            assert!(connection.close_reason().is_none());
+        }
+        node.shutdown();
+    }
+
+    #[tokio::test]
+    async fn escape_enfileirado_nao_chega_ao_callback_antes_da_promocao() {
+        let peer = RawPeer::new(config());
+        let gate = Arc::new(PromotionGate {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            reject: false,
+            authority: TestAuthorizer::new(Ok(None)),
+        });
+        let (node, mut callbacks) = fixture(&peer, gate.clone(), true, Duration::from_secs(3));
+        let connection = session_handshake(&node, &peer).await;
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        let (mut send, _recv) = send_raw(&connection, b"\0\0\0\0\0\0\0\x03req").await;
+        send.finish().unwrap();
+        assert!(callbacks.try_recv().is_err());
+        assert_ne!(
+            node.links().snapshot_or_never_seen(&peer.id).state,
+            LinkState::Ready
+        );
+        gate.release.notify_one();
+        let session = next_session(&mut callbacks).await;
+        let mut incoming = session.accept_bi().await.unwrap();
+        assert_eq!(
+            incoming.read_opening().await.unwrap(),
+            StreamOpening::Snapshot(b"req".to_vec())
+        );
+        incoming.expect_fin().await.unwrap();
+        node.shutdown();
+    }
+    struct AdmissionGate {
+        authority: Arc<TestAuthorizer>,
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl LinkAuthorizer for AdmissionGate {
+        fn authorize<'a>(
+            &'a self,
+            local: &'a LinkIdentity,
+            remote: &'a LinkIdentity,
+        ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>>
+        {
+            self.authority.authorize(local, remote)
+        }
+
+        fn authorize_until<'a>(
+            &'a self,
+            local: &'a LinkIdentity,
+            remote: &'a LinkIdentity,
+            _deadline: tokio::time::Instant,
+        ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                if self.calls.fetch_add(1, Ordering::Relaxed) == 1 {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                self.authority.authorize(local, remote).await
+            })
+        }
+
+        fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+            self.authority.subscribe()
+        }
+    }
+
+    #[tokio::test]
+    async fn fin_de_uma_stream_nao_interrompe_outra_em_admissao() {
+        let peer = RawPeer::new(config());
+        let gate = Arc::new(AdmissionGate {
+            authority: TestAuthorizer::new(Ok(None)),
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let (node, mut callbacks) =
+            fixture_with_streams(&peer, gate.clone(), true, Duration::from_secs(3), 2);
+        let connection = session_handshake(&node, &peer).await;
+        let session = next_session(&mut callbacks).await;
+        let (mut a, mut a_reply) = send_raw(&connection, b"\0\0\0\x04pull").await;
+        a.finish().unwrap();
+        let mut first = session.accept_bi().await.unwrap();
+        assert_eq!(
+            first.read_opening().await.unwrap(),
+            StreamOpening::A2(b"pull".to_vec())
+        );
+        let (mut b, mut b_reply) = send_raw(&connection, b"\0\0\0\0\0\0\0\x03req").await;
+        b.finish().unwrap();
+
+        let (second, ()) = tokio::join!(session.accept_bi(), async {
+            tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+                .await
+                .unwrap();
+            first.expect_fin().await.unwrap();
+            first.write_frame(b"done").await.unwrap();
+            first.finish_send().unwrap();
+            drop(first);
+            assert_eq!(a_reply.read_to_end(8).await.unwrap(), b"\0\0\0\x04done");
+            gate.release.notify_one();
+        });
+        let mut second = second.unwrap();
+        assert_eq!(
+            second.read_opening().await.unwrap(),
+            StreamOpening::Snapshot(b"req".to_vec())
+        );
+        second.expect_fin().await.unwrap();
+        second.write_snapshot_control(b"result").await.unwrap();
+        second.finish_send().unwrap();
+        assert_eq!(b_reply.read_to_end(10).await.unwrap(), b"\0\0\0\x06result");
+        node.shutdown();
+    }
+}

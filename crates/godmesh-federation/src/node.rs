@@ -37,6 +37,9 @@ pub use session::{
     SessionLimits,
 };
 
+#[cfg(feature = "snapshot-harness")]
+pub use session::{SnapshotSessionLimits, StreamOpening};
+
 /// Intervalo de heartbeat padrão: 5 s.
 pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// Heartbeats perdidos tolerados antes de `unknown`: 3 (15 s no padrão).
@@ -247,7 +250,15 @@ struct NodeShared {
     registry: Arc<PeerRegistry>,
     links: Arc<PeerLinks>,
     authorizer: Option<Arc<dyn LinkAuthorizer>>,
-    session_handler: Option<(SessionLimits, Arc<dyn OperationalSessionHandler>)>,
+    session_handler: Option<SessionHandlerConfig>,
+}
+
+#[derive(Clone)]
+struct SessionHandlerConfig {
+    limits: SessionLimits,
+    handler: Arc<dyn OperationalSessionHandler>,
+    #[cfg(feature = "snapshot-harness")]
+    snapshot: Option<SnapshotSessionLimits>,
 }
 
 /// Nó de federação com endpoint QUIC ativo.
@@ -300,6 +311,66 @@ impl FederationNode {
         limits: SessionLimits,
         handler: Arc<dyn OperationalSessionHandler>,
     ) -> Result<Self, TransportError> {
+        Self::bind_session(
+            identity,
+            config,
+            registry,
+            addr,
+            authorizer,
+            SessionHandlerConfig {
+                limits,
+                handler,
+                #[cfg(feature = "snapshot-harness")]
+                snapshot: None,
+            },
+        )
+    }
+
+    /// Habilita o escape de snapshot para o dispatcher da fixture de laboratório.
+    /// O harness deve validar o contexto externo da fixture antes do bind.
+    ///
+    /// # Errors
+    /// Limites incompatíveis ou as falhas de [Self::bind_with_session_handler].
+    #[cfg(feature = "snapshot-harness")]
+    pub fn bind_with_snapshot_session_handler(
+        identity: Arc<NodeIdentity>,
+        config: FederationConfig,
+        registry: Arc<PeerRegistry>,
+        addr: SocketAddr,
+        authorizer: Arc<dyn LinkAuthorizer>,
+        limits: SnapshotSessionLimits,
+        handler: Arc<dyn OperationalSessionHandler>,
+    ) -> Result<Self, TransportError> {
+        if limits.max_session_frame_bytes < limits.a2.max_frame_bytes
+            || usize::try_from(limits.max_session_frame_bytes.get()).is_err()
+        {
+            return Err(TransportError::Quic(
+                "teto de snapshot incompatível".to_owned(),
+            ));
+        }
+        Self::bind_session(
+            identity,
+            config,
+            registry,
+            addr,
+            authorizer,
+            SessionHandlerConfig {
+                limits: limits.a2,
+                handler,
+                snapshot: Some(limits),
+            },
+        )
+    }
+
+    fn bind_session(
+        identity: Arc<NodeIdentity>,
+        config: FederationConfig,
+        registry: Arc<PeerRegistry>,
+        addr: SocketAddr,
+        authorizer: Arc<dyn LinkAuthorizer>,
+        session_handler: SessionHandlerConfig,
+    ) -> Result<Self, TransportError> {
+        let limits = session_handler.limits;
         if limits.max_streams_per_connection.get() > tokio::sync::Semaphore::MAX_PERMITS
             || usize::try_from(limits.max_frame_bytes.get()).is_err()
             || limits.attempt_timeout.is_zero()
@@ -317,7 +388,7 @@ impl FederationNode {
             registry,
             addr,
             Some(authorizer),
-            Some((limits, handler)),
+            Some(session_handler),
         )
     }
 
@@ -327,7 +398,7 @@ impl FederationNode {
         registry: Arc<PeerRegistry>,
         addr: SocketAddr,
         authorizer: Option<Arc<dyn LinkAuthorizer>>,
-        session_handler: Option<(SessionLimits, Arc<dyn OperationalSessionHandler>)>,
+        session_handler: Option<SessionHandlerConfig>,
     ) -> Result<Self, TransportError> {
         let tls = transport::NodeTls::self_issued(&identity)?;
         let server = transport::server_config(Arc::clone(&registry), &tls)?;
@@ -647,14 +718,18 @@ async fn establish_operational(
 
 async fn run_operational(shared: NodeShared, link: OperationalLink) {
     let link = Arc::new(link);
-    let callback = shared.session_handler.as_ref().map(|(limits, handler)| {
+    let callback = shared.session_handler.clone().map(|config| {
         let link = Arc::clone(&link);
         let links = Arc::clone(&shared.links);
-        let limits = *limits;
-        let handler = Arc::clone(handler);
         tokio::spawn(async move {
-            if let Some(session) = OperationalSession::new(link, links, limits) {
-                handler.run(session).await;
+            if let Some(session) = OperationalSession::new(
+                link,
+                links,
+                config.limits,
+                #[cfg(feature = "snapshot-harness")]
+                config.snapshot,
+            ) {
+                config.handler.run(session).await;
             }
         })
     });

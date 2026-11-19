@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+snapshot-harness = []
+
 # Versões resolvidas em 18/11/2026 pela API do crates.io (ver
 # `docs/09-equipe/evidencias/2026-11-18-integracao-federacao.md`). ADR-071 fixa
 # `quinn`/`rustls`/`ed25519-dalek`/`rcgen`; `x509-parser` entra só para **ler**
