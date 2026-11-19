@@ -396,6 +396,9 @@ async fn contrato_publicado_e_o_mesmo_registro_do_router() {
             && scope.as_deref() == Some("federation:admin")), "{method} {path}");
     }
 
+    assert!(doc["paths"]["/v1/federation/local-manifest"]["get"]["responses"]["422"]["description"]
+        .as_str().unwrap().contains("join_proof_invalid"));
+
     // Escopo idêntico nas duas leituras.
     for (method, path, scope) in &routes {
         let (_, _, doc_scope) = docs

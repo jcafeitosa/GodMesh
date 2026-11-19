@@ -46,7 +46,11 @@ pub(super) fn register(reg: &mut Registry) {
             summary: "Publica o manifesto portátil do nó",
             request: None,
             success: &[(200, MANIFEST)],
-            errors: &["federation_governance_disabled", "storage_unavailable"],
+            errors: &[
+                "federation_governance_disabled",
+                "join_proof_invalid",
+                "storage_unavailable",
+            ],
             params: &[],
         },
         manifest,

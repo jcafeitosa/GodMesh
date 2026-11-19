@@ -774,7 +774,7 @@ impl PortableJoin {
         Ok(())
     }
 
-    async fn require_parent_validity(
+    async fn require_parent_authority(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         frame: &FramedChain,
@@ -782,6 +782,18 @@ impl PortableJoin {
     ) -> Result<(), PortableJoinError> {
         if frame.digests.len() == 1 {
             return Ok(());
+        }
+        // Uma raiz pode ter confirmado o pai sem importá-lo como par.
+        // Se o par existe e foi revogado explicitamente, uma vigência anterior
+        // nunca habilita uma nova decisão assinada por ele.
+        let trust_state: Option<String> = sqlx::query_scalar(
+            "SELECT trust_state FROM federation_peer WHERE node_id = $1 FOR SHARE",
+        )
+        .bind(frame.signer_node_id())
+        .fetch_optional(&mut **tx)
+        .await?;
+        if trust_state.as_deref() == Some("revoked") {
+            return Err(PortableJoinError::Issuer);
         }
         let parent = &frame.digests[frame.digests.len() - 2];
         let active: bool = sqlx::query_scalar(
@@ -946,7 +958,7 @@ impl PortableJoin {
         self.require_unrevoked(&mut tx, &frame).await?;
         self.require_confirmed(&mut tx, &frame, frame.digests.len() - 1)
             .await?;
-        self.require_parent_validity(&mut tx, &frame, now).await?;
+        self.require_parent_authority(&mut tx, &frame, now).await?;
         let compact = serde_json::to_string(&frame.chain)?;
         if compact.len() > self.config.policy.max_frame_bytes.get() {
             return Err(PortableJoinError::Proof("frame_too_large"));
@@ -1285,7 +1297,7 @@ impl PortableJoin {
             .map_err(|_| PortableJoinError::Revocation)?;
         if delegated {
             self.require_unrevoked(&mut tx, &frame).await?;
-            self.require_parent_validity(&mut tx, &frame, now).await?;
+            self.require_parent_authority(&mut tx, &frame, now).await?;
         }
         let mut receipt = JoinRevocationReceiptV1 {
             cluster: self.cluster().into(),

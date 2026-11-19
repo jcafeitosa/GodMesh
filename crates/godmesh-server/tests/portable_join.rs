@@ -692,6 +692,70 @@ async fn delegacao_e_recibo_tardio_bloqueiam_descendentes_e_permitem_cadeia_alte
         Err(PortableJoinError::Revoked)
     ));
 
+    let mut alternative = c_manifest;
+    alternative.epoch += 1;
+    alternative.sign(&child);
+    let id = pending(&a, &alternative).await;
+    assert!(
+        a.import_chain(signer.node_id(), &signer.public_key_hex(), &b_offer, &lease)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE federation_peer SET trust_state = 'revoked' WHERE node_id = $1")
+        .bind(signer.node_id())
+        .execute(&a_db)
+        .await
+        .unwrap();
+    let offer_from_revoked = b
+        .sign_offer(
+            request(id.clone(), alternative.clone(), 23, false),
+            window,
+            16384,
+        )
+        .await
+        .unwrap();
+    let new_approval = a
+        .approve(&id, &offer_from_revoked, "operator", window, 16384)
+        .await;
+    let revoke_from_revoked = make_revocation(&delegated, &signer, 23);
+    let new_revocation = a.revoke(&delegated, &revoke_from_revoked).await;
+    assert!(
+        matches!(
+            (&new_approval, &new_revocation),
+            (
+                Err(PortableJoinError::Issuer),
+                Err(PortableJoinError::Issuer)
+            )
+        ),
+        "aprovação: {new_approval:?}, revogação: {new_revocation:?}"
+    );
+    assert!(matches!(
+        a.proof(&id).await,
+        Err(PortableJoinError::NotFound)
+    ));
+    let epoch: i64 = sqlx::query_scalar(
+        "SELECT epoch FROM federation_portable_epoch WHERE cluster = $1 AND root_node_id = $2 AND signer_node_id = $3"
+    ).bind(a.cluster()).bind(root.node_id()).bind(signer.node_id()).fetch_one(&a_db).await.unwrap();
+    assert_eq!(epoch, 22);
+    let revoked_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM federation_portable_revocations WHERE target_digest = $1",
+    )
+    .bind(&revoke_from_revoked.target_digest)
+    .fetch_one(&a_db)
+    .await
+    .unwrap();
+    assert_eq!(revoked_count, 0);
+    assert_eq!(
+        a.approve(&c_id, &delegated, "operator", window, 16384)
+            .await
+            .unwrap(),
+        (false, delegated.clone())
+    );
+    assert_eq!(
+        a.revoke(&sibling, &child_revoke).await.unwrap(),
+        (false, child_receipt.clone())
+    );
+
     let revoke = make_revocation(&b_offer, &root, 9);
     let (_, receipt) = a.revoke(&b_offer, &revoke).await.unwrap();
     assert!(matches!(
@@ -711,10 +775,6 @@ async fn delegacao_e_recibo_tardio_bloqueiam_descendentes_e_permitem_cadeia_alte
     ));
     tx.rollback().await.unwrap();
 
-    let mut alternative = c_manifest;
-    alternative.epoch += 1;
-    alternative.sign(&child);
-    let id = pending(&a, &alternative).await;
     let alternative = a
         .sign_offer(request(id.clone(), alternative, 10, false), window, 16384)
         .await
