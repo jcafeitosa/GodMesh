@@ -272,6 +272,16 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
         "D2 credit must not wait for D1 opening FIFO"
     );
     assert!(d2_credit.unwrap().is_ok(), "D2 credit authorization failed");
+    let d2_recheck = tokio::time::timeout(Duration::from_millis(100), d2_route.recheck()).await;
+    assert!(
+        d2_recheck.is_ok(),
+        "D2 recheck must not wait for D1 opening FIFO"
+    );
+    assert!(
+        d2_recheck.unwrap().is_ok(),
+        "D2 recheck authorization failed"
+    );
+    assert!(!*d2_route.cancellation().borrow(), "D2 must remain active");
     drop(d1_opening);
 
     let directions = [Direction::ToDestination, Direction::FromDestination];
