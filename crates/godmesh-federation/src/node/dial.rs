@@ -145,13 +145,24 @@ impl DialAttempt {
     }
 
     /// Recolhe a tarefa. Descartar apenas esta espera permite aguardá-la de novo.
+    /// Uma discagem relay só entrega a promoção enquanto a rota ainda é válida.
     pub async fn wait(&mut self) -> Result<PromotedDial, DialError> {
         let task = self.task.as_mut().ok_or(DialError::Finished)?;
         let result = task.await;
         self.task = None;
-        result.map_err(|_| {
+        let promoted = result.map_err(|_| {
             DialError::Link(LinkError::Connect("tarefa de discagem interrompida".into()))
-        })?
+        })??;
+        #[cfg(feature = "relay-harness")]
+        if let Some(relay) = &self.state.relay
+            && relay
+                .upgrade()
+                .and_then(|route| route.while_active(|| ()))
+                .is_none()
+        {
+            return Err(DialError::Cancelled);
+        }
+        Ok(promoted)
     }
 }
 
@@ -193,6 +204,14 @@ impl AttemptState {
             relay: Some(Arc::downgrade(route)),
             ..Self::new()
         }
+    }
+
+    pub(super) fn relay_outer(&self) -> Option<Connection> {
+        #[cfg(feature = "relay-harness")]
+        if let Some(route) = self.relay.as_ref().and_then(std::sync::Weak::upgrade) {
+            return Some(route.outer().clone());
+        }
+        None
     }
 
     #[cfg(feature = "relay-harness")]

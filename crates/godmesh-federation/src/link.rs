@@ -99,6 +99,9 @@ struct Entry {
     last_beat: Instant,
     validity: Option<LinkValidity>,
     legacy_connection: Option<Connection>,
+    // O fechamento do transporte externo invalida a projeção imediatamente,
+    // mesmo antes de o supervisor cancelar a discagem associada.
+    outer: Option<Connection>,
 }
 
 impl Entry {
@@ -110,6 +113,7 @@ impl Entry {
                 .legacy_connection
                 .as_ref()
                 .is_none_or(|connection| connection.close_reason().is_none())
+            && outer_is_open(self.outer.as_ref())
     }
 
     fn is_ready(&self, now: Instant, freshness: Duration) -> bool {
@@ -130,6 +134,10 @@ impl Entry {
     fn tracked(&self) -> bool {
         self.validity.is_some() || self.legacy_connection.is_some()
     }
+}
+
+fn outer_is_open(outer: Option<&Connection>) -> bool {
+    outer.is_none_or(|connection| connection.close_reason().is_none())
 }
 
 #[derive(Debug, Default)]
@@ -184,6 +192,7 @@ impl PeerLinks {
             last_beat: now,
             validity: None,
             legacy_connection: None,
+            outer: None,
         }];
     }
 
@@ -192,9 +201,10 @@ impl PeerLinks {
         node_id: &str,
         snapshot: &LinkSnapshot,
         connection: &Connection,
+        outer: Option<&Connection>,
     ) -> bool {
         let mut guard = self.lock();
-        if connection.close_reason().is_some() {
+        if connection.close_reason().is_some() || !outer_is_open(outer) {
             return false;
         }
         let entries = &mut guard.entry(node_id.to_owned()).or_default().connections;
@@ -208,6 +218,7 @@ impl PeerLinks {
             last_beat: Instant::now(),
             validity: None,
             legacy_connection: Some(connection.clone()),
+            outer: outer.cloned(),
         });
         true
     }
@@ -235,10 +246,11 @@ impl PeerLinks {
         node_id: &str,
         snapshot: &mut LinkSnapshot,
         validity: LinkValidity,
+        outer: Option<&Connection>,
     ) -> bool {
         let mut guard = self.lock();
         let now = Instant::now();
-        if !validity.is_current(now) {
+        if !validity.is_current(now) || !outer_is_open(outer) {
             return false;
         }
         let entries = guard.entry(node_id.to_owned()).or_default();
@@ -256,6 +268,7 @@ impl PeerLinks {
             last_beat: now,
             validity: Some(validity),
             legacy_connection: None,
+            outer: outer.cloned(),
         });
         true
     }
@@ -311,6 +324,7 @@ impl PeerLinks {
                 entry.rtt_ms = None;
                 entry.validity = None;
                 entry.legacy_connection = None;
+                entry.outer = None;
             }
         }
     }
@@ -366,6 +380,7 @@ impl PeerLinks {
                 last_beat: Instant::now(),
                 validity: None,
                 legacy_connection: None,
+                outer: None,
             });
         }
     }
@@ -505,14 +520,37 @@ mod tests {
             last_seen_at: Some(42),
             ..LinkSnapshot::never_seen()
         };
-        assert!(links.mark_operational_ready(node_id, &mut snapshot, validity(&first)));
+        assert!(links.mark_operational_ready(node_id, &mut snapshot, validity(&first), None));
         assert!(links.beat_operational(node_id, &first, 30));
         assert_eq!(links.snapshot(node_id).unwrap().last_seen_at, Some(42));
         links.close_connection(node_id, &first);
         snapshot.last_seen_at = Some(32);
-        assert!(links.mark_operational_ready(node_id, &mut snapshot, validity(&second)));
+        assert!(links.mark_operational_ready(node_id, &mut snapshot, validity(&second), None));
         assert_eq!(snapshot.last_seen_at, Some(42));
         assert!(links.operational_is_ready(node_id, &second));
+
+        // A observação local não depende do supervisor da rota para retirar Ready.
+        links.close_connection(node_id, &second);
+        let (inner, _inner_peer) = connect().await;
+        let (outer, _outer_peer) = connect().await;
+        assert!(links.mark_operational_ready(
+            node_id,
+            &mut snapshot,
+            validity(&inner),
+            Some(&outer),
+        ));
+        assert!(links.operational_is_ready(node_id, &inner));
+        outer.close(0u32.into(), b"outer closed");
+        assert!(!links.operational_is_ready(node_id, &inner));
+        assert!(!links.beat_operational(node_id, &inner, 50));
+        assert_eq!(links.snapshot(node_id).unwrap().state, LinkState::Unknown);
+        assert!(!links.mark_legacy_connection_ready(node_id, &snapshot, &inner, Some(&outer)));
+        assert!(!links.mark_operational_ready(
+            node_id,
+            &mut snapshot,
+            validity(&inner),
+            Some(&outer),
+        ));
     }
 
     #[test]

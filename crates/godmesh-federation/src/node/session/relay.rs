@@ -148,10 +148,19 @@ impl RelayValidity {
         (*self.status.borrow() == RouteStatus::Active).then_some(attempts)
     }
 
+    pub(in crate::node) fn outer(&self) -> &Connection {
+        &self.outer
+    }
+
     /// A ordem dos locks é sempre rota, tentativa e estado local do enlace.
     pub(in crate::node) fn while_active<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
-        let _active = self.lock_active()?;
-        Some(publish())
+        let mut attempts = self.lock_active()?;
+        let result = publish();
+        if self.outer.close_reason().is_some() {
+            self.cancel_locked(&mut attempts);
+            return None;
+        }
+        Some(result)
     }
 
     fn cancel_locked(&self, attempts: &mut Vec<Arc<AttemptState>>) {

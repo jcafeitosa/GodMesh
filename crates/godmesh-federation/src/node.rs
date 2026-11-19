@@ -620,15 +620,18 @@ async fn establish_pinned(
         let key = transport::peer_public_key(connection).ok_or(HandshakeError {
             rejection: Rejection::KeyMismatch,
         })?;
+        let outer = attempt.relay_outer();
         let result = attempt.promote(shared, connection, &node_id, || {
             let seen_at = now_unix();
             let snapshot = ready_snapshot(connection, accepted, seen_at);
             shared.registry.with_record(&node_id, |record| {
                 handshake::verify_registry_record(record, &shared.config.cluster, key, epoch)?;
-                if !shared
-                    .links
-                    .mark_legacy_connection_ready(&node_id, &snapshot, connection)
-                {
+                if !shared.links.mark_legacy_connection_ready(
+                    &node_id,
+                    &snapshot,
+                    connection,
+                    outer.as_ref(),
+                ) {
                     return Err(Rejection::Transport);
                 }
                 Ok(())
@@ -819,11 +822,12 @@ async fn establish_operational(
                     .await
                     .map_err(|error| error.rejection)?;
                 let _permit = link.authorize_dial(attempt.is_some()).await?;
+                let outer = attempt.and_then(AttemptState::relay_outer);
                 let publish = || {
                     let seen_at = now_unix();
                     let mut snapshot = ready_snapshot(connection, accepted, seen_at);
                     if !shared.links.mark_operational_ready(
-                        &link.remote.node_id, &mut snapshot, link.validity.clone(),
+                        &link.remote.node_id, &mut snapshot, link.validity.clone(), outer.as_ref(),
                     ) {
                         return Err(Rejection::NotAuthorized);
                     }
@@ -911,7 +915,7 @@ fn register_ready(
     let snapshot = ready_snapshot(connection, accepted, seen_at);
     if !shared
         .links
-        .mark_legacy_connection_ready(&node_id, &snapshot, connection)
+        .mark_legacy_connection_ready(&node_id, &snapshot, connection, None)
     {
         return Err(Rejection::Transport);
     }
