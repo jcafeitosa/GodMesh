@@ -338,7 +338,7 @@ Decisão do usuário: "shadcn fica". Regras para não virar dois sistemas:
 4. **Fronteira do que nunca cruza**: chaves privadas, dados de outro tenant, segredos operacionais (credenciais de bridge, DSN, topologia interna, custo/capacidade bruta) e telemetria de nó de terceiro sem contrato.
 5. **Ordem de implementação vinculante**: **M1** identidade/ingresso → **M2** transporte QUIC/mTLS → **M3** config bundle assinado (este §13) → **M4** replicação de eventos entre nós → **M5** borda/relay. Fatia fora de ordem exige justificativa registrada e não pode declarar prontidão sem os invariantes do §2 do documento de rede.
 
-**Estado:** desenho aprovado. O [codec M3-A](../09-equipe/evidencias/2026-11-18-m3-a-bundle-assinado.md#aceite-do-codec) e o [serviço durável M3-B1](../09-equipe/evidencias/2026-11-18-m3-b1-servico-duravel.md#aceite-do-serviço-durável) foram integrados localmente. O pull e a aplicação do piso no runtime pertencem à M3-B2. M4 e M5 seguem no planejamento.
+**Estado:** desenho aprovado. O [codec M3-A](../09-equipe/evidencias/2026-11-18-m3-a-bundle-assinado.md#aceite-do-codec), o [serviço durável M3-B1](../09-equipe/evidencias/2026-11-18-m3-b1-servico-duravel.md#aceite-do-serviço-durável) e o [pull e aplicação do piso M3-B2](../09-equipe/evidencias/2026-11-18-m3-b2-integracao-operacional.md#aceite-em-três-instâncias) foram integrados localmente. A M3-B2 foi validada em três instâncias. M4 e M5 seguem a ordem desta ADR.
 
 ## ADR-073 — Agente de recursos do nó: observar primeiro, agir por último
 

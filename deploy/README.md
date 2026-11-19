@@ -116,6 +116,39 @@ vigência ainda válida. O boot exige os pins de que o estado durável depende.
 O contrato e a sequência completa estão na
 [SPEC M1C-B](../docs/08-specs/federacao/m1c-b-ingresso-operacional.md).
 
+### Plano HTTPS de configuração da federação
+
+A M3-B2 usa um listener HTTPS dedicado com TLS mútuo. Habilite primeiro o
+ingresso portátil no mesmo cluster. Configure explicitamente todas as
+variáveis abaixo aplicáveis ao papel. Use um endereço distinto do HTTP
+comum e acessível aos receptores.
+
+| Variáveis | Uso |
+|---|---|
+| `GODMESH_CONFIG_CLUSTER`, `GODMESH_CONFIG_ROLE` | Cluster M1C e papel `publisher` ou `receiver`. |
+| `GODMESH_CONFIG_EPOCH`, `GODMESH_CONFIG_VOTERS`, `GODMESH_CONFIG_SOFTWARE_VERSION` | Epoch da política, lista de três ou cinco votantes pinados e versão numérica `major.minor.patch`. |
+| `GODMESH_CONFIG_BIND`, `GODMESH_CONFIG_READERS`, `GODMESH_CONFIG_SUBMITTERS`, `GODMESH_CONFIG_RESOLVERS` | Endereço HTTPS e pins por operação. Cada lista deve ser declarada e pode ser vazia. |
+| `GODMESH_CONFIG_PUBLISHER_URL`, `GODMESH_CONFIG_PUBLISHER_PIN` | Exclusivas do receptor. URL `https://host:porta` e pin da identidade do publicador. |
+| `GODMESH_CONFIG_MAX_FRAME_BYTES`, `GODMESH_CONFIG_MAX_BODY_BYTES` | Limites do frame assinado e do corpo HTTPS. O corpo deve comportar o frame máximo. |
+| `GODMESH_CONFIG_HANDSHAKE_LIMIT`, `GODMESH_CONFIG_CONNECTION_LIMIT` | Limites simultâneos de handshakes e conexões HTTPS. |
+| `GODMESH_CONFIG_HANDSHAKE_TIMEOUT_MS`, `GODMESH_CONFIG_HEADER_TIMEOUT_MS`, `GODMESH_CONFIG_BODY_TIMEOUT_MS` | Prazos positivos para handshake, cabeçalhos e corpo. |
+| `GODMESH_CONFIG_PULL_TIMEOUT_MS`, `GODMESH_CONFIG_POLL_INTERVAL_MS`, `GODMESH_CONFIG_MAX_ATTEMPTS`, `GODMESH_CONFIG_RETRY_INTERVAL_MS`, `GODMESH_CONFIG_LINK_RECHECK_INTERVAL_MS` | Prazo total por tentativa, cadência, limite de tentativas, espera entre retries e intervalo de reavaliação de enlaces. |
+
+Use pins no formato `<node_id>:<chave pública Ed25519 em hex>`, separados
+por vírgula nas listas. Provisione os votantes por canal autenticado e
+mantenha vigente a autorização M1C dos servidores. O listener publica o
+contrato em `/v1/meta` e `/openapi.json`. Publicação e resolução exigem
+mTLS e grant `federation:admin`. O receptor consulta o publicador
+autenticado e verifica todos os votos antes de aceitar um frame.
+
+A retirada de política com estado durável, ou a divergência entre política
+e histórico, impede a abertura dos listeners. Na ausência de snapshot
+efetivo, o HTTPS permanece disponível para bootstrap. Piso superior a 1,
+expiração e conflito bloqueiam QUIC e novas operações de ingest no cluster.
+Recupere por HTTPS com um frame superior elegível. Conflito exige resolução
+explícita no nó afetado. O fluxo completo está na
+[SPEC M3-B2](../docs/08-specs/federacao/m3-b2-integracao-operacional.md).
+
 ### Build e execução final (18/11/2026)
 
 ```bash
