@@ -864,14 +864,25 @@ impl BundleService {
     ) -> Result<Activation, WriteError> {
         let mut tx = self.begin(portable).await?;
         let mut guard = portable.lock_cluster_guard(&mut tx).await?;
-        let now = clock();
-        self.check_context(&mut guard, None).await?;
-        portable.authorize_local_at(&mut guard, now).await?;
-        let tx_ref = guard.transaction();
-        let mut state = State::load(tx_ref).await?;
-        let result = self.activate_in_tx(tx_ref, &mut state, now).await?;
+        let result = self
+            .activate_due_in_tx(&mut guard, portable, clock())
+            .await?;
         tx.commit().await?;
         Ok(result)
+    }
+
+    /// Avalia a ativação no mesmo guard e segundo usados para consultar o fence.
+    pub async fn activate_due_in_tx(
+        &self,
+        guard: &mut ClusterGuard<'_, '_>,
+        portable: &PortableJoin,
+        now: i64,
+    ) -> Result<Activation, WriteError> {
+        self.check_context(guard, None).await?;
+        portable.authorize_local_at(guard, now).await?;
+        let tx_ref = guard.transaction();
+        let mut state = State::load(tx_ref).await?;
+        self.activate_in_tx(tx_ref, &mut state, now).await
     }
 
     async fn activate_in_tx(

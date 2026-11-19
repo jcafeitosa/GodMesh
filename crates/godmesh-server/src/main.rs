@@ -81,9 +81,11 @@ use godmesh_federation::peer::PeerRegistry;
 use godmesh_host::collect::{Collector, SharedSnapshot};
 use godmesh_server::admission::AdmissionConfig;
 use godmesh_server::auth::{Authorization, Clock, GrantRegistry, SystemClock};
-use godmesh_server::config_bundle::{BundleService, Fence, Preflight, Rejection, WriteError};
+use godmesh_server::config_bundle::{
+    Activation, BundleService, Fence, Preflight, Rejection, WriteError,
+};
 use godmesh_server::config_https::{self, HttpsClient};
-use godmesh_server::config_operational::{ConfigPlane, ConfigPlaneConfig};
+use godmesh_server::config_operational::{ConfigPlane, ConfigPlaneConfig, limit_statement_time};
 use godmesh_server::http::HostTelemetry;
 use godmesh_server::portable_join::{PortableJoin, PortableJoinConfig, PortableJoinError};
 use godmesh_server::publisher::{OutboxConfig, Publisher};
@@ -491,23 +493,25 @@ fn monotonic_lease_deadline(expires_at: i64) -> Result<Instant, LinkAuthorizatio
         .ok_or(LinkAuthorizationError::Denied)
 }
 
-/// Ativa a pendência e inspeciona o fence confirmado. Cada transação amostra
-/// o relógio depois de tomar o mesmo lock usado pelos efetores.
+/// Ativa a pendência e inspeciona o fence com o mesmo guard e segundo.
 async fn observe_configuration(
     portable: &PortableJoin,
     configuration: &BundleService,
     clock: &dyn Clock,
-) -> Result<(Fence, Option<i64>), WriteError> {
-    configuration
-        .activate_due(portable, || clock.now_unix())
-        .await?;
+    deadline: Option<tokio::time::Instant>,
+) -> Result<(Activation, Fence, Option<i64>), WriteError> {
     let mut tx = portable
         .pool()
         .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
         .await?;
+    if let Some(deadline) = deadline {
+        limit_statement_time(&mut tx, deadline).await?;
+    }
     let mut guard = portable.lock_cluster_guard(&mut tx).await?;
     let now = clock.now_unix();
-    portable.authorize_local_at(&mut guard, now).await?;
+    let activation = configuration
+        .activate_due_in_tx(&mut guard, portable, now)
+        .await?;
     let fence = configuration
         .classify_fence_in_tx(&mut guard, 1, now)
         .await?;
@@ -515,8 +519,11 @@ async fn observe_configuration(
         Fence::Allowed { recheck_at, .. } => Some(recheck_at),
         _ => configuration.next_transition_in_tx(&mut guard, now).await?,
     };
+    if let Some(deadline) = deadline {
+        limit_statement_time(&mut tx, deadline).await?;
+    }
     tx.commit().await?;
-    Ok((fence, next))
+    Ok((activation, fence, next))
 }
 
 fn spawn_configuration_lifecycle(
@@ -530,19 +537,24 @@ fn spawn_configuration_lifecycle(
     let mut trust = portable.trust_changes();
     tokio::spawn(async move {
         loop {
+            let deadline = tokio::time::Instant::now() + interval;
             let observed = tokio::select! {
                 biased;
                 _ = shutdown.changed() => break,
-                result = tokio::time::timeout(
-                    interval, observe_configuration(&portable, &configuration, &SystemClock)
+                result = tokio::time::timeout_at(
+                    deadline,
+                    observe_configuration(&portable, &configuration, &SystemClock, Some(deadline))
                 ) => result,
             };
-            if !matches!(observed, Ok(Ok((Fence::Allowed { .. }, _)))) {
-                // Fecha evidência antiga mesmo quando o banco fica inacessível.
+            if !matches!(
+                observed,
+                Ok(Ok((Activation::NoChange | Activation::Blocked(_), Fence::Allowed { .. }, _)))
+            ) {
+                // Publica a ativação após commit e invalida evidência se o banco falhar.
                 changes.send_modify(|value| *value = value.wrapping_add(1));
             }
             let mut delay = interval;
-            if let Ok(Ok((_, Some(next)))) = observed {
+            if let Ok(Ok((_, _, Some(next)))) = observed {
                 delay = match monotonic_lease_deadline(next) {
                     Ok(deadline) => {
                         interval.min(deadline.saturating_duration_since(Instant::now()))
@@ -633,7 +645,7 @@ async fn run(config: Config) -> Result<(), String> {
             let service = Arc::new(service);
             // Nós novos precisam do plano de controle para ingressar; autoridade
             // ausente bloqueia seus efetores, mas permite o bootstrap M1C.
-            match observe_configuration(portable, &service, &SystemClock).await {
+            match observe_configuration(portable, &service, &SystemClock, None).await {
                 Ok(_) | Err(WriteError::Rejected(Rejection::LocalAuthority)) => {}
                 Err(error) => return Err(format!("estado efetivo da configuração M3: {error}")),
             }
