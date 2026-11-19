@@ -35,7 +35,7 @@ use quinn::{Connection, ConnectionError, RecvStream, SendStream};
 use crate::identity::{NodeIdentity, parse_public_key};
 use crate::manifest::{MAX_MANIFEST_FRAME_BYTES, ManifestError, SignedManifest};
 use crate::node::FederationConfig;
-use crate::peer::{PeerRegistry, TrustState};
+use crate::peer::{PeerRecord, PeerRegistry, TrustState};
 use crate::transport;
 
 /// Motivo de recusa do handshake, com código de fechamento QUIC estável.
@@ -192,6 +192,17 @@ pub(crate) async fn initiate_with_registry(
     config: &FederationConfig,
     registry: Option<&PeerRegistry>,
 ) -> Result<AcceptedPeer, HandshakeError> {
+    initiate_with_epoch(connection, identity, config, registry)
+        .await
+        .map(|(peer, _)| peer)
+}
+
+pub(crate) async fn initiate_with_epoch(
+    connection: &Connection,
+    identity: &NodeIdentity,
+    config: &FederationConfig,
+    registry: Option<&PeerRegistry>,
+) -> Result<(AcceptedPeer, u64), HandshakeError> {
     let result = async {
         let ours = config.signed_manifest(identity);
         let (mut send, mut recv) = connection
@@ -200,7 +211,7 @@ pub(crate) async fn initiate_with_registry(
             .map_err(|_| Rejection::Transport)?;
         send_manifest(&mut send, &ours).await?;
         let theirs = read_manifest(connection, &mut recv).await?;
-        verify_peer(connection, &theirs, config, registry)
+        verify_peer(connection, &theirs, config, registry).map(|peer| (peer, theirs.epoch))
     };
     finish(connection, result.await)
 }
@@ -240,10 +251,7 @@ pub(crate) async fn accept_with_registry(
     finish(connection, result.await)
 }
 
-fn finish(
-    connection: &Connection,
-    result: Result<AcceptedPeer, Rejection>,
-) -> Result<AcceptedPeer, HandshakeError> {
+fn finish<T>(connection: &Connection, result: Result<T, Rejection>) -> Result<T, HandshakeError> {
     match result {
         Ok(peer) => Ok(peer),
         Err(rejection) => {
@@ -324,28 +332,9 @@ fn verify_peer(
     // A allowlist continua autenticando o candidato no TLS. Com autorizador,
     // a autoridade operacional vem da consulta durável do nó.
     if let Some(registry) = registry {
-        let record = registry
-            .record(&theirs.node_id)
-            .ok_or(Rejection::UnknownKey)?;
-        if record.public_key_bytes().ok() != Some(tls_key) {
-            // Chave trocada para um `node_id` já registrado: não é atualização, é
-            // troca de identidade.
-            return Err(Rejection::UnknownKey);
-        }
-        if record.cluster != theirs.cluster {
-            return Err(Rejection::ClusterMismatch);
-        }
-        // O registro é a autoridade, e nada mais: o manifesto não declara o próprio
-        // estado de confiança. Estado vem antes de epoch para que a resposta a um nó
-        // revogado seja "revogado", não "epoch obsoleto".
-        match record.trust_state {
-            TrustState::Authorized => {}
-            TrustState::Revoked => return Err(Rejection::Revoked),
-            TrustState::Pending | TrustState::Unknown => return Err(Rejection::NotAuthorized),
-        }
-        if theirs.epoch < record.epoch {
-            return Err(Rejection::StaleEpoch);
-        }
+        registry.with_record(&theirs.node_id, |record| {
+            verify_registry_record(record, &theirs.cluster, tls_key, theirs.epoch)
+        })?;
     }
 
     Ok(AcceptedPeer {
@@ -354,6 +343,30 @@ fn verify_peer(
         alpn,
         issued_at: theirs.issued_at,
     })
+}
+
+pub(crate) fn verify_registry_record(
+    record: Option<&PeerRecord>,
+    cluster: &str,
+    key: [u8; 32],
+    epoch: u64,
+) -> Result<(), Rejection> {
+    let record = record.ok_or(Rejection::UnknownKey)?;
+    if record.public_key_bytes().ok() != Some(key) {
+        return Err(Rejection::UnknownKey);
+    }
+    if record.cluster != cluster {
+        return Err(Rejection::ClusterMismatch);
+    }
+    match record.trust_state {
+        TrustState::Authorized => {}
+        TrustState::Revoked => return Err(Rejection::Revoked),
+        TrustState::Pending | TrustState::Unknown => return Err(Rejection::NotAuthorized),
+    }
+    if epoch < record.epoch {
+        return Err(Rejection::StaleEpoch);
+    }
+    Ok(())
 }
 
 fn map_manifest_error(error: ManifestError) -> Rejection {

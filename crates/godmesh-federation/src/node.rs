@@ -578,13 +578,38 @@ async fn establish_pinned(
         )
         .await
     } else {
-        let accepted = exchange_manifest(shared, connection, true, Some(&shared.registry)).await?;
+        let (accepted, epoch) = handshake::initiate_with_epoch(
+            connection,
+            &shared.identity,
+            &shared.config,
+            Some(&shared.registry),
+        )
+        .await?;
         let node_id = accepted.node_id.clone();
-        attempt
-            .promote(shared, connection, &node_id, || {
-                register_ready(shared, connection, accepted)
-            })
-            .map_err(|rejection| HandshakeError { rejection })
+        let key = transport::peer_public_key(connection).ok_or(HandshakeError {
+            rejection: Rejection::KeyMismatch,
+        })?;
+        let result = attempt.promote(shared, connection, &node_id, || {
+            let seen_at = now_unix();
+            let snapshot = ready_snapshot(connection, accepted, seen_at);
+            shared.registry.with_record(&node_id, |record| {
+                handshake::verify_registry_record(record, &shared.config.cluster, key, epoch)?;
+                if !shared
+                    .links
+                    .mark_legacy_connection_ready(&node_id, &snapshot, connection)
+                {
+                    return Err(Rejection::Transport);
+                }
+                Ok(())
+            })?;
+            shared.registry.touch(&node_id, seen_at);
+            spawn_heartbeat(shared, connection, node_id.clone());
+            Ok(snapshot)
+        });
+        result.map_err(|rejection| {
+            close_with_rejection(connection, rejection);
+            HandshakeError { rejection }
+        })
     }
 }
 
@@ -679,6 +704,28 @@ impl OperationalLink {
         self.keep_permit(permit)
     }
 
+    async fn authorize_dial(&self, pinned: bool) -> Result<LinkPermit, Rejection> {
+        if !pinned {
+            return self.authorize().await;
+        }
+        if !self.validity.is_current(Instant::now()) {
+            return Err(Rejection::NotAuthorized);
+        }
+        let deadline = tokio::time::Instant::now() + AUTHORIZATION_TIMEOUT;
+        let permit = tokio::time::timeout_at(
+            deadline,
+            self.authorizer
+                .authorize_until(&self.local, &self.remote, deadline),
+        )
+        .await
+        .map_err(|_| Rejection::NotAuthorized)?
+        .map_err(|_| Rejection::NotAuthorized)?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Rejection::NotAuthorized);
+        }
+        self.keep_permit(permit)
+    }
+
     fn keep_permit(&self, permit: LinkPermit) -> Result<LinkPermit, Rejection> {
         if let Some(expires_at) = permit.expires_at {
             // Uma nova consulta pode encurtar o enlace. Para estendê-lo,
@@ -736,11 +783,11 @@ async fn establish_operational(
             },
             result = async {
                 // A autorização precede a primeira operação de protocolo.
-                drop(link.authorize().await?);
+                drop(link.authorize_dial(attempt.is_some()).await?);
                 let accepted = exchange_manifest(shared, connection, initiating, None)
                     .await
                     .map_err(|error| error.rejection)?;
-                let _permit = link.authorize().await?;
+                let _permit = link.authorize_dial(attempt.is_some()).await?;
                 let publish = || {
                     let seen_at = now_unix();
                     let mut snapshot = ready_snapshot(connection, accepted, seen_at);
