@@ -145,7 +145,7 @@ impl Quotas {
 
     #[cfg(test)]
     pub fn reserve(&self, destination: &str, opened_at: Instant) -> Result<Reservation, Error> {
-        self.reserve_route(destination, destination, opened_at)
+        self.reserve_route(destination, destination, opened_at, || Ok(opened_at))
     }
 
     pub fn reserve_route(
@@ -153,11 +153,13 @@ impl Quotas {
         destination: &str,
         route_id: &str,
         opened_at: Instant,
+        checked_now: impl FnOnce() -> Result<Instant, Error>,
     ) -> Result<Reservation, Error> {
         let deadline = opened_at
             .checked_add(OPEN_TIMEOUT)
             .ok_or(Error::RouteUnavailable)?;
         let mut state = self.state.lock().unwrap();
+        checked_now()?;
         if state.active >= 2
             || state
                 .destinations
@@ -268,9 +270,12 @@ impl Reservation {
         self.receiver.clone()
     }
 
-    pub fn forward(&self, now: Instant) -> Result<(), Error> {
+    pub fn forward(
+        &self,
+        checked_now: impl FnOnce() -> Result<Instant, Error>,
+    ) -> Result<(), Error> {
         self.with_slot(|slot, _, _, _| {
-            if slot.phase != Phase::AwaitingToken || now >= slot.open_deadline {
+            if slot.phase != Phase::AwaitingToken || checked_now()? >= slot.open_deadline {
                 return Err(Error::RouteUnavailable);
             }
             slot.phase = Phase::Forwarding;
@@ -330,7 +335,11 @@ impl Reservation {
         }
     }
 
-    pub fn take(&self, direction: Direction, now: Instant) -> Result<Option<SendCredit>, Error> {
+    pub fn take(
+        &self,
+        direction: Direction,
+        checked_now: impl FnOnce() -> Result<Instant, Error>,
+    ) -> Result<Option<SendCredit>, Error> {
         self.with_slot(|slot, destination, aggregate, budget| {
             let i = direction.index();
             if slot.phase != Phase::Forwarding {
@@ -340,6 +349,7 @@ impl Reservation {
             if lane.in_flight {
                 return Ok(None);
             }
+            let now = checked_now()?;
             let Some(datagram) = lane.queue.pop_front() else {
                 return Ok(None);
             };

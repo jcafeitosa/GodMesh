@@ -205,9 +205,13 @@ impl RelayAdmission {
             .checked_add(OPEN_TIMEOUT)
             .ok_or(Error::RouteUnavailable)?;
         let mut reservation = self
-            .authorize(&route, open_deadline, |_| {
-                self.quotas
-                    .reserve_route(&route.destination.node_id, route_id, opened_at)
+            .authorize(&route, open_deadline, |_, checked_now| {
+                self.quotas.reserve_route(
+                    &route.destination.node_id,
+                    route_id,
+                    opened_at,
+                    checked_now,
+                )
             })
             .await?;
         reservation.publish();
@@ -223,7 +227,7 @@ impl RelayAdmission {
         &self,
         route: &Route,
         limit: Instant,
-        decision: impl FnOnce(Instant) -> Result<T, Error>,
+        decision: impl FnOnce(Instant, &dyn Fn() -> Result<Instant, Error>) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let deadline = limit.min(Instant::now() + CHECK_BUDGET);
         if deadline <= Instant::now() {
@@ -284,20 +288,31 @@ impl RelayAdmission {
                 if !acl.contains(&route.id) {
                     return Err(Error::RouteDenied);
                 }
-                let decided_at = Instant::now();
-                if decided_at >= deadline {
-                    return Err(Error::RouteUnavailable);
-                }
                 let expiry = expiry
                     .into_iter()
                     .chain([recheck_at, expires_at])
                     .min()
                     .unwrap();
-                let until_expiry =
-                    Duration::from_secs(expiry.try_into().unwrap_or_default()).saturating_sub(wall);
+                let expiry = Duration::from_secs(expiry.try_into().unwrap_or_default());
+                let until_expiry = expiry.saturating_sub(wall);
+                let checked_now = || {
+                    let instant = Instant::now();
+                    if instant >= deadline {
+                        return Err(Error::RouteUnavailable);
+                    }
+                    // Uma mudança de validade durante as consultas invalida a
+                    // amostra. O mesmo teste vale ao adquirir o lock da quota.
+                    if instant.saturating_duration_since(sampled_at) >= until_expiry
+                        || (self.clock)() >= expiry
+                    {
+                        return Err(Error::AuthorityBlocked);
+                    }
+                    Ok(instant)
+                };
+                let decided_at = checked_now()?;
                 let next_check = (decided_at + RECHECK_INTERVAL)
                     .min(sampled_at + until_expiry.min(RECHECK_INTERVAL));
-                decision(next_check)
+                decision(next_check, &checked_now)
             }),
         )
         .await
@@ -339,8 +354,8 @@ impl RouteInstance {
 
     /// O chamador só solicita esta transição depois de verificar o token da stream.
     pub async fn confirm_token(&self) -> Result<Instant, Error> {
-        self.authorize(self.open_deadline, |next| {
-            self.reservation.forward(Instant::now())?;
+        self.authorize(self.open_deadline, |next, checked_now| {
+            self.reservation.forward(checked_now)?;
             Ok(next)
         })
         .await
@@ -356,15 +371,15 @@ impl RouteInstance {
     }
 
     pub async fn next_credit(&self, direction: Direction) -> Result<Option<SendCredit>, Error> {
-        self.authorize(Instant::now() + CHECK_BUDGET, |_| {
-            self.reservation.take(direction, Instant::now())
+        self.authorize(Instant::now() + CHECK_BUDGET, |_, checked_now| {
+            self.reservation.take(direction, checked_now)
         })
         .await
     }
 
     /// Chamar independentemente das tarefas de I/O, no prazo retornado.
     pub async fn recheck(&self) -> Result<Instant, Error> {
-        self.authorize(Instant::now() + CHECK_BUDGET, |next| {
+        self.authorize(Instant::now() + CHECK_BUDGET, |next, _| {
             if *self.reservation.cancellation().borrow() {
                 return Err(Error::Cancelled);
             }
@@ -406,7 +421,7 @@ impl RouteInstance {
     async fn authorize<T>(
         &self,
         deadline: Instant,
-        decision: impl FnOnce(Instant) -> Result<T, Error>,
+        decision: impl FnOnce(Instant, &dyn Fn() -> Result<Instant, Error>) -> Result<T, Error>,
     ) -> Result<T, Error> {
         if *self.reservation.cancellation().borrow() {
             return Err(Error::Cancelled);
