@@ -38,3 +38,9 @@ O ensaio no fio iniciou três processos em loopback no macOS, com portas TCP e U
 - **Prazo sem recibo.** Em outra execução com três bancos novos, B↔C permaneceu em `ready` após A revogar A→B, enquanto B e C ainda tinham vigências válidas e aguardavam o recibo. Após o vencimento, o enlace saiu de `ready` e C recusou novo ingest. A contagem durável de posições em C permaneceu igual.
 
 As duas rodadas encerraram os processos e os clusters PostgreSQL descartáveis. O ensaio verificou ingresso, vigência, revogação, QUIC e ingest no recorte M1C-B. A distribuição de configuração, a replicação de eventos e a validação em hosts Linux independentes continuam nas fatias seguintes.
+
+A rodada com entrega do recibo também foi repetida no mesmo binário com os
+listeners HTTP e QUIC dos três processos em loopback IPv6 (`::1`). Ingresso,
+heartbeats, ingest, ordenação da revogação, recuperação após perda da resposta
+e troca para a cadeia alternativa passaram. O PostgreSQL descartável continuou
+em loopback IPv4 nessa rodada.
