@@ -417,18 +417,21 @@ impl LocalRestore {
         now: i64,
     ) -> Result<[u8; 32], Error> {
         let mark = evidence.high_water();
-        let frames = controls::prefix_frames(&self.service, guard, authority, prefix, now).await?;
-        let i = usize::try_from(mark.backup_prefix).map_err(|_| Error::Incomplete)?;
-        let (backup, gap) = frames.split_at_checked(i).ok_or(Error::Incomplete)?;
-        if proofs_digest(mark.backup_proof_count, backup.iter().map(Vec::as_slice))?
-            != mark.backup_proofs_sha256
-            || (prefix == mark.cut_prefix
-                && proofs_digest(mark.gap_proof_count, gap.iter().map(Vec::as_slice))?
-                    != mark.gap_proofs_sha256)
+        let digests = controls::prefix_digests(
+            &self.service,
+            guard,
+            authority,
+            mark.backup_prefix,
+            prefix,
+            now,
+        )
+        .await?;
+        if digests.backup != mark.backup_proofs_sha256
+            || (prefix == mark.cut_prefix && digests.gap != mark.gap_proofs_sha256)
         {
             return Err(Error::Incomplete);
         }
-        Ok(proofs_digest(prefix, frames.iter().map(Vec::as_slice))?)
+        Ok(digests.total)
     }
 }
 

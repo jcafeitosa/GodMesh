@@ -101,7 +101,7 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
     let Some(a) = ReceiverFixture::new("restore_a").await else {
         return;
     };
-    let cut = ReceiverFixture::new_with(
+    let mut cut = ReceiverFixture::new_with(
         "restore_cut",
         a.origin.clone(),
         a.receiver.clone(),
@@ -109,6 +109,7 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
     )
     .await
     .unwrap();
+    cut.config.max_events = 1.try_into().unwrap();
     let b = ReceiverFixture::new_with(
         "restore_target",
         a.origin.clone(),
@@ -192,15 +193,17 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
     let seeded = ext.observe(&key, deadline()).await.unwrap();
     let (old, old_service) = local(&cut, first.clone()).await;
     old.boot_initial(&seeded, deadline()).await.unwrap();
-    old_service
-        .apply_copy(
-            a_peer,
-            Limits::new(12, 4096, 16_384).unwrap(),
-            &frames[..2],
-            deadline(),
-        )
-        .await
-        .unwrap();
+    for frame in &frames[..2] {
+        old_service
+            .apply_copy(
+                a_peer,
+                Limits::new(1, 4096, 16_384).unwrap(),
+                std::slice::from_ref(frame),
+                deadline(),
+            )
+            .await
+            .unwrap();
+    }
     old.retire(deadline()).await.unwrap();
     assert!(matches!(
         old.boot_initial(&seeded, deadline()).await,

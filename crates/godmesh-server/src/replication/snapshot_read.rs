@@ -119,6 +119,44 @@ pub(crate) async fn local_snapshot_proofs(
     cut: i64,
     now: i64,
 ) -> Result<(Vec<Vec<u8>>, i64), Error> {
+    let mut ttl = i64::MAX;
+    let mut remaining = authority.limits.max_data_bytes;
+    let mut frames = Vec::new();
+    visit_local_proofs(
+        guard,
+        series,
+        authority,
+        base,
+        cut,
+        now,
+        |frame, expires_at| {
+            if frames.len() >= authority.limits.max_events {
+                return Err(Error::LimitExceeded);
+            }
+            remaining = remaining
+                .checked_sub(4)
+                .and_then(|n| n.checked_sub(frame.len()))
+                .ok_or(Error::LimitExceeded)?;
+            ttl = ttl.min(expires_at);
+            frames.push(frame);
+            Ok(())
+        },
+    )
+    .await?;
+    Ok((frames, ttl))
+}
+
+/// Lê uma posição por vez, dentro da transação e do segundo já amostrado.
+/// O visitante decide se acumula o subconjunto ou só atualiza seu compromisso.
+pub(crate) async fn visit_local_proofs<E: From<Error>>(
+    guard: &mut ClusterGuard<'_, '_>,
+    series: Series<'_>,
+    authority: CopyAuthority<'_>,
+    base: i64,
+    cut: i64,
+    now: i64,
+    mut visit: impl FnMut(Vec<u8>, i64) -> Result<(), E>,
+) -> Result<(), E> {
     let first = base
         .checked_add(1)
         .filter(|n| *n > 0 && *n <= cut)
@@ -126,26 +164,16 @@ pub(crate) async fn local_snapshot_proofs(
     let db = locked(guard, series.namespace).await?;
     let r = load_series(db, series).await?;
     if r.primary() {
-        return Err(Error::Authority);
+        return Err(Error::Authority.into());
     }
     let policy = store::current_policy(db, &r).await?;
-    let mut ttl = i64::MAX;
-    let mut remaining = authority.limits.max_data_bytes;
-    let mut frames = Vec::new();
     for seq in first..=cut {
         let proof = usable(db, &r, &policy, seq, now).await?;
         verify_local_proof(&proof, &r, authority.origin, seq, false)?;
-        if frames.len() >= authority.limits.max_events
-            || proof.frame.len() > authority.limits.max_envelope_bytes
-        {
-            return Err(Error::LimitExceeded);
+        if proof.frame.len() > authority.limits.max_envelope_bytes {
+            return Err(Error::LimitExceeded.into());
         }
-        remaining = remaining
-            .checked_sub(4)
-            .and_then(|n| n.checked_sub(proof.frame.len()))
-            .ok_or(Error::LimitExceeded)?;
-        ttl = ttl.min(proof.expires_at);
-        frames.push(proof.frame);
+        visit(proof.frame, proof.expires_at)?;
     }
-    Ok((frames, ttl))
+    Ok(())
 }

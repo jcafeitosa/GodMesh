@@ -1,5 +1,5 @@
 use godmesh_federation::restore_evidence::{
-    ControlState, CopyAcl, CopyPolicy, IntentState, RestoreKey, proofs_digest,
+    ControlState, CopyAcl, CopyPolicy, IntentState, ProofsDigest, RestoreKey,
 };
 use sqlx::{PgConnection, Row};
 use tokio::time::Instant;
@@ -238,15 +238,11 @@ pub async fn observe_cut(
         if backup_prefix > control.prefix {
             return Err(Error::Incomplete);
         }
-        let frames = prefix_frames(svc, guard, authority, control.prefix, now).await?;
-        let (backup, gap) =
-            frames.split_at(usize::try_from(backup_prefix).map_err(|_| Error::Incomplete)?);
+        let digests =
+            prefix_digests(svc, guard, authority, backup_prefix, control.prefix, now).await?;
         Ok(CutObservation {
-            backup_proofs_sha256: proofs_digest(backup_prefix, backup.iter().map(Vec::as_slice))?,
-            gap_proofs_sha256: proofs_digest(
-                control.prefix - backup_prefix,
-                gap.iter().map(Vec::as_slice),
-            )?,
+            backup_proofs_sha256: digests.backup,
+            gap_proofs_sha256: digests.gap,
             control,
             cut_at: now,
         })
@@ -254,22 +250,51 @@ pub async fn observe_cut(
     .await
 }
 
-pub(super) async fn prefix_frames(
+pub(super) struct PrefixDigests {
+    pub backup: [u8; 32],
+    pub gap: [u8; 32],
+    pub total: [u8; 32],
+}
+
+pub(super) async fn prefix_digests(
     svc: &ReplicaService,
     guard: &mut ClusterGuard<'_, '_>,
     authority: CopyAuthority<'_>,
+    backup_prefix: u64,
     prefix: u64,
     now: i64,
-) -> Result<Vec<Vec<u8>>, Error> {
-    if prefix == 0 {
-        return Ok(Vec::new());
+) -> Result<PrefixDigests, Error> {
+    let mut backup = ProofsDigest::new(backup_prefix)?;
+    let mut gap = ProofsDigest::new(prefix.checked_sub(backup_prefix).ok_or(Error::Incomplete)?)?;
+    let mut total = ProofsDigest::new(prefix)?;
+    let mut remaining_backup = backup_prefix;
+    if prefix > 0 {
+        let cut = i64::try_from(prefix).map_err(|_| Error::Incomplete)?;
+        snapshot_read::visit_local_proofs(
+            guard,
+            svc.series(),
+            authority,
+            0,
+            cut,
+            now,
+            |frame, _| {
+                if remaining_backup > 0 {
+                    backup.update(&frame)?;
+                    remaining_backup -= 1;
+                } else {
+                    gap.update(&frame)?;
+                }
+                total.update(&frame)?;
+                Ok::<_, Error>(())
+            },
+        )
+        .await?;
     }
-    let cut = i64::try_from(prefix).map_err(|_| Error::Incomplete)?;
-    Ok(
-        snapshot_read::local_snapshot_proofs(guard, svc.series(), authority, 0, cut, now)
-            .await?
-            .0,
-    )
+    Ok(PrefixDigests {
+        backup: backup.finish()?,
+        gap: gap.finish()?,
+        total: total.finish()?,
+    })
 }
 
 async fn copy_side(
