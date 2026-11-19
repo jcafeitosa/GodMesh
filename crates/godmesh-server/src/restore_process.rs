@@ -128,14 +128,35 @@ impl PgAllocation {
             "login PostgreSQL incompatível com o papel da fonte de restore".to_owned()
         })?;
         let scoped: bool = sqlx::query_scalar(
-            "SELECT NOT has_any_column_privilege('public.federation_restore_generation_logins','INSERT,UPDATE')
-               AND NOT has_any_column_privilege('public.federation_restore_control','INSERT')
-               AND NOT has_any_column_privilege('public.federation_restore_decision','UPDATE')
-               AND NOT has_table_privilege('public.federation_restore_generation_logins','DELETE,TRUNCATE')
-               AND NOT has_table_privilege('public.federation_restore_control','DELETE,TRUNCATE')
-               AND NOT has_table_privilege('public.federation_restore_decision','DELETE,TRUNCATE')
-               AND has_any_column_privilege('public.federation_restore_control','UPDATE') = $1
-               AND has_any_column_privilege('public.federation_restore_decision','INSERT') = $1",
+            "WITH relations(table_oid) AS (VALUES
+                 ('public.federation_restore_generation_logins'::regclass),
+                 ('public.federation_restore_control'::regclass),
+                 ('public.federation_restore_decision'::regclass)
+             ), effective AS (
+                 SELECT table_oid, attname::text AS column_name, privilege
+                 FROM relations
+                 JOIN pg_catalog.pg_attribute ON attrelid = table_oid
+                 CROSS JOIN (VALUES ('INSERT'), ('UPDATE')) AS writes(privilege)
+                 WHERE attnum > 0 AND NOT attisdropped
+                   AND pg_catalog.has_column_privilege(table_oid, attnum, privilege)
+             ), required(table_oid, column_name, privilege) AS (
+                 SELECT 'public.federation_restore_control'::regclass, 'phase', 'UPDATE'
+                 WHERE $1
+                 UNION ALL
+                 SELECT 'public.federation_restore_decision'::regclass, column_name, 'INSERT'
+                 FROM unnest(ARRAY[
+                     'fixture_id', 'cluster', 'local_node', 'origin_node', 'tenant_id',
+                     'stream_id', 'partition', 'authority_epoch', 'generation',
+                     'authorization_sha256', 'reconciliation_sha256', 'consumed_at'
+                 ]) AS decision(column_name)
+                 WHERE $1
+             )
+             SELECT NOT EXISTS (SELECT * FROM effective EXCEPT SELECT * FROM required)
+                AND NOT EXISTS (SELECT * FROM required EXCEPT SELECT * FROM effective)
+                AND NOT EXISTS (
+                    SELECT 1 FROM relations
+                    WHERE pg_catalog.has_table_privilege(table_oid, 'DELETE, TRUNCATE, TRIGGER')
+                )",
         )
         .bind(consume)
         .fetch_one(&mut *connection)
