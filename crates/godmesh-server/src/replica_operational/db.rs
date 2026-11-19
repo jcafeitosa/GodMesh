@@ -5,7 +5,7 @@ use tokio::time::{Instant, timeout_at};
 
 use super::EffectError;
 
-pub(super) struct Lease {
+pub(crate) struct Lease {
     connection: PoolConnection<Postgres>,
     dirty: bool,
 }

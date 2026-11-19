@@ -289,7 +289,7 @@ pub fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(2)
 }
 
-fn configured_portable(pins: &str) -> PortableJoinConfig {
+pub(crate) fn configured_portable(pins: &str) -> PortableJoinConfig {
     let governance = format!("single_approver:{CLUSTER}");
     PortableJoinConfig::from_env_with(|name| {
         Some(
