@@ -47,6 +47,7 @@ pub mod manifest;
 pub mod node;
 pub mod peer;
 pub mod snapshot;
+pub mod snapshot_wire;
 pub mod transport;
 
 pub use approval::{ApprovalCertificate, ApprovalError, DecisionAction};
