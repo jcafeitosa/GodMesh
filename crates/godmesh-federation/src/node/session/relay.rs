@@ -5,8 +5,9 @@ use super::{
     STREAM_ABORTED, SendStream, SessionError, SessionState, before_deadline, checked_length,
     ensure_deadline, exact_error, read_error, valid_length, write_error,
 };
+use crate::relay_wire::{Control, Open, decode_control, validate_reply};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 
 impl OperationalSession {
     /// Seleciona o perfil relay para esta stream de saída.
@@ -23,7 +24,7 @@ impl OperationalSession {
                 recv,
                 deadline,
                 max_control_bytes,
-                Token::Send,
+                Role::Initiator,
             )
         })
         .await
@@ -43,18 +44,25 @@ impl OperationalSession {
                 recv,
                 deadline,
                 max_control_bytes,
-                Token::Expect,
+                Role::Responder,
             )
         })
         .await
     }
 }
 
-#[derive(PartialEq, Eq)]
-enum Token {
-    Send,
-    Expect,
-    Confirmed,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Initiator,
+    Responder,
+}
+
+enum OpeningPhase {
+    Request,
+    Reply(Open),
+    Token { bytes: [u8; 16], cap: NonZeroU32 },
+    Confirmed(NonZeroU32),
+    Refused,
 }
 
 struct RouteStream {
@@ -115,7 +123,8 @@ pub struct RelayOpening {
     send: RelaySend,
     recv: RelayRecv,
     deadline: Instant,
-    token: Token,
+    role: Role,
+    phase: OpeningPhase,
 }
 
 impl RelayOpening {
@@ -126,7 +135,7 @@ impl RelayOpening {
         recv: RecvStream,
         deadline: Instant,
         cap: NonZeroU32,
-        token: Token,
+        role: Role,
     ) -> Self {
         let route = Arc::new(RouteStream {
             session: Arc::clone(session),
@@ -136,18 +145,19 @@ impl RelayOpening {
         Self {
             send: RelaySend {
                 route: Arc::clone(&route),
-                stream: send,
+                stream: Arc::new(Mutex::new(send)),
                 cap,
                 finished: false,
             },
             recv: RelayRecv {
                 route,
-                stream: recv,
+                stream: Arc::new(Mutex::new(recv)),
                 cap,
                 finished: false,
             },
             deadline,
-            token,
+            role,
+            phase: OpeningPhase::Request,
         }
     }
 
@@ -155,34 +165,82 @@ impl RelayOpening {
         self.deadline
     }
 
+    /// Recebe o controle esperado para o papel e a fase atuais.
     pub async fn read_control(&mut self) -> Result<Vec<u8>, SessionError> {
-        self.require_control()?;
-        self.recv.read_datagram(self.deadline).await
+        self.require_control_direction(Role::Responder)?;
+        let body = self.recv.read_datagram(self.deadline).await?;
+        self.phase = self.next_control(&body)?;
+        Ok(body)
     }
 
+    /// Escreve o controle esperado para o papel e a fase atuais.
     pub async fn write_control(&mut self, body: &[u8]) -> Result<(), SessionError> {
-        self.require_control()?;
-        self.send.write_datagram(body, self.deadline).await
-    }
-
-    /// Envia a confirmação no lado que abriu a stream.
-    pub async fn send_token(&mut self, token: [u8; 16]) -> Result<(), SessionError> {
-        self.require_token(Token::Send)?;
-        self.send.write(&token, None, self.deadline).await?;
-        self.token = Token::Confirmed;
+        self.require_control_direction(Role::Initiator)?;
+        let next = self.next_control(body)?;
+        self.send.write_datagram(body, self.deadline).await?;
+        self.phase = next;
         Ok(())
     }
 
-    /// Confere exatamente os 16 bytes de confirmação no lado que aceitou.
+    fn require_control_direction(&mut self, request_role: Role) -> Result<(), SessionError> {
+        let allowed = match self.phase {
+            OpeningPhase::Request => self.role == request_role,
+            OpeningPhase::Reply(_) => self.role != request_role,
+            _ => false,
+        };
+        if allowed { Ok(()) } else { Err(self.invalid()) }
+    }
+
+    fn next_control(&mut self, body: &[u8]) -> Result<OpeningPhase, SessionError> {
+        match self.decode_next_control(body) {
+            Some(phase) => Ok(phase),
+            None => Err(self.invalid()),
+        }
+    }
+
+    fn decode_next_control(&self, body: &[u8]) -> Option<OpeningPhase> {
+        let control = decode_control(body, self.send.cap).ok()?;
+        match (&self.phase, control) {
+            (OpeningPhase::Request, Control::Open(request)) => Some(OpeningPhase::Reply(request)),
+            (OpeningPhase::Reply(request), reply) => {
+                let cap = match &reply {
+                    Control::Accept(accept) => accept.max_datagram_bytes,
+                    _ => self.send.cap, // O codec só compara o teto em Accept.
+                };
+                validate_reply(request, &reply, cap).ok()?;
+                match reply {
+                    Control::Accept(accept) => Some(OpeningPhase::Token {
+                        bytes: accept.token_bytes().ok()?,
+                        cap,
+                    }),
+                    Control::Refuse(_) => Some(OpeningPhase::Refused),
+                    Control::Open(_) => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Envia a confirmação do aceite correlacionado no lado solicitante.
+    pub async fn send_token(&mut self, token: [u8; 16]) -> Result<(), SessionError> {
+        let cap = self.require_token(Role::Initiator, token)?;
+        self.send.write(&token, None, self.deadline).await?;
+        self.phase = OpeningPhase::Confirmed(cap);
+        Ok(())
+    }
+
+    /// Confere os 16 bytes do aceite já enviado pelo relay.
     pub async fn expect_token(&mut self, expected: [u8; 16]) -> Result<(), SessionError> {
-        self.require_token(Token::Expect)?;
+        let cap = self.require_token(Role::Responder, expected)?;
         let mut token = [0; 16];
-        let deadline = self.deadline;
-        let route = &self.recv.route;
-        let result = route
-            .io(deadline, async {
+        let result = self
+            .recv
+            .route
+            .io(self.deadline, async {
                 self.recv
                     .stream
+                    .lock()
+                    .await
                     .read_exact(&mut token)
                     .await
                     .map_err(exact_error)?;
@@ -191,17 +249,39 @@ impl RelayOpening {
                     .ok_or(SessionError::InvalidFrame)
             })
             .await;
-        self.recv.handle_result(result)?;
-        self.token = Token::Confirmed;
+        if let Err(error) = result {
+            self.send.abort();
+            self.recv.abort();
+            return Err(error);
+        }
+        self.phase = OpeningPhase::Confirmed(cap);
         Ok(())
+    }
+
+    fn require_token(
+        &mut self,
+        role: Role,
+        expected: [u8; 16],
+    ) -> Result<NonZeroU32, SessionError> {
+        if self.role == role
+            && let OpeningPhase::Token { bytes, cap } = self.phase
+            && bytes == expected
+        {
+            return Ok(cap);
+        }
+        Err(self.invalid())
     }
 
     /// Emite FIN após uma recusa. Descartar a abertura preserva esse FIN.
     pub fn finish_send(&mut self) -> Result<(), SessionError> {
-        self.require_control()?;
+        if self.role != Role::Responder || !matches!(self.phase, OpeningPhase::Refused) {
+            return Err(self.invalid());
+        }
         self.send.route.check(self.deadline)?;
         self.send
             .stream
+            .try_lock()
+            .map_err(|_| SessionError::Transport)?
             .finish()
             .map_err(|_| SessionError::Transport)?;
         self.send.finished = true;
@@ -210,12 +290,22 @@ impl RelayOpening {
 
     /// Valida o FIN da recusa sem aceitar bytes adicionais.
     pub async fn expect_fin(&mut self) -> Result<(), SessionError> {
-        self.require_control()?;
+        if self.role != Role::Initiator || !matches!(self.phase, OpeningPhase::Refused) {
+            return Err(self.invalid());
+        }
         let result = self
             .recv
             .route
             .io(self.deadline, async {
-                match self.recv.stream.read(&mut [0]).await.map_err(read_error)? {
+                match self
+                    .recv
+                    .stream
+                    .lock()
+                    .await
+                    .read(&mut [0])
+                    .await
+                    .map_err(read_error)?
+                {
                     None => Ok(()),
                     Some(_) => Err(SessionError::InvalidFrame),
                 }
@@ -232,37 +322,39 @@ impl RelayOpening {
         mut self,
         max_datagram_bytes: NonZeroU32,
     ) -> Result<(RelaySend, RelayRecv, RelayCancellation), SessionError> {
-        self.require_token(Token::Confirmed)?;
+        if !matches!(self.phase, OpeningPhase::Confirmed(cap) if cap == max_datagram_bytes) {
+            return Err(self.invalid());
+        }
         self.send.route.check(self.deadline)?;
         self.send.cap = max_datagram_bytes;
         self.recv.cap = max_datagram_bytes;
         let cancellation = RelayCancellation(self.send.route.cancelled.clone());
+        let supervisor = cancellation.clone();
+        let connection = self.send.route.session.connection().clone();
+        let send = Arc::clone(&self.send.stream);
+        let recv = Arc::clone(&self.recv.stream);
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = supervisor.cancelled() => {}
+                _ = connection.closed() => supervisor.cancel(),
+            }
+            let _ = send.lock().await.reset(STREAM_ABORTED.into());
+            let _ = recv.lock().await.stop(STREAM_ABORTED.into());
+        });
         Ok((self.send, self.recv, cancellation))
     }
 
-    fn require_token(&mut self, expected: Token) -> Result<(), SessionError> {
-        if self.token == expected && !self.send.finished && !self.recv.finished {
-            return Ok(());
-        }
+    fn invalid(&mut self) -> SessionError {
         self.send.abort();
         self.recv.abort();
-        Err(SessionError::InvalidFrame)
-    }
-
-    fn require_control(&mut self) -> Result<(), SessionError> {
-        if self.token != Token::Confirmed && !self.send.finished && !self.recv.finished {
-            return Ok(());
-        }
-        self.send.abort();
-        self.recv.abort();
-        Err(SessionError::InvalidFrame)
+        SessionError::InvalidFrame
     }
 }
 
 /// Direção de envio. Descartar após cancelamento parcial de uma future de I/O.
 pub struct RelaySend {
     route: Arc<RouteStream>,
-    stream: SendStream,
+    stream: Arc<Mutex<SendStream>>,
     cap: NonZeroU32,
     finished: bool,
 }
@@ -286,10 +378,11 @@ impl RelaySend {
         let result = self
             .route
             .io(deadline, async {
+                let mut stream = self.stream.lock().await;
                 if let Some(prefix) = prefix {
-                    self.stream.write_all(&prefix).await.map_err(write_error)?;
+                    stream.write_all(&prefix).await.map_err(write_error)?;
                 }
-                self.stream.write_all(body).await.map_err(write_error)
+                stream.write_all(body).await.map_err(write_error)
             })
             .await;
         if result.is_err() {
@@ -300,8 +393,10 @@ impl RelaySend {
 
     fn abort(&mut self) {
         self.route.cancel();
-        if !self.finished {
-            let _ = self.stream.reset(STREAM_ABORTED.into());
+        if !self.finished
+            && let Ok(mut stream) = self.stream.try_lock()
+        {
+            let _ = stream.reset(STREAM_ABORTED.into());
         }
     }
 }
@@ -315,7 +410,7 @@ impl Drop for RelaySend {
 /// Direção de recepção. Descartar após cancelamento parcial de uma future de I/O.
 pub struct RelayRecv {
     route: Arc<RouteStream>,
-    stream: RecvStream,
+    stream: Arc<Mutex<RecvStream>>,
     cap: NonZeroU32,
     finished: bool,
 }
@@ -325,21 +420,16 @@ impl RelayRecv {
         let result = self
             .route
             .io(deadline, async {
+                let mut stream = self.stream.lock().await;
                 let mut prefix = [0; 4];
-                self.stream
-                    .read_exact(&mut prefix)
-                    .await
-                    .map_err(exact_error)?;
+                stream.read_exact(&mut prefix).await.map_err(exact_error)?;
                 let length = u32::from_be_bytes(prefix);
                 if !valid_length(length, self.cap.get(), None) {
                     return Err(SessionError::InvalidFrame);
                 }
                 let size = usize::try_from(length).map_err(|_| SessionError::InvalidFrame)?;
                 let mut body = vec![0; size];
-                self.stream
-                    .read_exact(&mut body)
-                    .await
-                    .map_err(exact_error)?;
+                stream.read_exact(&mut body).await.map_err(exact_error)?;
                 Ok(body)
             })
             .await;
@@ -355,8 +445,10 @@ impl RelayRecv {
 
     fn abort(&mut self) {
         self.route.cancel();
-        if !self.finished {
-            let _ = self.stream.stop(STREAM_ABORTED.into());
+        if !self.finished
+            && let Ok(mut stream) = self.stream.try_lock()
+        {
+            let _ = stream.stop(STREAM_ABORTED.into());
         }
     }
 }

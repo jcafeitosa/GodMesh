@@ -2269,6 +2269,42 @@ mod pinned_dial {
 }
 
 #[cfg(feature = "relay-harness")]
+fn relay_control(kind: &str, route: &str, token: [u8; 16]) -> Vec<u8> {
+    let mut json = serde_json::json!({
+        "type": format!("m5.relay.{kind}.v1"),
+        "request_id": "0123456789abcdef0123456789abcdef",
+        "route_id": route,
+    });
+    if kind == "accept" {
+        json["ready_token"] = hex::encode(token).into();
+        json["max_datagram_bytes"] = 1400.into();
+    }
+    if kind == "refuse" {
+        json["error"] = "route_denied".into();
+    }
+    serde_json::to_vec(&json).unwrap()
+}
+
+#[cfg(feature = "relay-harness")]
+async fn relay_raw_write(send: &mut quinn::SendStream, body: &[u8]) {
+    send.write_all(&u32::try_from(body.len()).unwrap().to_be_bytes())
+        .await
+        .unwrap();
+    send.write_all(body).await.unwrap();
+}
+
+#[cfg(feature = "relay-harness")]
+async fn relay_raw_read(recv: &mut quinn::RecvStream, expected: &[u8]) {
+    let mut bytes = vec![0; expected.len() + 4];
+    recv.read_exact(&mut bytes).await.unwrap();
+    assert_eq!(
+        &bytes[..4],
+        &u32::try_from(expected.len()).unwrap().to_be_bytes()
+    );
+    assert_eq!(&bytes[4..], expected);
+}
+
+#[cfg(feature = "relay-harness")]
 #[tokio::test]
 async fn relay_rejeita_prefixo_sem_corpo_sem_fechar_sessao() {
     let peer = RawPeer::new(config());
@@ -2292,12 +2328,13 @@ async fn relay_rejeita_prefixo_sem_corpo_sem_fechar_sessao() {
     drop(opening);
 
     let (mut send, _recv) = connection.open_bi().await.unwrap();
-    send.write_all(b"\0\0\0\x01x").await.unwrap();
+    let request = relay_control("open", "d1", [0; 16]);
+    relay_raw_write(&mut send, &request).await;
     let mut opening = session
         .accept_relay(Duration::from_secs(2), NonZeroU32::new(512).unwrap())
         .await
         .unwrap();
-    assert_eq!(opening.read_control().await.unwrap(), b"x");
+    assert_eq!(opening.read_control().await.unwrap(), request);
 }
 
 #[cfg(feature = "relay-harness")]
@@ -2310,17 +2347,17 @@ async fn relay_token_preserva_frame_e_prazo_de_abertura_nao_expira_encaminhament
     let session = next_session(&mut sessions).await;
     let cap = NonZeroU32::new(512).unwrap();
     let (mut send, mut recv) = connection.open_bi().await.unwrap();
-    send.write_all(b"\0\0\0\x01x").await.unwrap();
+    let request = relay_control("open", "d1", [0; 16]);
+    relay_raw_write(&mut send, &request).await;
     let mut opening = session
         .accept_relay(Duration::from_secs(1), cap)
         .await
         .unwrap();
-    assert_eq!(opening.read_control().await.unwrap(), b"x");
-    opening.write_control(b"ok").await.unwrap();
-    let mut response = [0; 6];
-    recv.read_exact(&mut response).await.unwrap();
-    assert_eq!(&response, b"\0\0\0\x02ok");
+    assert_eq!(opening.read_control().await.unwrap(), request);
     let token = [42; 16];
+    let reply = relay_control("accept", "d1", token);
+    opening.write_control(&reply).await.unwrap();
+    relay_raw_read(&mut recv, &reply).await;
     send.write_all(&token[..5]).await.unwrap();
     let body = vec![27; 1400];
     let mut suffix = token[5..].to_vec();
@@ -2351,9 +2388,16 @@ async fn relay_token_preserva_frame_e_prazo_de_abertura_nao_expira_encaminhament
         cancel.cancel();
     };
     assert_eq!(tokio::join!(read, cancel_read).0, Err(SessionError::Closed));
-    assert_eq!(
-        outbound.write_datagram(&body, deadline).await,
-        Err(SessionError::Closed)
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_millis(500), recv.read(&mut [0])).await,
+        Ok(Err(quinn::ReadError::Reset(_)))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), send.stopped())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_some()
     );
     assert!(matches!(
         session.open_relay(deadline, cap).await,
@@ -2363,11 +2407,11 @@ async fn relay_token_preserva_frame_e_prazo_de_abertura_nao_expira_encaminhament
     drop(outbound);
 
     let mut next = session.open_relay(deadline, cap).await.unwrap();
-    next.write_control(b"y").await.unwrap();
-    let (_, mut peer_recv) = connection.accept_bi().await.unwrap();
-    let mut frame = [0; 5];
-    peer_recv.read_exact(&mut frame).await.unwrap();
-    assert_eq!(&frame, b"\0\0\0\x01y");
+    next.write_control(&request).await.unwrap();
+    let (mut peer_send, mut peer_recv) = connection.accept_bi().await.unwrap();
+    relay_raw_read(&mut peer_recv, &request).await;
+    relay_raw_write(&mut peer_send, &reply).await;
+    assert_eq!(next.read_control().await.unwrap(), reply);
     next.send_token(token).await.unwrap();
     let mut confirmation = [0; 16];
     peer_recv.read_exact(&mut confirmation).await.unwrap();
@@ -2389,11 +2433,17 @@ async fn relay_token_divergente_ou_incompleto_encerra_abertura() {
         (&[0; 15][..], SessionError::Timeout),
     ] {
         let (mut send, mut recv) = connection.open_bi().await.unwrap();
-        send.write_all(token).await.unwrap();
+        let request = relay_control("open", "d1", [0; 16]);
+        relay_raw_write(&mut send, &request).await;
         let mut opening = session
             .accept_relay(Duration::from_millis(150), cap)
             .await
             .unwrap();
+        assert_eq!(opening.read_control().await.unwrap(), request);
+        let reply = relay_control("accept", "d1", [0; 16]);
+        opening.write_control(&reply).await.unwrap();
+        relay_raw_read(&mut recv, &reply).await;
+        send.write_all(token).await.unwrap();
         assert_eq!(opening.expect_token([0; 16]).await, Err(error));
         assert!(opening.into_forwarding(cap).is_err());
         assert!(matches!(
@@ -2416,14 +2466,18 @@ async fn relay_recusa_exige_fin_sem_bytes_adicionais() {
     for extra in [false, true] {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let mut opening = session.open_relay(deadline, cap).await.unwrap();
-        opening.write_control(b"x").await.unwrap();
+        opening
+            .write_control(&relay_control("open", "d1", [0; 16]))
+            .await
+            .unwrap();
         let (mut send, _recv) = connection.accept_bi().await.unwrap();
-        send.write_all(b"\0\0\0\x02no").await.unwrap();
+        let refusal = relay_control("refuse", "d1", [0; 16]);
+        relay_raw_write(&mut send, &refusal).await;
         if extra {
             send.write_all(b"x").await.unwrap();
         }
         send.finish().unwrap();
-        assert_eq!(opening.read_control().await.unwrap(), b"no");
+        assert_eq!(opening.read_control().await.unwrap(), refusal);
         assert_eq!(
             opening.expect_fin().await,
             if extra {
@@ -2451,12 +2505,18 @@ async fn relay_dados_rejeitam_prefixo_excedente_e_respeitam_prazo_proprio() {
         (1400_u32, SessionError::Timeout),
     ] {
         let (mut send, mut recv) = connection.open_bi().await.unwrap();
-        send.write_all(&[0; 16]).await.unwrap();
-        send.write_all(&length.to_be_bytes()).await.unwrap();
+        let request = relay_control("open", "d1", [0; 16]);
+        relay_raw_write(&mut send, &request).await;
         let mut opening = session
             .accept_relay(Duration::from_secs(2), control_cap)
             .await
             .unwrap();
+        assert_eq!(opening.read_control().await.unwrap(), request);
+        let reply = relay_control("accept", "d1", [0; 16]);
+        opening.write_control(&reply).await.unwrap();
+        relay_raw_read(&mut recv, &reply).await;
+        send.write_all(&[0; 16]).await.unwrap();
+        send.write_all(&length.to_be_bytes()).await.unwrap();
         opening.expect_token([0; 16]).await.unwrap();
         let (mut outbound, mut inbound, cancel) = opening.into_forwarding(datagram_cap).unwrap();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
@@ -2473,4 +2533,102 @@ async fn relay_dados_rejeitam_prefixo_excedente_e_respeitam_prazo_proprio() {
             Err(quinn::ReadError::Reset(_))
         ));
     }
+}
+
+#[cfg(feature = "relay-harness")]
+#[tokio::test]
+async fn relay_barreira_exige_aceite_correlacionado_nas_duas_pontas() {
+    let peer = RawPeer::new(config());
+    let (node, mut sessions) =
+        session_node_with_config(&peer, TestAuthorizer::new(Ok(None)), config());
+    let connection = session_handshake(&node, &peer).await;
+    let session = next_session(&mut sessions).await;
+    let cap = NonZeroU32::new(512).unwrap();
+    let token = [42; 16];
+    let request = relay_control("open", "d1", token);
+
+    for send_open in [false, true] {
+        let (mut send, _recv) = connection.open_bi().await.unwrap();
+        if send_open {
+            relay_raw_write(&mut send, &request).await;
+        }
+        send.write_all(&token).await.unwrap();
+        let mut opening = session
+            .accept_relay(Duration::from_secs(2), cap)
+            .await
+            .unwrap();
+        if send_open {
+            assert_eq!(opening.read_control().await.unwrap(), request);
+        }
+        assert_eq!(
+            opening.expect_token(token).await,
+            Err(SessionError::InvalidFrame)
+        );
+    }
+
+    for unsolicited in [false, true] {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let mut opening = session.open_relay(deadline, cap).await.unwrap();
+        opening.write_control(&request).await.unwrap();
+        let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+        relay_raw_read(&mut recv, &request).await;
+        if unsolicited {
+            relay_raw_write(&mut send, &relay_control("accept", "d2", token)).await;
+            assert_eq!(
+                opening.read_control().await,
+                Err(SessionError::InvalidFrame)
+            );
+        } else {
+            assert_eq!(
+                opening.send_token(token).await,
+                Err(SessionError::InvalidFrame)
+            );
+        }
+    }
+}
+
+#[cfg(feature = "relay-harness")]
+#[tokio::test]
+async fn relay_cancelamento_fecha_as_duas_metades_ociosas_antes_do_recolhimento() {
+    let peer = RawPeer::new(config());
+    let (node, mut sessions) =
+        session_node_with_config(&peer, TestAuthorizer::new(Ok(None)), config());
+    let connection = session_handshake(&node, &peer).await;
+    let session = next_session(&mut sessions).await;
+    let cap = NonZeroU32::new(512).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let token = [42; 16];
+    let request = relay_control("open", "d1", token);
+    let reply = relay_control("accept", "d1", token);
+    let mut opening = session.open_relay(deadline, cap).await.unwrap();
+    opening.write_control(&request).await.unwrap();
+    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+    relay_raw_read(&mut recv, &request).await;
+    relay_raw_write(&mut send, &reply).await;
+    assert_eq!(opening.read_control().await.unwrap(), reply);
+    opening.send_token(token).await.unwrap();
+    let mut confirmation = [0; 16];
+    recv.read_exact(&mut confirmation).await.unwrap();
+    assert_eq!(confirmation, token);
+    let (outbound, inbound, cancel) = opening
+        .into_forwarding(NonZeroU32::new(1400).unwrap())
+        .unwrap();
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_millis(500), async {
+        assert!(matches!(
+            recv.read(&mut [0]).await,
+            Err(quinn::ReadError::Reset(_))
+        ));
+        assert!(send.stopped().await.unwrap().is_some());
+    })
+    .await
+    .unwrap();
+    drop(outbound);
+    assert!(matches!(
+        session.open_relay(deadline, cap).await,
+        Err(SessionError::Busy)
+    ));
+    drop(inbound);
+    assert!(session.open_relay(deadline, cap).await.is_ok());
 }
