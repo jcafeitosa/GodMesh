@@ -7,6 +7,62 @@ use super::{
 
 const PROOFS_DOMAIN: &[u8] = b"godmesh.federation.restore.proofs.v1";
 
+/// Digest incremental das provas originais, na ordem do corte.
+pub struct ProofsDigest {
+    remaining: u64,
+    digest: Result<Sha256, RestoreError>,
+}
+
+impl ProofsDigest {
+    /// Inicia o compromisso com a contagem conhecida, inclusive zero.
+    ///
+    /// # Errors
+    /// Recusa contagens acima de `i64::MAX`.
+    pub fn new(count: u64) -> Result<Self, RestoreError> {
+        range(count, "proof_count")?;
+        let mut digest = Sha256::new();
+        digest.update(PROOFS_DOMAIN);
+        digest.update(count.to_be_bytes());
+        Ok(Self {
+            remaining: count,
+            digest: Ok(digest),
+        })
+    }
+
+    /// Incorpora o comprimento e os bytes de um envelope, sem retê-lo.
+    ///
+    /// # Errors
+    /// Recusa frame vazio, tamanho acima de u32 ou contagem excedida.
+    /// A primeira falha é mantida até a finalização.
+    pub fn update(&mut self, frame: &[u8]) -> Result<(), RestoreError> {
+        let digest = self.digest.as_mut().map_err(|error| *error)?;
+        let remaining = self.remaining.checked_sub(1);
+        let len = u32::try_from(frame.len()).ok().filter(|&len| len != 0);
+        let error = match (remaining, len) {
+            (None, _) => RestoreError::ProofCountMismatch,
+            (_, None) => RestoreError::InvalidProofLength,
+            (Some(remaining), Some(len)) => {
+                digest.update(len.to_be_bytes());
+                digest.update(frame);
+                self.remaining = remaining;
+                return Ok(());
+            }
+        };
+        self.digest = Err(error);
+        Err(error)
+    }
+
+    /// # Errors
+    /// Retorna a primeira falha de atualização ou recusa uma faixa incompleta.
+    pub fn finish(self) -> Result<[u8; 32], RestoreError> {
+        let digest = self.digest?;
+        if self.remaining != 0 {
+            return Err(RestoreError::ProofCountMismatch);
+        }
+        Ok(digest.finalize().into())
+    }
+}
+
 /// Compromete a contagem declarada e os frames originais na ordem recebida.
 ///
 /// # Errors
@@ -15,26 +71,11 @@ pub fn proofs_digest<'a>(
     count: u64,
     frames: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<[u8; 32], RestoreError> {
-    range(count, "proof_count")?;
-    let mut digest = Sha256::new();
-    digest.update(PROOFS_DOMAIN);
-    digest.update(count.to_be_bytes());
-    let mut remaining = count;
+    let mut digest = ProofsDigest::new(count)?;
     for frame in frames {
-        remaining = remaining
-            .checked_sub(1)
-            .ok_or(RestoreError::ProofCountMismatch)?;
-        let len = u32::try_from(frame.len()).map_err(|_| RestoreError::InvalidProofLength)?;
-        if len == 0 {
-            return Err(RestoreError::InvalidProofLength);
-        }
-        digest.update(len.to_be_bytes());
-        digest.update(frame);
+        digest.update(frame)?;
     }
-    if remaining != 0 {
-        return Err(RestoreError::ProofCountMismatch);
-    }
-    Ok(digest.finalize().into())
+    digest.finish()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

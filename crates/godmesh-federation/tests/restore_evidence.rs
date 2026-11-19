@@ -4,9 +4,9 @@ use godmesh_federation::{
     NodeIdentity,
     restore_evidence::{
         AuthorityKind, BackupKind, ControlState, CopyAcl, CopyPolicy, ExpectedHighWater,
-        ExpectedPromotion, Fence, IntentState, Reconciliation, RestoreError, RestoreHighWaterV1,
-        RestoreKey, RestorePromotionV1, RevocationReference, VerifiedHighWater, proofs_digest,
-        verify_high_water, verify_promotion,
+        ExpectedPromotion, Fence, IntentState, ProofsDigest, Reconciliation, RestoreError,
+        RestoreHighWaterV1, RestoreKey, RestorePromotionV1, RevocationReference, VerifiedHighWater,
+        proofs_digest, verify_high_water, verify_promotion,
     },
 };
 use serde_json::{Value, json};
@@ -615,4 +615,60 @@ fn n_authentic_artifacts_still_require_external_binding_and_window() {
         ),
         Err(RestoreError::BlockedIntent)
     );
+}
+
+#[test]
+fn b_incremental_proofs_preserve_originals_across_pages() {
+    let f = fixture();
+    let frames: Vec<Vec<u8>> = f["two_proofs"]["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|raw| hex::decode(raw.as_str().unwrap()).unwrap())
+        .collect();
+    let mut proofs = ProofsDigest::new(2).unwrap();
+    for page in frames.chunks(1) {
+        for frame in page {
+            proofs.update(frame).unwrap();
+        }
+    }
+    assert_eq!(proofs.finish(), Ok(digest("two_proofs")));
+    assert_eq!(
+        ProofsDigest::new(0).unwrap().finish(),
+        Ok(digest("empty_proofs"))
+    );
+
+    let mut changed = frames.clone();
+    changed[0].remove(0);
+    let mut proofs = ProofsDigest::new(2).unwrap();
+    for frame in &changed {
+        proofs.update(frame).unwrap();
+    }
+    assert_ne!(proofs.finish().unwrap(), digest("two_proofs"));
+}
+
+#[test]
+fn n_incremental_proofs_reject_count_and_invalid_frames() {
+    assert_eq!(
+        ProofsDigest::new(u64::MAX).err(),
+        Some(RestoreError::InvalidField("proof_count"))
+    );
+    assert_eq!(
+        ProofsDigest::new(1).unwrap().finish(),
+        Err(RestoreError::ProofCountMismatch)
+    );
+    let mut extra = ProofsDigest::new(1).unwrap();
+    extra.update(b"first").unwrap();
+    assert_eq!(
+        extra.update(b"extra"),
+        Err(RestoreError::ProofCountMismatch)
+    );
+    assert_eq!(extra.finish(), Err(RestoreError::ProofCountMismatch));
+    let mut invalid = ProofsDigest::new(1).unwrap();
+    assert_eq!(invalid.update(b""), Err(RestoreError::InvalidProofLength));
+    assert_eq!(
+        invalid.update(b"frame"),
+        Err(RestoreError::InvalidProofLength)
+    );
+    assert_eq!(invalid.finish(), Err(RestoreError::InvalidProofLength));
 }
