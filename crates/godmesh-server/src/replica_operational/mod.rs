@@ -1,6 +1,6 @@
 //! Efeitos M4-A2 após autenticação e correlação na fronteira da sessão.
 //! Cada método abre e termina sua transação antes de entregar o resultado.
-mod db;
+pub(crate) mod db;
 mod intent_marker;
 mod link;
 #[cfg(feature = "snapshot-harness")]
@@ -17,7 +17,7 @@ pub use settings::{ConfigError, Pin, ReplicaConfig, Role};
 use crate as server;
 #[cfg(test)]
 #[path = "../../tests/common/replica_fixture.rs"]
-mod fixture;
+pub(crate) mod fixture;
 
 use std::{fmt, future::Future, sync::Arc, time::Duration};
 
