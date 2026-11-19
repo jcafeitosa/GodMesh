@@ -6,6 +6,7 @@ use tokio::sync::{Mutex as Fifo, Notify};
 #[derive(Default)]
 pub(super) struct Scheduler {
     normal: Fifo<()>,
+    opening: Fifo<()>,
     state: Mutex<State>,
     changed: Notify,
 }
@@ -17,6 +18,11 @@ struct State {
 }
 
 impl Scheduler {
+    pub(super) async fn opening(&self) -> Turn<'_> {
+        self.opening.lock().await;
+        self.enter(false).await
+    }
+
     pub(super) async fn normal(&self) -> Turn<'_> {
         let _fifo = self.normal.lock().await;
         self.enter(false).await

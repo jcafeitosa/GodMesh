@@ -208,6 +208,9 @@ impl RelayAdmission {
         let open_deadline = opened_at
             .checked_add(OPEN_TIMEOUT)
             .ok_or(Error::RouteUnavailable)?;
+        let _opening_turn = timeout_at(open_deadline, self.scheduler.opening())
+            .await
+            .map_err(|_| Error::RouteUnavailable)?;
         let _turn = timeout_at(open_deadline, self.scheduler.normal())
             .await
             .map_err(|_| Error::RouteUnavailable)?;
@@ -360,6 +363,9 @@ impl RouteInstance {
 
     /// O chamador só solicita esta transição depois de verificar o token da stream.
     pub async fn confirm_token(&self) -> Result<Instant, Error> {
+        let _opening_turn = self
+            .wait_turn_until(self.open_deadline, self.admission.scheduler.opening())
+            .await?;
         let _turn = self
             .wait_turn_until(self.open_deadline, self.admission.scheduler.normal())
             .await?;
