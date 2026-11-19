@@ -33,9 +33,9 @@ pub struct ReplicaRuntime {
 }
 
 impl ReplicaRuntime {
-    pub fn new(service: ReplicaService) -> Self {
+    pub fn new(service: Arc<ReplicaService>) -> Self {
         Self {
-            service: Arc::new(service),
+            service,
             receiver: Mutex::new(()),
             next_request: AtomicU64::new(0),
             #[cfg(all(test, feature = "snapshot-harness"))]

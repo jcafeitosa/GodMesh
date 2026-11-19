@@ -97,6 +97,8 @@ use sqlx::postgres::PgPoolOptions;
 
 mod replica_runtime;
 #[cfg(all(test, feature = "snapshot-harness"))]
+mod restore_process;
+#[cfg(all(test, feature = "snapshot-harness"))]
 mod snapshot_lab;
 use replica_runtime::ReplicaRuntime;
 
@@ -170,6 +172,8 @@ struct Config {
     mode: Mode,
     #[cfg(all(test, feature = "snapshot-harness"))]
     snapshot_lab: Option<(snapshot_lab::LabContext, snapshot_lab::LabRegistration)>,
+    #[cfg(all(test, feature = "snapshot-harness"))]
+    restore_process: Option<restore_process::RestoreProcess>,
 }
 
 /// Configuração específica do modo escolhido.
@@ -273,6 +277,8 @@ impl Config {
             mode,
             #[cfg(all(test, feature = "snapshot-harness"))]
             snapshot_lab: None,
+            #[cfg(all(test, feature = "snapshot-harness"))]
+            restore_process: None,
         })
     }
 }
@@ -571,17 +577,11 @@ fn spawn_configuration_lifecycle(
     })
 }
 
-/// Conecta, migra, e serve até receber sinal de término (ou só migra).
-async fn run(config: Config) -> Result<(), String> {
+async fn prepare_database(config: &Config) -> Result<sqlx::PgPool, String> {
     #[cfg(all(test, feature = "snapshot-harness"))]
-    let lab = {
-        if config.snapshot_lab.is_some()
-            && !matches!(config.mode, Mode::Serve { replica: Some(_), .. })
-        {
-            return Err("snapshot de laboratório exige réplica M4 configurada".to_owned());
-        }
-        config.snapshot_lab
-    };
+    if let Some(restore) = &config.restore_process {
+        return restore.connect_target(&config.database_url).await;
+    }
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect(&config.database_url)
@@ -589,7 +589,7 @@ async fn run(config: Config) -> Result<(), String> {
         .map_err(|e| format!("não foi possível conectar ao Postgres em DATABASE_URL: {e}"))?;
 
     #[cfg(all(test, feature = "snapshot-harness"))]
-    if let Some((_, registration)) = &lab {
+    if let Some((_, registration)) = &config.snapshot_lab {
         registration.verify_database(&pool).await?;
     }
 
@@ -609,6 +609,27 @@ async fn run(config: Config) -> Result<(), String> {
         report.skipped_count(),
         report.skipped.join(", "),
     );
+    Ok(pool)
+}
+
+/// Prepara o banco e serve até receber sinal de término (ou só migra).
+async fn run(config: Config) -> Result<(), String> {
+    #[cfg(all(test, feature = "snapshot-harness"))]
+    {
+        let snapshot = config.snapshot_lab.is_some();
+        let restore = config.restore_process.is_some();
+        if snapshot && restore {
+            return Err("use um único contexto de laboratório por processo".to_owned());
+        }
+        if (snapshot || restore) && !matches!(config.mode, Mode::Serve { replica: Some(_), .. }) {
+            return Err("laboratório exige réplica M4 configurada".to_owned());
+        }
+    }
+    let pool = prepare_database(&config).await?;
+    #[cfg(all(test, feature = "snapshot-harness"))]
+    let lab = config.snapshot_lab;
+    #[cfg(all(test, feature = "snapshot-harness"))]
+    let restore_process = config.restore_process;
 
     let Mode::Serve {
         grants,
@@ -666,6 +687,18 @@ async fn run(config: Config) -> Result<(), String> {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
+                #[cfg(all(test, feature = "snapshot-harness"))]
+                let replica = if let Some(restore) = &restore_process {
+                    let Some(service) = restore.prepare(replica).await? else {
+                        pool.close().await;
+                        return Ok(());
+                    };
+                    service
+                } else {
+                    Arc::new(replica)
+                };
+                #[cfg(not(all(test, feature = "snapshot-harness")))]
+                let replica = Arc::new(replica);
                 let runtime = ReplicaRuntime::new(replica);
                 #[cfg(all(test, feature = "snapshot-harness"))]
                 let runtime = if let Some((context, _)) = lab {
