@@ -431,8 +431,9 @@ fn error_on_wire(error: &EffectError) -> Option<ErrorCode> {
         Effect::Authority | Effect::Fence | Effect::M1c(_) | Effect::M3(_) => {
             ErrorCode::AuthorityBlocked
         }
-        Effect::Storage(_) | Effect::Timeout | Effect::Replication(Replica::Storage(_)) => {
-            ErrorCode::StorageUnavailable
+        error if error.is_retryable() => ErrorCode::StorageUnavailable,
+        Effect::Storage(_) | Effect::Replication(Replica::Storage(_)) => {
+            ErrorCode::AuthorityBlocked
         }
         Effect::Replication(Replica::Policy) => ErrorCode::ResidenceDenied,
         Effect::Replication(Replica::ProofMissing) => ErrorCode::ProofMissing,
@@ -514,4 +515,24 @@ async fn serve_pull(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_storage_retry_requires_a_transient_failure() {
+        let transient = EffectError::Storage(sqlx::Error::PoolTimedOut);
+        let permanent =
+            EffectError::Storage(sqlx::Error::Protocol("invalid storage response".into()));
+
+        let transient_code = error_on_wire(&transient).unwrap();
+        assert_eq!(transient_code, ErrorCode::StorageUnavailable);
+        assert!(AttemptError::Remote(transient_code).retryable());
+
+        let permanent_code = error_on_wire(&permanent).unwrap();
+        assert_eq!(permanent_code, ErrorCode::AuthorityBlocked);
+        assert!(!AttemptError::Remote(permanent_code).retryable());
+    }
 }

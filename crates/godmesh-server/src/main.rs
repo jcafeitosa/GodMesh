@@ -90,7 +90,7 @@ use godmesh_server::http::HostTelemetry;
 use godmesh_server::portable_join::{PortableJoin, PortableJoinConfig};
 use godmesh_server::publisher::{OutboxConfig, Publisher};
 use godmesh_server::replica_operational::{
-    EffectError, ReplicaConfig, ReplicaService, with_sql_deadline,
+    ReplicaConfig, ReplicaService, authorize_link_in_tx, authorize_link_until,
 };
 use godmesh_server::{federation, migrate, runtime};
 use godmesh_sync::pg_outbox::{PgOutbox, PgSink};
@@ -421,7 +421,25 @@ impl LinkAuthorizer for PortableLinkAuthorizer {
         local: &'a LinkIdentity,
         remote: &'a LinkIdentity,
     ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
-        self.authorize_in_tx(local, remote, None)
+        Box::pin(async move {
+            let mut transaction = self
+                .portable
+                .pool()
+                .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+                .await
+                .map_err(|_| LinkAuthorizationError::Unavailable)?;
+            let expires = authorize_link_in_tx(
+                &self.portable,
+                self.configuration.as_deref(),
+                local,
+                remote,
+                &mut transaction,
+            )
+            .await?
+            .map(monotonic_lease_deadline)
+            .transpose()?;
+            Ok(LinkPermit::new(Box::new(transaction), expires))
+        })
     }
 
     fn authorize_until<'a>(
@@ -430,94 +448,22 @@ impl LinkAuthorizer for PortableLinkAuthorizer {
         remote: &'a LinkIdentity,
         deadline: tokio::time::Instant,
     ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
-        self.authorize_in_tx(local, remote, Some(deadline))
+        Box::pin(async move {
+            let (protection, expires_at) = authorize_link_until(
+                Arc::clone(&self.portable),
+                self.configuration.clone(),
+                local,
+                remote,
+                deadline,
+            )
+            .await?;
+            let expires = expires_at.map(monotonic_lease_deadline).transpose()?;
+            Ok(LinkPermit::new(protection, expires))
+        })
     }
 
     fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changes.clone()
-    }
-}
-
-impl PortableLinkAuthorizer {
-    fn authorize_in_tx<'a>(
-        &'a self,
-        local: &'a LinkIdentity,
-        remote: &'a LinkIdentity,
-        deadline: Option<tokio::time::Instant>,
-    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
-        let operation = async move {
-            if self.portable.cluster() != local.cluster || local.cluster != remote.cluster {
-                return Err(LinkAuthorizationError::Denied);
-            }
-            let map = |error| link_authorization_error(error, deadline.is_some());
-            let mut transaction = self
-                .portable
-                .pool()
-                .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
-                .await
-                .map_err(|error| map(error.into()))?;
-            let mut guard = self
-                .portable
-                .lock_cluster_guard(&mut transaction)
-                .await
-                .map_err(|error| map(error.into()))?;
-            let now = SystemClock.now_unix();
-            let local_expiry = self
-                .portable
-                .authorize_local_at(&mut guard, now)
-                .await
-                .map_err(|error| map(error.into()))?;
-            let remote_expiry = self
-                .portable
-                .authorize_peer_at(
-                    &mut guard,
-                    &remote.node_id,
-                    &hex::encode(remote.public_key),
-                    now,
-                )
-                .await
-                .map_err(|error| map(error.into()))?;
-            // O transporte validou o ALPN godmesh/1 antes deste callback.
-            let config_expiry = if let Some(configuration) = &self.configuration {
-                match configuration
-                    .classify_fence_in_tx(&mut guard, 1, now)
-                    .await
-                    .map_err(|error| match EffectError::from(error) {
-                        EffectError::Timeout if deadline.is_some() => LinkAuthorizationError::Timeout,
-                        _ => LinkAuthorizationError::Unavailable,
-                    })?
-                {
-                    Fence::Allowed { recheck_at, .. } => Some(recheck_at),
-                    Fence::Blocked(_) | Fence::Disabled => {
-                        return Err(LinkAuthorizationError::Denied);
-                    }
-                }
-            } else {
-                None
-            };
-            let expires_at = [local_expiry, remote_expiry, config_expiry]
-                .into_iter()
-                .flatten()
-                .min()
-                .map(monotonic_lease_deadline)
-                .transpose()?;
-            // O crate aplica a decisão com a transação ainda protegendo o cluster.
-            Ok(LinkPermit::new(Box::new(transaction), expires_at))
-        };
-        Box::pin(async move {
-            match deadline {
-                Some(deadline) => with_sql_deadline(deadline, operation).await,
-                None => operation.await,
-            }
-        })
-    }
-}
-
-fn link_authorization_error(error: EffectError, with_deadline: bool) -> LinkAuthorizationError {
-    match error {
-        EffectError::Timeout if with_deadline => LinkAuthorizationError::Timeout,
-        EffectError::M1c(_) => LinkAuthorizationError::Denied,
-        _ => LinkAuthorizationError::Unavailable,
     }
 }
 
