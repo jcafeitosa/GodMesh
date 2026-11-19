@@ -34,7 +34,7 @@ Identidade persistente, IPv6-first/IPv4, libp2p QUIC/TCP, bootstrap autorizado, 
 5. **Borda M5.** Especificar e verificar relay autorizado, alternativa de conectividade e comportamento de nós que perdem o caminho direto.
 6. **Aceite ponta a ponta.** Executar em pelo menos três hosts Linux independentes. Registrar identidade, versão, topologia, autorização, evidências do protocolo e resultados de queda, revogação, retomada e bloqueio de cópias fora do escopo.
 
-O ensaio inicial de QUIC/mTLS em três processos locais já tem [evidência](../09-equipe/evidencias/2026-11-18-integracao-m1b.md#aceite-local-da-v13). A prova de ingresso portátil, a replicação e o ensaio em hosts independentes têm aceites próprios.
+A M4-A2 demonstrou réplica direta de metadados sintéticos em três processos locais, com retomada após partição e perda de ACK, revogação por destino e suspensão persistente por histórico indisponível. Snapshots, relay e o aceite em hosts independentes seguem pendentes. [Evidência M4-A2](../09-equipe/evidencias/2026-11-18-m4-a2-replica-quic.md#aceite-operacional-em-três-instâncias)
 
 ## Programa D — Dados, sincronização e localização
 PostgreSQL/PostGIS, sharding/autoridade por tenant, outbox/inbox, snapshots assinados, histórico, observações, dispositivos, retenção e consentimento.
