@@ -12,16 +12,19 @@
 //!   ou seja 15 s) marca o par `unknown` — nunca `ready`;
 //! - heartbeat **não** autoriza nem muda `trust_state`: é evidência de vida.
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use quinn::{Connection, Endpoint};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::handshake::{self, AcceptedPeer, Rejection};
-use crate::identity::{NodeIdentity, node_id_for};
-use crate::link::{LinkSnapshot, PeerLinks};
+use crate::handshake::{self, AcceptedPeer, HandshakeError, Rejection};
+use crate::identity::{NodeIdentity, PUBLIC_KEY_LEN, node_id_for};
+use crate::link::{LinkSnapshot, LinkState, LinkValidity, PeerLinks};
 use crate::manifest::SignedManifest;
 use crate::peer::PeerRegistry;
 use crate::transport::{self, TransportError};
@@ -37,6 +40,8 @@ pub const DEFAULT_MANIFEST_WINDOW_SECONDS: i64 = 60;
 pub const HEARTBEAT_MAGIC: [u8; 4] = *b"GMH1";
 /// Tamanho exato do frame de heartbeat (magic + contador).
 pub const HEARTBEAT_FRAME_LEN: usize = 12;
+
+const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Configuração do nó local.
 #[derive(Debug, Clone)]
@@ -128,6 +133,61 @@ impl FederationConfig {
     }
 }
 
+/// Identidade pública derivada da chave usada no mTLS, com o cluster local.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkIdentity {
+    /// Identificador canônico derivado da chave.
+    pub node_id: String,
+    /// Chave pública Ed25519.
+    pub public_key: [u8; PUBLIC_KEY_LEN],
+    /// Cluster no qual a autorização é solicitada.
+    pub cluster: String,
+}
+
+/// Resultado negativo da autoridade operacional.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkAuthorizationError {
+    /// Autoridade ou vigência insuficiente.
+    Denied,
+    /// A autoridade durável não pôde ser consultada.
+    Unavailable,
+}
+
+/// Autorização que mantém a proteção até o fim da atualização local.
+#[must_use]
+pub struct LinkPermit {
+    _protection: Box<dyn Send>,
+    expires_at: Option<Instant>,
+}
+
+impl LinkPermit {
+    /// A proteção é liberada no drop. O prazo monotônico é exclusivo.
+    pub fn new(protection: Box<dyn Send>, expires_at: Option<Instant>) -> Self {
+        Self {
+            _protection: protection,
+            expires_at,
+        }
+    }
+}
+
+/// Autoridade operacional para os dois nós de um enlace QUIC.
+pub trait LinkAuthorizer: Send + Sync {
+    /// Consulta o estado durável e retorna com a proteção ainda adquirida.
+    ///
+    /// O nó cancela a consulta ao invalidar o enlace ou após cinco segundos.
+    /// A implementação deve liberar recursos se o futuro for descartado.
+    fn authorize<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>>;
+
+    /// Assina as alterações de confiança. Publique assim que a mudança durável
+    /// for confirmada. Qualquer notificação ou o fechamento do canal invalida
+    /// o enlace. O nó registra a versão corrente antes da primeira consulta.
+    fn subscribe(&self) -> watch::Receiver<u64>;
+}
+
 /// Falha ao discar para um par.
 #[derive(Debug)]
 pub enum LinkError {
@@ -164,6 +224,7 @@ struct NodeShared {
     config: Arc<FederationConfig>,
     registry: Arc<PeerRegistry>,
     links: Arc<PeerLinks>,
+    authorizer: Option<Arc<dyn LinkAuthorizer>>,
 }
 
 /// Nó de federação com endpoint QUIC ativo.
@@ -186,6 +247,20 @@ impl FederationNode {
         registry: Arc<PeerRegistry>,
         addr: SocketAddr,
     ) -> Result<Self, TransportError> {
+        Self::bind_with_authorizer(Arc::new(identity), config, registry, addr, None)
+    }
+
+    /// Abre o endpoint com identidade compartilhada e autorização opcional.
+    ///
+    /// # Errors
+    /// Os mesmos de [Self::bind].
+    pub fn bind_with_authorizer(
+        identity: Arc<NodeIdentity>,
+        config: FederationConfig,
+        registry: Arc<PeerRegistry>,
+        addr: SocketAddr,
+        authorizer: Option<Arc<dyn LinkAuthorizer>>,
+    ) -> Result<Self, TransportError> {
         let tls = transport::NodeTls::self_issued(&identity)?;
         let server = transport::server_config(Arc::clone(&registry), &tls)?;
         let client = transport::client_config(Arc::clone(&registry), &tls)?;
@@ -193,10 +268,11 @@ impl FederationNode {
             transport::bind_server(addr, server).map_err(|e| TransportError::Io(e.to_string()))?;
         let freshness = config.freshness();
         let shared = NodeShared {
-            identity: Arc::new(identity),
+            identity,
             config: Arc::new(config),
             registry,
             links: Arc::new(PeerLinks::new(freshness)),
+            authorizer,
         };
         let node = Self {
             shared,
@@ -264,17 +340,9 @@ impl FederationNode {
             .await
             .map_err(|e| LinkError::Connect(e.to_string()))?;
 
-        match handshake::initiate(
-            &connection,
-            &self.shared.identity,
-            &self.shared.config,
-            &self.shared.registry,
-        )
-        .await
-        {
-            Ok(accepted) => Ok(self.register_ready(&connection, accepted)),
+        match establish(&self.shared, &connection, true).await {
+            Ok(snapshot) => Ok(snapshot),
             Err(error) => {
-                self.record_rejection(&connection);
                 match error.rejection {
                     // Sem veredito do par: TLS/alerta recusou antes do protocolo.
                     Rejection::Transport => Err(LinkError::Connect(
@@ -309,21 +377,7 @@ impl FederationNode {
                     let Ok(connection) = incoming.await else {
                         return;
                     };
-                    match handshake::accept(
-                        &connection,
-                        &shared.identity,
-                        &shared.config,
-                        &shared.registry,
-                    )
-                    .await
-                    {
-                        Ok(accepted) => {
-                            register_ready(&shared, &connection, accepted);
-                        }
-                        Err(_) => {
-                            record_rejection(&shared, &connection);
-                        }
-                    }
+                    let _ = establish(&shared, &connection, false).await;
                 });
             }
         });
@@ -344,18 +398,209 @@ impl FederationNode {
         self.push_task(handle);
     }
 
-    fn register_ready(&self, connection: &Connection, accepted: AcceptedPeer) -> LinkSnapshot {
-        register_ready(&self.shared, connection, accepted)
-    }
-
-    fn record_rejection(&self, connection: &Connection) {
-        record_rejection(&self.shared, connection);
-    }
-
     fn push_task(&self, handle: JoinHandle<()>) {
         if let Ok(mut tasks) = self.tasks.lock() {
             tasks.push(handle);
         }
+    }
+}
+
+async fn establish(
+    shared: &NodeShared,
+    connection: &Connection,
+    initiating: bool,
+) -> Result<LinkSnapshot, HandshakeError> {
+    let result = if let Some(authorizer) = &shared.authorizer {
+        establish_operational(shared, connection, initiating, Arc::clone(authorizer)).await
+    } else {
+        exchange_manifest(shared, connection, initiating, Some(&shared.registry))
+            .await
+            .map(|accepted| register_ready(shared, connection, accepted))
+    };
+    if result.is_err()
+        && let Some(key) = transport::peer_public_key(connection)
+    {
+        shared
+            .links
+            .record_rejection(&node_id_for(&key), shared.authorizer.is_some());
+    }
+    result
+}
+
+async fn exchange_manifest(
+    shared: &NodeShared,
+    connection: &Connection,
+    initiating: bool,
+    registry: Option<&PeerRegistry>,
+) -> Result<AcceptedPeer, HandshakeError> {
+    let identity = &shared.identity;
+    let config = &shared.config;
+    if initiating {
+        handshake::initiate_with_registry(connection, identity, config, registry).await
+    } else {
+        handshake::accept_with_registry(connection, identity, config, registry).await
+    }
+}
+
+struct OperationalLink {
+    authorizer: Arc<dyn LinkAuthorizer>,
+    local: LinkIdentity,
+    remote: LinkIdentity,
+    validity: LinkValidity,
+    deadline: watch::Sender<Option<Instant>>,
+}
+
+impl OperationalLink {
+    fn new(
+        shared: &NodeShared,
+        connection: &Connection,
+        authorizer: Arc<dyn LinkAuthorizer>,
+    ) -> Result<Self, Rejection> {
+        transport::require_alpn(connection).map_err(|_| Rejection::AlpnMismatch)?;
+        let remote_key = transport::peer_public_key(connection).ok_or(Rejection::KeyMismatch)?;
+        let identity = |public_key| LinkIdentity {
+            node_id: node_id_for(&public_key),
+            public_key,
+            cluster: shared.config.cluster.clone(),
+        };
+        let mut trust = authorizer.subscribe();
+        let _ = *trust.borrow_and_update();
+        let (deadline, deadline_rx) = watch::channel(None);
+        Ok(Self {
+            authorizer,
+            local: identity(shared.identity.public_key_bytes()),
+            remote: identity(remote_key),
+            validity: LinkValidity {
+                connection: connection.clone(),
+                trust,
+                deadline: deadline_rx,
+            },
+            deadline,
+        })
+    }
+
+    async fn authorize(&self) -> Result<LinkPermit, Rejection> {
+        if !self.validity.is_current(Instant::now()) {
+            return Err(Rejection::NotAuthorized);
+        }
+        let permit = tokio::time::timeout(
+            AUTHORIZATION_TIMEOUT,
+            self.authorizer.authorize(&self.local, &self.remote),
+        )
+        .await
+        .map_err(|_| Rejection::NotAuthorized)?
+        .map_err(|_| Rejection::NotAuthorized)?;
+        if let Some(expires_at) = permit.expires_at {
+            // Uma nova consulta pode encurtar o enlace. Para estendê-lo,
+            // reabra a conexão sob a nova vigência.
+            self.deadline.send_if_modified(|deadline| {
+                if deadline.is_none_or(|current| expires_at < current) {
+                    *deadline = Some(expires_at);
+                    return true;
+                }
+                false
+            });
+        }
+        if !self.validity.is_current(Instant::now()) {
+            return Err(Rejection::NotAuthorized);
+        }
+        Ok(permit)
+    }
+
+    async fn invalidated(&self) -> Rejection {
+        let mut trust = self.validity.trust.clone();
+        let mut deadlines = self.validity.deadline.clone();
+        loop {
+            let deadline = *deadlines.borrow_and_update();
+            tokio::select! {
+                biased;
+                _ = trust.changed() => return Rejection::Revoked,
+                _ = wait_deadline(deadline) => return Rejection::NotAuthorized,
+                _ = deadlines.changed() => {}
+            }
+        }
+    }
+}
+
+async fn wait_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn establish_operational(
+    shared: &NodeShared,
+    connection: &Connection,
+    initiating: bool,
+    authorizer: Arc<dyn LinkAuthorizer>,
+) -> Result<LinkSnapshot, HandshakeError> {
+    let result = async {
+        let link = OperationalLink::new(shared, connection, authorizer)?;
+        let snapshot = tokio::select! {
+            biased;
+            reason = link.invalidated() => return Err(reason),
+            _ = connection.closed() => {
+                return Err(handshake::peer_verdict(connection).unwrap_or(Rejection::Transport));
+            },
+            result = async {
+                // A autorização precede a primeira operação de protocolo.
+                drop(link.authorize().await?);
+                let accepted = exchange_manifest(shared, connection, initiating, None)
+                    .await
+                    .map_err(|error| error.rejection)?;
+                let _permit = link.authorize().await?;
+                let seen_at = now_unix();
+                let snapshot = ready_snapshot(connection, accepted, seen_at);
+                if !shared.links.mark_operational_ready(
+                    &link.remote.node_id, snapshot.clone(), link.validity.clone(),
+                ) {
+                    return Err(Rejection::NotAuthorized);
+                }
+                shared.registry.touch(&link.remote.node_id, seen_at);
+                Ok(snapshot)
+            } => result?,
+        };
+        tokio::spawn(run_operational(shared.clone(), link));
+        Ok(snapshot)
+    };
+    result.await.map_err(|rejection| {
+        close_with_rejection(connection, rejection);
+        HandshakeError { rejection }
+    })
+}
+
+async fn run_operational(shared: NodeShared, link: OperationalLink) {
+    let connection = &link.validity.connection;
+    let node_id = &link.remote.node_id;
+    let result = tokio::select! {
+        biased;
+        rejection = link.invalidated() => Err(rejection),
+        _ = connection.closed() => Ok(()),
+        result = send_heartbeats(connection, shared.config.heartbeat_interval, Some(&link)) => result,
+        result = receive_heartbeats(connection, node_id, &shared, Some(&link)) => result,
+    };
+    if let Err(rejection) = result {
+        close_with_rejection(connection, rejection);
+    } else if connection.close_reason().is_none() {
+        connection.close(0u32.into(), b"enlace encerrado");
+    }
+    shared.links.close_operational(node_id, connection);
+}
+
+fn close_with_rejection(connection: &Connection, rejection: Rejection) {
+    if connection.close_reason().is_none() {
+        connection.close(rejection.code().into(), rejection.reason().as_bytes());
+    }
+}
+
+fn ready_snapshot(connection: &Connection, accepted: AcceptedPeer, seen_at: i64) -> LinkSnapshot {
+    LinkSnapshot {
+        state: LinkState::Ready,
+        last_seen_at: Some(seen_at),
+        rtt_ms: Some(u64::try_from(connection.rtt().as_millis()).unwrap_or(u64::MAX)),
+        negotiated_alpn: Some(accepted.alpn),
+        peer_version: Some(accepted.software_version),
     }
 }
 
@@ -384,24 +629,18 @@ fn register_ready(
         .unwrap_or_else(LinkSnapshot::never_seen)
 }
 
-fn record_rejection(shared: &NodeShared, connection: &Connection) {
-    // A identidade do par pode ser ilegível (manifesto inválido); nesse caso não
-    // se inventa um `node_id` para registrar — o estado fica sem dono.
-    if let Some(key) = transport::peer_public_key(connection) {
-        shared.links.mark_rejected(&node_id_for(&key));
-    }
-}
-
 fn spawn_heartbeat(shared: &NodeShared, connection: &Connection, node_id: String) {
     let sender_connection = connection.clone();
     let interval = shared.config.heartbeat_interval;
-    tokio::spawn(async move { send_heartbeats(sender_connection, interval).await });
+    tokio::spawn(async move {
+        let _ = send_heartbeats(&sender_connection, interval, None).await;
+    });
 
     let receiver = connection.clone();
     let shared_receiver = shared.clone();
     let receiver_node = node_id.clone();
     tokio::spawn(async move {
-        receive_heartbeats(receiver, receiver_node, shared_receiver).await;
+        let _ = receive_heartbeats(&receiver, &receiver_node, &shared_receiver, None).await;
     });
 
     let watcher = connection.clone();
@@ -412,13 +651,20 @@ fn spawn_heartbeat(shared: &NodeShared, connection: &Connection, node_id: String
     });
 }
 
-async fn send_heartbeats(connection: Connection, interval: Duration) {
+async fn send_heartbeats(
+    connection: &Connection,
+    interval: Duration,
+    operational: Option<&OperationalLink>,
+) -> Result<(), Rejection> {
     let mut ticker = tokio::time::interval(interval);
     let mut counter: u64 = 0;
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
-            _ = connection.closed() => return,
+            _ = connection.closed() => return Ok(()),
+        }
+        if let Some(link) = operational {
+            drop(link.authorize().await?);
         }
         counter = counter.wrapping_add(1);
         let mut frame = [0u8; HEARTBEAT_FRAME_LEN];
@@ -427,21 +673,26 @@ async fn send_heartbeats(connection: Connection, interval: Duration) {
         match connection.open_uni().await {
             Ok(mut send) => {
                 if send.write_all(&frame).await.is_err() {
-                    return;
+                    return Ok(());
                 }
                 if send.finish().is_err() {
-                    return;
+                    return Ok(());
                 }
             }
-            Err(_) => return,
+            Err(_) => return Ok(()),
         }
     }
 }
 
-async fn receive_heartbeats(connection: Connection, node_id: String, shared: NodeShared) {
+async fn receive_heartbeats(
+    connection: &Connection,
+    node_id: &str,
+    shared: &NodeShared,
+    operational: Option<&OperationalLink>,
+) -> Result<(), Rejection> {
     loop {
         let Ok(mut recv) = connection.accept_uni().await else {
-            return;
+            return Ok(());
         };
         let Ok(frame) = recv.read_to_end(HEARTBEAT_FRAME_LEN).await else {
             continue;
@@ -450,20 +701,28 @@ async fn receive_heartbeats(connection: Connection, node_id: String, shared: Nod
         if frame.len() != HEARTBEAT_FRAME_LEN || frame[..HEARTBEAT_MAGIC.len()] != HEARTBEAT_MAGIC {
             continue;
         }
+        if let Some(link) = operational {
+            let _permit = link.authorize().await?;
+            let seen_at = now_unix();
+            if shared.links.beat_operational(node_id, connection, seen_at) {
+                shared.registry.touch(node_id, seen_at);
+            }
+            continue;
+        }
         let seen_at = now_unix();
-        shared.links.beat(&node_id, seen_at, Instant::now());
-        shared.registry.touch(&node_id, seen_at);
+        shared.links.beat(node_id, seen_at, Instant::now());
+        shared.registry.touch(node_id, seen_at);
         // Heartbeat não promove estado: se o par foi revogado depois do handshake,
         // quem decide é o registro, não este laço.
-        if let Some(record) = shared.registry.record(&node_id)
+        if let Some(record) = shared.registry.record(node_id)
             && !record.is_authorized()
         {
             connection.close(
                 Rejection::Revoked.code().into(),
                 Rejection::Revoked.reason().as_bytes(),
             );
-            shared.links.mark_unknown(&node_id);
-            return;
+            shared.links.mark_unknown(node_id);
+            return Ok(());
         }
     }
 }

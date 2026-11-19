@@ -17,13 +17,12 @@
 //! 6. ALPN negociado é o desta versão e é o mesmo que o manifesto declarou;
 //! 7. chave do manifesto == chave do certificado TLS apresentado (senão um nó
 //!    autorizado poderia se passar por outro no registro);
-//! 8. chave registrada no registro de pares, com estado `authorized`;
-//! 9. `epoch` do manifesto não é anterior ao epoch registrado.
+//! 8. no modo legado, chave registrada no registro de pares, com estado `authorized`;
+//! 9. no modo legado, `epoch` do manifesto não é anterior ao epoch registrado.
 //!
 //! O `trust_state` **não** vem do manifesto: um nó não declara a própria
-//! autorização. Quem decide é o registro (`PeerRegistry`, carregado de
-//! `federation_peer`). Um manifesto que dissesse "sou authorized" não seria
-//! evidência de nada — o manifesto prova posse da chave e frescor, não confiança.
+//! autorização. No modo legado quem decide é o `PeerRegistry`. No modo
+//! operacional o nó consulta a autoridade injetada usando as chaves do mTLS.
 //!
 //! Motivo de fechamento é sempre uma string fixa deste crate — nunca dado do
 //! par — para que log e alerta não carreguem conteúdo controlado pelo outro lado.
@@ -184,9 +183,21 @@ pub async fn initiate(
     config: &FederationConfig,
     registry: &Arc<PeerRegistry>,
 ) -> Result<AcceptedPeer, HandshakeError> {
+    initiate_with_registry(connection, identity, config, Some(registry)).await
+}
+
+pub(crate) async fn initiate_with_registry(
+    connection: &Connection,
+    identity: &NodeIdentity,
+    config: &FederationConfig,
+    registry: Option<&PeerRegistry>,
+) -> Result<AcceptedPeer, HandshakeError> {
     let result = async {
         let ours = config.signed_manifest(identity);
-        let (mut send, mut recv) = connection.open_bi().await.map_err(|_| Rejection::Transport)?;
+        let (mut send, mut recv) = connection
+            .open_bi()
+            .await
+            .map_err(|_| Rejection::Transport)?;
         send_manifest(&mut send, &ours).await?;
         let theirs = read_manifest(connection, &mut recv).await?;
         verify_peer(connection, &theirs, config, registry)
@@ -205,6 +216,15 @@ pub async fn accept(
     identity: &NodeIdentity,
     config: &FederationConfig,
     registry: &Arc<PeerRegistry>,
+) -> Result<AcceptedPeer, HandshakeError> {
+    accept_with_registry(connection, identity, config, Some(registry)).await
+}
+
+pub(crate) async fn accept_with_registry(
+    connection: &Connection,
+    identity: &NodeIdentity,
+    config: &FederationConfig,
+    registry: Option<&PeerRegistry>,
 ) -> Result<AcceptedPeer, HandshakeError> {
     let result = async {
         let ours = config.signed_manifest(identity);
@@ -259,7 +279,7 @@ async fn read_manifest(
 }
 
 /// Veredito de aplicação que o par enviou no fechamento (`CONNECTION_CLOSE`).
-fn peer_verdict(connection: &Connection) -> Option<Rejection> {
+pub(crate) fn peer_verdict(connection: &Connection) -> Option<Rejection> {
     match connection.close_reason()? {
         ConnectionError::ApplicationClosed(close) => u32::try_from(u64::from(close.error_code))
             .ok()
@@ -273,7 +293,7 @@ fn verify_peer(
     connection: &Connection,
     theirs: &SignedManifest,
     config: &FederationConfig,
-    registry: &Arc<PeerRegistry>,
+    registry: Option<&PeerRegistry>,
 ) -> Result<AcceptedPeer, Rejection> {
     // Forma canônica de M1: campos, ligação `node_id`↔chave, assinatura e janela
     // de `issued_at`. Um só caminho de verificação para o ingresso e o
@@ -301,25 +321,31 @@ fn verify_peer(
         return Err(Rejection::KeyMismatch);
     }
 
-    let record = registry.record(&theirs.node_id).ok_or(Rejection::UnknownKey)?;
-    if record.public_key_bytes().ok() != Some(tls_key) {
-        // Chave trocada para um `node_id` já registrado: não é atualização, é
-        // troca de identidade.
-        return Err(Rejection::UnknownKey);
-    }
-    if record.cluster != theirs.cluster {
-        return Err(Rejection::ClusterMismatch);
-    }
-    // O registro é a autoridade, e nada mais: o manifesto não declara o próprio
-    // estado de confiança. Estado vem antes de epoch para que a resposta a um nó
-    // revogado seja "revogado", não "epoch obsoleto".
-    match record.trust_state {
-        TrustState::Authorized => {}
-        TrustState::Revoked => return Err(Rejection::Revoked),
-        TrustState::Pending | TrustState::Unknown => return Err(Rejection::NotAuthorized),
-    }
-    if theirs.epoch < record.epoch {
-        return Err(Rejection::StaleEpoch);
+    // A allowlist continua autenticando o candidato no TLS. Com autorizador,
+    // a autoridade operacional vem da consulta durável do nó.
+    if let Some(registry) = registry {
+        let record = registry
+            .record(&theirs.node_id)
+            .ok_or(Rejection::UnknownKey)?;
+        if record.public_key_bytes().ok() != Some(tls_key) {
+            // Chave trocada para um `node_id` já registrado: não é atualização, é
+            // troca de identidade.
+            return Err(Rejection::UnknownKey);
+        }
+        if record.cluster != theirs.cluster {
+            return Err(Rejection::ClusterMismatch);
+        }
+        // O registro é a autoridade, e nada mais: o manifesto não declara o próprio
+        // estado de confiança. Estado vem antes de epoch para que a resposta a um nó
+        // revogado seja "revogado", não "epoch obsoleto".
+        match record.trust_state {
+            TrustState::Authorized => {}
+            TrustState::Revoked => return Err(Rejection::Revoked),
+            TrustState::Pending | TrustState::Unknown => return Err(Rejection::NotAuthorized),
+        }
+        if theirs.epoch < record.epoch {
+            return Err(Rejection::StaleEpoch);
+        }
     }
 
     Ok(AcceptedPeer {

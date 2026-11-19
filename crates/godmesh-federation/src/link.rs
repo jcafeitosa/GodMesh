@@ -13,8 +13,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use quinn::Connection;
 use serde::Serialize;
-
+use tokio::sync::watch;
 
 /// Estado do enlace de um par.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -71,6 +72,22 @@ impl LinkSnapshot {
     }
 }
 
+/// Evidência operacional exclusiva desta conexão.
+#[derive(Debug, Clone)]
+pub(crate) struct LinkValidity {
+    pub(crate) connection: Connection,
+    pub(crate) trust: watch::Receiver<u64>,
+    pub(crate) deadline: watch::Receiver<Option<Instant>>,
+}
+
+impl LinkValidity {
+    pub(crate) fn is_current(&self, now: Instant) -> bool {
+        self.connection.close_reason().is_none()
+            && matches!(self.trust.has_changed(), Ok(false))
+            && self.deadline.borrow().is_none_or(|deadline| now < deadline)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
     state: LinkState,
@@ -80,13 +97,26 @@ struct Entry {
     peer_version: Option<String>,
     /// Instante monotônico do último heartbeat — a única base para expirar.
     last_beat: Instant,
+    validity: Option<LinkValidity>,
+}
+
+impl Entry {
+    fn is_current(&self, now: Instant) -> bool {
+        self.validity
+            .as_ref()
+            .is_none_or(|validity| validity.is_current(now))
+    }
+
+    fn is_ready(&self, now: Instant) -> bool {
+        self.state == LinkState::Ready && self.is_current(now)
+    }
 }
 
 /// Registro de enlaces observados, compartilhado entre os nós QUIC e o serviço
 /// de diagnóstico.
 #[derive(Debug)]
 pub struct PeerLinks {
-    inner: Mutex<HashMap<String, Entry>>,
+    inner: Mutex<HashMap<String, Vec<Entry>>>,
     freshness: Duration,
 }
 
@@ -115,15 +145,85 @@ impl PeerLinks {
         let mut guard = self.lock();
         guard.insert(
             node_id.to_owned(),
-            Entry {
+            vec![Entry {
                 state: LinkState::Ready,
                 last_seen_at: Some(last_seen_at),
                 rtt_ms,
                 alpn: Some(alpn),
                 peer_version: Some(peer_version),
                 last_beat: now,
-            },
+                validity: None,
+            }],
         );
+    }
+
+    pub(crate) fn mark_operational_ready(
+        &self,
+        node_id: &str,
+        snapshot: LinkSnapshot,
+        validity: LinkValidity,
+    ) -> bool {
+        let mut guard = self.lock();
+        let now = Instant::now();
+        if !validity.is_current(now) {
+            return false;
+        }
+        let entries = guard.entry(node_id.to_owned()).or_default();
+        // Conserve enlaces paralelos e descarte apenas o histórico sem conexão.
+        entries.retain(|entry| entry.validity.is_some());
+        entries.push(Entry {
+            state: snapshot.state,
+            last_seen_at: snapshot.last_seen_at,
+            rtt_ms: snapshot.rtt_ms,
+            alpn: snapshot.negotiated_alpn,
+            peer_version: snapshot.peer_version,
+            last_beat: now,
+            validity: Some(validity),
+        });
+        true
+    }
+
+    pub(crate) fn beat_operational(
+        &self,
+        node_id: &str,
+        connection: &Connection,
+        seen_at: i64,
+    ) -> bool {
+        let mut guard = self.lock();
+        let now = Instant::now();
+        if let Some(entry) = guard.get_mut(node_id).and_then(|entries| {
+            entries.iter_mut().find(|entry| {
+                entry.validity.as_ref().is_some_and(|validity| {
+                    validity.connection.stable_id() == connection.stable_id()
+                        && validity.is_current(now)
+                })
+            })
+        }) {
+            entry.last_seen_at = Some(seen_at);
+            entry.last_beat = now;
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn close_operational(&self, node_id: &str, connection: &Connection) {
+        let mut guard = self.lock();
+        if let Some(entries) = guard.get_mut(node_id)
+            && let Some(index) = entries.iter().position(|entry| {
+                entry.validity.as_ref().is_some_and(|validity| {
+                    validity.connection.stable_id() == connection.stable_id()
+                })
+            })
+        {
+            if entries.len() > 1 {
+                entries.remove(index);
+            } else {
+                let entry = &mut entries[index];
+                entry.state = LinkState::Unknown;
+                entry.rtt_ms = None;
+                entry.validity = None;
+            }
+        }
     }
 
     /// Heartbeat aceito: renova a evidência. **Não** promove `unknown` a `ready`
@@ -131,7 +231,10 @@ impl PeerLinks {
     /// recebeu o heartbeat é a mesma que foi verificada.
     pub fn beat(&self, node_id: &str, seen_at: i64, now: Instant) {
         let mut guard = self.lock();
-        if let Some(entry) = guard.get_mut(node_id) {
+        if let Some(entry) = guard
+            .get_mut(node_id)
+            .and_then(|entries| entries.last_mut())
+        {
             entry.last_seen_at = Some(seen_at);
             entry.last_beat = now;
             // Entrada em `unknown`/`rejected` que recebe heartbeat é anomalia de
@@ -142,7 +245,10 @@ impl PeerLinks {
     /// Enlace encerrado (conexão fechada/timeout): `unknown`, sem RTT.
     pub fn mark_unknown(&self, node_id: &str) {
         let mut guard = self.lock();
-        if let Some(entry) = guard.get_mut(node_id) {
+        if let Some(entry) = guard
+            .get_mut(node_id)
+            .and_then(|entries| entries.last_mut())
+        {
             entry.state = LinkState::Unknown;
             entry.rtt_ms = None;
         }
@@ -150,17 +256,33 @@ impl PeerLinks {
 
     /// Tentativa de conexão recusada.
     pub fn mark_rejected(&self, node_id: &str) {
+        self.record_rejection(node_id, false);
+    }
+
+    pub(crate) fn record_rejection(&self, node_id: &str, operational: bool) {
         let mut guard = self.lock();
-        let entry = guard.entry(node_id.to_owned()).or_insert_with(|| Entry {
-            state: LinkState::Rejected,
-            last_seen_at: None,
-            rtt_ms: None,
-            alpn: None,
-            peer_version: None,
-            last_beat: Instant::now(),
-        });
-        entry.state = LinkState::Rejected;
-        entry.rtt_ms = None;
+        if operational
+            && guard
+                .get(node_id)
+                .is_some_and(|entries| entries.iter().any(|entry| entry.validity.is_some()))
+        {
+            return;
+        }
+        let entries = guard.entry(node_id.to_owned()).or_default();
+        if let Some(entry) = entries.last_mut() {
+            entry.state = LinkState::Rejected;
+            entry.rtt_ms = None;
+        } else {
+            entries.push(Entry {
+                state: LinkState::Rejected,
+                last_seen_at: None,
+                rtt_ms: None,
+                alpn: None,
+                peer_version: None,
+                last_beat: Instant::now(),
+                validity: None,
+            });
+        }
     }
 
     /// Expira enlaces silenciosos. Devolve os `node_id` que passaram a `unknown`
@@ -168,11 +290,18 @@ impl PeerLinks {
     pub fn expire(&self, now: Instant) -> Vec<String> {
         let mut expired = Vec::new();
         let mut guard = self.lock();
-        for (node_id, entry) in guard.iter_mut() {
-            if entry.state == LinkState::Ready && now.duration_since(entry.last_beat) > self.freshness
-            {
-                entry.state = LinkState::Unknown;
-                entry.rtt_ms = None;
+        for (node_id, entries) in guard.iter_mut() {
+            let mut changed = false;
+            for entry in entries.iter_mut() {
+                if entry.state == LinkState::Ready
+                    && now.duration_since(entry.last_beat) > self.freshness
+                {
+                    entry.state = LinkState::Unknown;
+                    entry.rtt_ms = None;
+                    changed = true;
+                }
+            }
+            if changed && !entries.iter().any(|entry| entry.is_ready(now)) {
                 expired.push(node_id.clone());
             }
         }
@@ -183,10 +312,22 @@ impl PeerLinks {
     #[must_use]
     pub fn snapshot(&self, node_id: &str) -> Option<LinkSnapshot> {
         let guard = self.lock();
-        guard.get(node_id).map(|entry| LinkSnapshot {
-            state: entry.state,
+        let entries = guard.get(node_id)?;
+        let now = Instant::now();
+        let entry = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.is_ready(now))
+            .or_else(|| entries.last())?;
+        let invalid = !entry.is_current(now);
+        Some(LinkSnapshot {
+            state: if invalid {
+                LinkState::Unknown
+            } else {
+                entry.state
+            },
             last_seen_at: entry.last_seen_at,
-            rtt_ms: entry.rtt_ms,
+            rtt_ms: if invalid { None } else { entry.rtt_ms },
             negotiated_alpn: entry.alpn.clone(),
             peer_version: entry.peer_version.clone(),
         })
@@ -196,10 +337,11 @@ impl PeerLinks {
     /// registro do par.
     #[must_use]
     pub fn snapshot_or_never_seen(&self, node_id: &str) -> LinkSnapshot {
-        self.snapshot(node_id).unwrap_or_else(LinkSnapshot::never_seen)
+        self.snapshot(node_id)
+            .unwrap_or_else(LinkSnapshot::never_seen)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<Entry>>> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -231,8 +373,18 @@ mod tests {
         let links = PeerLinks::new(Duration::from_millis(50));
         let node = id(2);
         let start = Instant::now();
-        links.mark_ready(&node, 10, Some(7), "godmesh/1".to_owned(), "0.1.0".to_owned(), start);
-        assert_eq!(links.snapshot(&node).expect("enlace").state, LinkState::Ready);
+        links.mark_ready(
+            &node,
+            10,
+            Some(7),
+            "godmesh/1".to_owned(),
+            "0.1.0".to_owned(),
+            start,
+        );
+        assert_eq!(
+            links.snapshot(&node).expect("enlace").state,
+            LinkState::Ready
+        );
 
         assert!(links.expire(start).is_empty());
         // Um heartbeat renova a evidência.
@@ -244,12 +396,22 @@ mod tests {
         assert_eq!(expired, vec![node.clone()]);
         let snapshot = links.snapshot(&node).expect("enlace");
         assert_eq!(snapshot.state, LinkState::Unknown);
-        assert_eq!(snapshot.rtt_ms, None, "medição viva não sobrevive ao enlace");
-        assert_eq!(snapshot.last_seen_at, Some(11), "última evidência é histórica");
+        assert_eq!(
+            snapshot.rtt_ms, None,
+            "medição viva não sobrevive ao enlace"
+        );
+        assert_eq!(
+            snapshot.last_seen_at,
+            Some(11),
+            "última evidência é histórica"
+        );
 
         // Passar mais tempo não promove nada.
         assert!(links.expire(start + Duration::from_secs(10)).is_empty());
-        assert_eq!(links.snapshot(&node).expect("enlace").state, LinkState::Unknown);
+        assert_eq!(
+            links.snapshot(&node).expect("enlace").state,
+            LinkState::Unknown
+        );
     }
 
     #[test]
@@ -257,7 +419,10 @@ mod tests {
         let links = PeerLinks::new(Duration::from_secs(1));
         let node = id(3);
         links.mark_rejected(&node);
-        assert_eq!(links.snapshot(&node).expect("enlace").state, LinkState::Rejected);
+        assert_eq!(
+            links.snapshot(&node).expect("enlace").state,
+            LinkState::Rejected
+        );
         assert!(links.expire(Instant::now()).is_empty());
     }
 }

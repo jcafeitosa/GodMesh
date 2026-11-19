@@ -21,12 +21,16 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::{future::Future, pin::Pin, sync::Mutex};
 
 use godmesh_federation::handshake::{self, Rejection};
 use godmesh_federation::identity::{PUBLIC_KEY_LEN, node_id_for};
 use godmesh_federation::link::{LinkSnapshot, LinkState, PeerLinks};
-use godmesh_federation::node::{FederationConfig, FederationNode};
+use godmesh_federation::node::{
+    FederationConfig, FederationNode, LinkAuthorizationError, LinkAuthorizer, LinkIdentity,
+    LinkPermit,
+};
 use godmesh_federation::peer::{PeerRecord, PeerRegistry, TrustState};
 use godmesh_federation::{NodeIdentity, SignedManifest, now_unix, transport};
 use quinn::{Connection, ConnectionError, Endpoint};
@@ -49,16 +53,28 @@ fn config() -> FederationConfig {
 }
 
 fn node(config: FederationConfig) -> Node {
+    node_with_authorizer(config, None)
+}
+
+fn node_with_authorizer(
+    config: FederationConfig,
+    authorizer: Option<Arc<dyn LinkAuthorizer>>,
+) -> Node {
     let identity = NodeIdentity::generate_in_memory().expect("identidade");
     let id = identity.node_id().to_owned();
     let key = identity.public_key_bytes();
     let registry = Arc::new(PeerRegistry::new());
-    let node = FederationNode::bind(
-        identity,
-        config,
-        Arc::clone(&registry),
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-    )
+    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+    let node = match authorizer {
+        Some(authorizer) => FederationNode::bind_with_authorizer(
+            Arc::new(identity),
+            config,
+            Arc::clone(&registry),
+            addr,
+            Some(authorizer),
+        ),
+        None => FederationNode::bind(identity, config, Arc::clone(&registry), addr),
+    }
     .expect("endpoint");
     Node {
         node,
@@ -233,7 +249,9 @@ async fn chave_nao_registrada_nao_abre_conexao() {
     let server = node(config());
     let stranger = node(config());
     // O desconhecido até conhece o servidor, mas o servidor não o conhece.
-    stranger.registry.insert(server.record_for(TrustState::Authorized));
+    stranger
+        .registry
+        .insert(server.record_for(TrustState::Authorized));
 
     let error = stranger
         .node
@@ -262,7 +280,10 @@ async fn assinatura_invalida_rejeita_com_codigo() {
     // Corrompe a **assinatura** (não o conteúdo assinado) mantendo o frame
     // bem formado: formato e assinatura têm códigos de recusa distintos.
     let mut value = serde_json::to_value(signed(&raw.identity, now_unix())).expect("json");
-    let signature = value["signature"].as_str().expect("assinatura hex").to_owned();
+    let signature = value["signature"]
+        .as_str()
+        .expect("assinatura hex")
+        .to_owned();
     let trocado = if signature.ends_with('0') { '1' } else { '0' };
     let mut repaired = signature.clone();
     repaired.pop();
@@ -288,9 +309,10 @@ async fn chave_do_manifesto_difere_do_certificado_tls() {
     // O atacante (raw) e a vítima (impostada) são nós autorizados no servidor.
     let victim = NodeIdentity::generate_in_memory().expect("identidade da vítima");
     server.registry.insert(raw.record(TrustState::Authorized));
-    server.registry.insert(
-        PeerRecord::authorized_from_key(&victim.public_key_bytes(), CLUSTER),
-    );
+    server.registry.insert(PeerRecord::authorized_from_key(
+        &victim.public_key_bytes(),
+        CLUSTER,
+    ));
     raw.trust(&server);
 
     // TLS prova posse da chave do atacante; o manifesto é assinado pela vítima.
@@ -400,7 +422,10 @@ async fn heartbeat_que_para_marca_unknown() {
     sleep(Duration::from_millis(900)).await;
     let expired = server.links().snapshot(&raw.id).expect("enlace");
     assert_eq!(expired.state, LinkState::Unknown);
-    assert_eq!(expired.rtt_ms, None, "medição viva não sobrevive ao silêncio");
+    assert_eq!(
+        expired.rtt_ms, None,
+        "medição viva não sobrevive ao silêncio"
+    );
     assert!(
         expired.last_seen_at.is_some(),
         "última evidência permanece histórica"
@@ -456,6 +481,282 @@ async fn no_revogado_nao_reconecta() {
 #[test]
 fn node_id_do_transporte_e_o_mesmo_do_banco() {
     let identity = NodeIdentity::generate_in_memory().expect("identidade");
-    assert_eq!(identity.node_id(), node_id_for(&identity.public_key_bytes()));
+    assert_eq!(
+        identity.node_id(),
+        node_id_for(&identity.public_key_bytes())
+    );
     assert!(identity.node_id().starts_with("gmn_"));
+}
+struct TestAuthorizer {
+    policy: Arc<tokio::sync::RwLock<Result<Option<Instant>, LinkAuthorizationError>>>,
+    changes: tokio::sync::watch::Sender<u64>,
+    identities: Mutex<Vec<(LinkIdentity, LinkIdentity)>>,
+}
+
+impl TestAuthorizer {
+    fn new(policy: Result<Option<Instant>, LinkAuthorizationError>) -> Arc<Self> {
+        Arc::new(Self {
+            policy: Arc::new(tokio::sync::RwLock::new(policy)),
+            changes: tokio::sync::watch::channel(0).0,
+            identities: Mutex::new(Vec::new()),
+        })
+    }
+
+    async fn change(&self, policy: Result<Option<Instant>, LinkAuthorizationError>) {
+        let mut current = self.policy.write().await;
+        *current = policy;
+        self.changes.send_modify(|version| *version += 1);
+    }
+}
+
+impl LinkAuthorizer for TestAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.identities
+                .lock()
+                .unwrap()
+                .push((local.clone(), remote.clone()));
+            let protection = Arc::clone(&self.policy).read_owned().await;
+            let expires_at = (*protection)?;
+            Ok(LinkPermit::new(Box::new(protection), expires_at))
+        })
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+}
+
+fn operational_pair(authorizer: &Arc<TestAuthorizer>) -> (Node, Node) {
+    // Janela longa para distinguir invalidação operacional de silêncio.
+    let cfg = config().with_heartbeat(Duration::from_secs(30), 3);
+    let managed = node_with_authorizer(cfg.clone(), Some(authorizer.clone()));
+    let legacy = node(cfg);
+    managed
+        .registry
+        .insert(legacy.record_for(TrustState::Authorized));
+    legacy
+        .registry
+        .insert(managed.record_for(TrustState::Authorized));
+    (managed, legacy)
+}
+
+#[tokio::test]
+async fn autorizador_recusa_antes_do_protocolo_nos_dois_sentidos() {
+    for denial in [
+        LinkAuthorizationError::Denied,
+        LinkAuthorizationError::Unavailable,
+    ] {
+        let auth = TestAuthorizer::new(Err(denial));
+        let (managed, legacy) = operational_pair(&auth);
+        assert!(managed.node.dial(legacy.addr()).await.is_err());
+        assert!(legacy.node.dial(managed.addr()).await.is_err());
+        assert_ne!(
+            managed.links().snapshot_or_never_seen(&legacy.id).state,
+            LinkState::Ready
+        );
+        assert_eq!(
+            legacy
+                .links()
+                .snapshot_or_never_seen(&managed.id)
+                .last_seen_at,
+            None,
+            "nenhum manifesto foi aceito"
+        );
+        let expected = (
+            LinkIdentity {
+                node_id: managed.id.clone(),
+                public_key: managed.key,
+                cluster: CLUSTER.into(),
+            },
+            LinkIdentity {
+                node_id: legacy.id.clone(),
+                public_key: legacy.key,
+                cluster: CLUSTER.into(),
+            },
+        );
+        let peer = RawPeer::new(config());
+        managed.registry.insert(peer.record(TrustState::Authorized));
+        peer.trust(&managed);
+        let connection = peer.connect(managed.addr()).await;
+        // mTLS já terminou. A recusa chega mesmo sem abrir stream de manifesto.
+        assert_eq!(
+            close_code(&connection).await,
+            Rejection::NotAuthorized.code()
+        );
+        let raw_identity = LinkIdentity {
+            node_id: peer.id,
+            public_key: peer.key,
+            cluster: CLUSTER.into(),
+        };
+        assert_eq!(
+            *auth.identities.lock().unwrap(),
+            vec![
+                expected.clone(),
+                expected.clone(),
+                (expected.0, raw_identity)
+            ]
+        );
+        managed.node.shutdown();
+        legacy.node.shutdown();
+    }
+}
+
+#[tokio::test]
+async fn enlace_expira_sem_esperar_proximo_heartbeat() {
+    let auth = TestAuthorizer::new(Ok(Some(Instant::now() + Duration::from_secs(1))));
+    let (managed, legacy) = operational_pair(&auth);
+    assert_eq!(
+        managed.node.dial(legacy.addr()).await.unwrap().state,
+        LinkState::Ready
+    );
+    wait_for_state(&managed.links(), &legacy.id, LinkState::Unknown).await;
+    wait_for_state(&legacy.links(), &managed.id, LinkState::Unknown).await;
+    assert!(managed.node.dial(legacy.addr()).await.is_err());
+    managed.node.shutdown();
+    legacy.node.shutdown();
+}
+
+#[tokio::test]
+async fn mudanca_fecha_enlace_e_reconexao_exige_nova_autorizacao() {
+    let auth = TestAuthorizer::new(Ok(None));
+    let (managed, legacy) = operational_pair(&auth);
+    legacy.node.dial(managed.addr()).await.unwrap();
+    wait_for_state(&managed.links(), &legacy.id, LinkState::Ready).await;
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        auth.change(Err(LinkAuthorizationError::Denied)),
+    )
+    .await
+    .expect("a proteção foi liberada sem esperar por rede");
+    wait_for_state(&managed.links(), &legacy.id, LinkState::Unknown).await;
+    wait_for_state(&legacy.links(), &managed.id, LinkState::Unknown).await;
+    assert!(legacy.node.dial(managed.addr()).await.is_err());
+
+    auth.change(Ok(None)).await;
+    legacy.node.dial(managed.addr()).await.unwrap();
+    wait_for_state(&managed.links(), &legacy.id, LinkState::Ready).await;
+    managed.node.shutdown();
+    legacy.node.shutdown();
+}
+
+#[tokio::test]
+async fn heartbeat_reconsulta_autoridade_sem_sinal_de_mudanca() {
+    let auth = TestAuthorizer::new(Ok(None));
+    let managed = node_with_authorizer(
+        config().with_heartbeat(Duration::from_secs(30), 3),
+        Some(auth.clone()),
+    );
+    let peer = RawPeer::new(config());
+    managed.registry.insert(peer.record(TrustState::Authorized));
+    peer.trust(&managed);
+    let connection = peer.connect(managed.addr()).await;
+    handshake::initiate(&connection, &peer.identity, &peer.config, &peer.registry)
+        .await
+        .expect("manifestos aceitos");
+    wait_for_state(&managed.links(), &peer.id, LinkState::Ready).await;
+
+    // Aguardar o heartbeat inicial garante que o próximo acesso à autoridade
+    // ocorrerá por causa do heartbeat recebido.
+    let mut initial = tokio::time::timeout(Duration::from_secs(2), connection.accept_uni())
+        .await
+        .expect("heartbeat inicial")
+        .expect("stream de heartbeat");
+    initial.read_to_end(12).await.expect("frame completo");
+
+    // Uma falha de acesso à autoridade não produz alteração durável.
+    *auth.policy.write().await = Err(LinkAuthorizationError::Unavailable);
+    let mut heartbeat = connection.open_uni().await.unwrap();
+    heartbeat
+        .write_all(b"GMH1\x00\x00\x00\x00\x00\x00\x00\x01")
+        .await
+        .unwrap();
+    heartbeat.finish().unwrap();
+    assert_eq!(
+        close_code(&connection).await,
+        Rejection::NotAuthorized.code()
+    );
+    wait_for_state(&managed.links(), &peer.id, LinkState::Unknown).await;
+    managed.node.shutdown();
+}
+
+#[tokio::test]
+async fn reavalia_autoridade_antes_de_ready_sem_proteger_espera_pelo_manifesto() {
+    let auth = TestAuthorizer::new(Ok(None));
+    let managed = node_with_authorizer(config(), Some(auth.clone()));
+    let peer = RawPeer::new(config());
+    managed.registry.insert(peer.record(TrustState::Authorized));
+    peer.trust(&managed);
+    let connection = peer.connect(managed.addr()).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while auth.identities.lock().unwrap().is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+        // A consulta inicial já começou e o cliente ainda não abriu stream.
+        *auth.policy.write().await = Err(LinkAuthorizationError::Unavailable);
+    })
+    .await
+    .expect("a espera pelo manifesto deve ficar fora da proteção");
+    let _ = handshake::initiate(&connection, &peer.identity, &peer.config, &peer.registry).await;
+    assert_eq!(
+        close_code(&connection).await,
+        Rejection::NotAuthorized.code()
+    );
+    assert_eq!(
+        managed
+            .links()
+            .snapshot_or_never_seen(&peer.id)
+            .last_seen_at,
+        None
+    );
+    managed.node.shutdown();
+}
+
+#[tokio::test]
+async fn fechamento_de_uma_conexao_preserva_outro_enlace_do_mesmo_par() {
+    let auth = TestAuthorizer::new(Ok(None));
+    let managed = node_with_authorizer(config(), Some(auth.clone()));
+    let peer = RawPeer::new(config());
+    managed.registry.insert(peer.record(TrustState::Authorized));
+    peer.trust(&managed);
+    let first = peer.connect(managed.addr()).await;
+    handshake::initiate(&first, &peer.identity, &peer.config, &peer.registry)
+        .await
+        .unwrap();
+    let second = peer.connect(managed.addr()).await;
+    let mut second_config = peer.config.clone();
+    second_config.software_version = "0.2.0".into();
+    handshake::initiate(&second, &peer.identity, &second_config, &peer.registry)
+        .await
+        .unwrap();
+    // Cada stream confirma que a respectiva conexão havia alcançado ready.
+    for connection in [&first, &second] {
+        let mut heartbeat = tokio::time::timeout(Duration::from_secs(2), connection.accept_uni())
+            .await
+            .unwrap()
+            .unwrap();
+        heartbeat.read_to_end(12).await.unwrap();
+    }
+    second.close(0u32.into(), b"fim do segundo enlace");
+    let links = managed.links();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = links.snapshot_or_never_seen(&peer.id);
+            if snapshot.peer_version.as_deref() == Some(VERSION) {
+                assert_eq!(snapshot.state, LinkState::Ready);
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("o primeiro enlace deve voltar a representar o par");
+    first.close(0u32.into(), b"fim do primeiro enlace");
+    wait_for_state(&managed.links(), &peer.id, LinkState::Unknown).await;
+    managed.node.shutdown();
 }
