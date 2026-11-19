@@ -22,7 +22,7 @@ use crate::{
 use super::{
     Direction, Error, Probe, SendCredit, Usage,
     quotas::{OPEN_TIMEOUT, Quotas, Reservation},
-    scheduling::{Scheduler, Turn},
+    scheduling::{OpeningTurn, Scheduler, Turn},
 };
 
 const CHECK_BUDGET: Duration = Duration::from_millis(100);
@@ -125,6 +125,11 @@ pub struct RelayAdmission {
 }
 
 impl RelayAdmission {
+    #[cfg(test)]
+    pub(super) fn opening_scheduler(&self) -> &super::scheduling::Scheduler {
+        &self.scheduler
+    }
+
     pub fn new(
         registry: Registry,
         portable: Arc<PortableJoin>,
@@ -209,9 +214,6 @@ impl RelayAdmission {
             .checked_add(OPEN_TIMEOUT)
             .ok_or(Error::RouteUnavailable)?;
         let _opening_turn = timeout_at(open_deadline, self.scheduler.opening())
-            .await
-            .map_err(|_| Error::RouteUnavailable)?;
-        let _turn = timeout_at(open_deadline, self.scheduler.normal())
             .await
             .map_err(|_| Error::RouteUnavailable)?;
         let mut reservation = self
@@ -364,10 +366,7 @@ impl RouteInstance {
     /// O chamador só solicita esta transição depois de verificar o token da stream.
     pub async fn confirm_token(&self) -> Result<Instant, Error> {
         let _opening_turn = self
-            .wait_turn_until(self.open_deadline, self.admission.scheduler.opening())
-            .await?;
-        let _turn = self
-            .wait_turn_until(self.open_deadline, self.admission.scheduler.normal())
+            .wait_opening_until(self.open_deadline, self.admission.scheduler.opening())
             .await?;
         self.authorize(self.open_deadline, |next, checked_now| {
             self.reservation.forward(checked_now)?;
@@ -414,6 +413,25 @@ impl RouteInstance {
             Ok(next)
         })
         .await
+    }
+
+    async fn wait_opening_until<'a>(
+        &'a self,
+        deadline: Instant,
+        turn: impl Future<Output = OpeningTurn<'a>>,
+    ) -> Result<OpeningTurn<'a>, Error> {
+        let mut cancelled = self.cancellation();
+        tokio::select! {
+            biased;
+            _ = cancelled.wait_for(|cancelled| *cancelled) => Err(Error::Cancelled),
+            result = timeout_at(deadline, turn) => match result {
+                Ok(turn) => Ok(turn),
+                Err(_) => {
+                    self.cancel();
+                    Err(Error::RouteUnavailable)
+                }
+            },
+        }
     }
 
     async fn wait_turn_until<'a>(

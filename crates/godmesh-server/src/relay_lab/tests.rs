@@ -251,13 +251,28 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
         .unwrap();
     let mut token_lock = f.pool.begin().await.unwrap();
     portable.lock_cluster(&mut token_lock).await.unwrap();
-    let (d1_token, d2_token, ()) =
-        tokio::join!(d1_route.confirm_token(), d2_route.confirm_token(), async {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            token_lock.rollback().await.unwrap();
-        });
+    let d1 = d1_route.confirm_token();
+    let d2 = d2_route.confirm_token();
+    let (d1_token, d2_token, ()) = tokio::join!(d1, d2, async {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        token_lock.rollback().await.unwrap();
+    });
     d1_token.unwrap();
     d2_token.unwrap();
+    // Simula D1 retida depois de obter a vaga opening e antes do guard M1C.
+    // Crédito de D2 não usa essa fila e deve continuar elegível.
+    let d1_opening = admission.opening_scheduler().opening().await;
+    let d2_credit = tokio::time::timeout(
+        Duration::from_millis(100),
+        d2_route.next_credit(Direction::ToDestination),
+    )
+    .await;
+    assert!(
+        d2_credit.is_ok(),
+        "D2 credit must not wait for D1 opening FIFO"
+    );
+    assert!(d2_credit.unwrap().is_ok(), "D2 credit authorization failed");
+    drop(d1_opening);
 
     let directions = [Direction::ToDestination, Direction::FromDestination];
     let mut credits = Vec::new();

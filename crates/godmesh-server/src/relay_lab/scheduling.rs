@@ -18,9 +18,10 @@ struct State {
 }
 
 impl Scheduler {
-    pub(super) async fn opening(&self) -> Turn<'_> {
-        self.opening.lock().await;
-        self.enter(false).await
+    pub(super) async fn opening(&self) -> OpeningTurn<'_> {
+        OpeningTurn {
+            _guard: self.opening.lock().await,
+        }
     }
 
     pub(super) async fn normal(&self) -> Turn<'_> {
@@ -56,6 +57,10 @@ impl Drop for PendingRecheck<'_> {
         self.0.state.lock().unwrap().waiting_rechecks -= 1;
         self.0.changed.notify_waiters();
     }
+}
+
+pub(super) struct OpeningTurn<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
 pub(super) struct Turn<'a>(&'a Scheduler);
