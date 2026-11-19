@@ -384,6 +384,28 @@ fn check_events(events: &[&[u8]], limits: Limits) -> Result<(), WireError> {
     Ok(())
 }
 
+fn validate_positions(batch: &Batch<'_>) -> Result<(), WireError> {
+    let namespace = &batch.namespace;
+    let mut seq = batch.after_seq;
+    for frame in &batch.events {
+        let event = decode_event(frame)?;
+        let position = event.position;
+        if position.origin_node != namespace.origin_node
+            || event.tenant_id != namespace.tenant_id
+            || position.stream_id != namespace.stream_id
+            || i32::try_from(position.partition).ok() != Some(namespace.partition)
+            || i64::try_from(position.authority_epoch).ok() != Some(namespace.authority_epoch)
+        {
+            return Err(WireError::CorrelationMismatch);
+        }
+        seq = seq.checked_add(1).ok_or(WireError::InvalidField("seq"))?;
+        if i64::try_from(position.seq).ok() != Some(seq) {
+            return Err(WireError::InvalidField("seq"));
+        }
+    }
+    Ok(())
+}
+
 fn encode_batch(batch: &Batch<'_>, local_frame_bytes: NonZeroU32) -> Result<Vec<u8>, WireError> {
     check_events(&batch.events, batch.effective_limits)?;
     let mut body = serde_json::to_vec(&WireMessage::Batch(BatchHeader::from_batch(batch)))
@@ -402,8 +424,8 @@ fn encode_batch(batch: &Batch<'_>, local_frame_bytes: NonZeroU32) -> Result<Vec<
         .try_fold(overhead, |len, event| len.checked_add(event.len()))
         .ok_or(WireError::LimitExceeded)?;
     check_len(full_len, limit)?;
+    validate_positions(batch)?;
     for (index, event) in batch.events.iter().enumerate() {
-        decode_event(event)?;
         if index != 0 {
             body.push(b',');
         }
@@ -455,25 +477,7 @@ pub fn validate_batch(pull: &Pull, batch: &Batch<'_>, body_len: usize) -> Result
     }
     check_len(body_len, limits.frame_bytes)?;
     check_events(&batch.events, limits)?;
-    let mut seq = pull.after_seq;
-    for frame in &batch.events {
-        let event = decode_event(frame)?;
-        let position = event.position;
-        let namespace = &pull.namespace;
-        if position.origin_node != namespace.origin_node
-            || event.tenant_id != namespace.tenant_id
-            || position.stream_id != namespace.stream_id
-            || i32::try_from(position.partition).ok() != Some(namespace.partition)
-            || i64::try_from(position.authority_epoch).ok() != Some(namespace.authority_epoch)
-        {
-            return Err(WireError::CorrelationMismatch);
-        }
-        seq = seq.checked_add(1).ok_or(WireError::InvalidField("seq"))?;
-        if i64::try_from(position.seq).ok() != Some(seq) {
-            return Err(WireError::InvalidField("seq"));
-        }
-    }
-    Ok(())
+    validate_positions(batch)
 }
 
 /// Confere o ACK contra a requisição e a última sequência enviada na stream.

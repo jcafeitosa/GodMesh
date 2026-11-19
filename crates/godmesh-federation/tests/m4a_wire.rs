@@ -337,6 +337,7 @@ fn b_empty_batch_and_persistable_extremes() {
     let expected = Message::Pull(pull);
     assert_eq!(decode(&encode(&expected)), Ok(expected));
     let mut nonempty = batch(vec![]);
+    nonempty.after_seq = i64::MAX - 1;
     let envelope = event(i64::MAX);
     nonempty.events.push(&envelope);
     assert!(decode(&encode(&Message::Batch(nonempty))).is_ok());
@@ -360,29 +361,56 @@ fn f_invalid_frames_do_not_affect_following_message() {
     }
 }
 
+// Monta a mensagem de recepção diretamente no wire para exercitar erros
+// que o encoder local deve recusar antes de produzir bytes.
+fn received_batch(sent: &Batch<'_>) -> Vec<u8> {
+    let header = json!({
+        "type": "m4a.batch.v1",
+        "request_id": sent.request_id,
+        "namespace": sent.namespace,
+        "destination": sent.destination,
+        "after_seq": sent.after_seq,
+        "source_limits": sent.source_limits,
+        "effective_limits": sent.effective_limits,
+        "has_more": sent.has_more,
+    });
+    let mut body = serde_json::to_vec(&header).unwrap();
+    assert_eq!(body.pop(), Some(b'}'));
+    body.extend_from_slice(b",\"events\":[");
+    for (index, event) in sent.events.iter().enumerate() {
+        if index > 0 {
+            body.push(b',');
+        }
+        body.extend_from_slice(event);
+    }
+    body.extend_from_slice(b"]}");
+    body
+}
+
+fn assert_position_error(pull: &Pull, sent: Batch<'_>, error: WireError) {
+    let body = received_batch(&sent);
+    let Message::Batch(decoded) = decode(&body).unwrap() else {
+        panic!("expected Batch")
+    };
+    assert_eq!(validate_batch(pull, &decoded, body.len()), Err(error));
+    assert_eq!(
+        encode_body(&Message::Batch(sent), ceiling()).err(),
+        Some(error)
+    );
+}
+
 #[test]
 fn n_batch_requires_contiguous_positions_in_the_requested_namespace() {
     let first = event(1);
     let second = event(2);
     let third = event(3);
-    let pull = pull();
-    for (events, error) in [
-        (vec![second.as_slice()], WireError::InvalidField("seq")),
-        (
-            vec![first.as_slice(), third.as_slice()],
-            WireError::InvalidField("seq"),
-        ),
-        (
-            vec![first.as_slice(), first.as_slice()],
-            WireError::InvalidField("seq"),
-        ),
+    let mut pull = pull();
+    for events in [
+        vec![second.as_slice()],
+        vec![first.as_slice(), third.as_slice()],
+        vec![first.as_slice(), first.as_slice()],
     ] {
-        let message = Message::Batch(batch(events));
-        let body = encode(&message);
-        let Message::Batch(decoded) = decode(&body).unwrap() else {
-            panic!("expected Batch")
-        };
-        assert_eq!(validate_batch(&pull, &decoded, body.len()), Err(error));
+        assert_position_error(&pull, batch(events), WireError::InvalidField("seq"));
     }
 
     let original = String::from_utf8(first).unwrap();
@@ -391,39 +419,27 @@ fn n_batch_requires_contiguous_positions_in_the_requested_namespace() {
         ("te\\u006eant", "other"),
         ("\"partition\":0", "\"partition\":1"),
         ("\"authority_epoch\":1", "\"authority_epoch\":2"),
+        (&pull.namespace.origin_node, &pull.destination),
     ] {
         assert!(original.contains(needle));
         let event = original.replacen(needle, replacement, 1);
-        let message = Message::Batch(batch(vec![event.as_bytes()]));
-        let body = encode(&message);
-        let Message::Batch(decoded) = decode(&body).unwrap() else {
-            panic!("expected Batch")
-        };
-        assert_eq!(
-            validate_batch(&pull, &decoded, body.len()),
-            Err(WireError::CorrelationMismatch)
+        assert_position_error(
+            &pull,
+            batch(vec![event.as_bytes()]),
+            WireError::CorrelationMismatch,
         );
     }
-    let event = original.replacen(&pull.namespace.origin_node, &pull.destination, 1);
-    let message = Message::Batch(batch(vec![event.as_bytes()]));
-    let body = encode(&message);
-    let Message::Batch(decoded) = decode(&body).unwrap() else {
-        panic!("expected Batch")
-    };
-    assert_eq!(
-        validate_batch(&pull, &decoded, body.len()),
-        Err(WireError::CorrelationMismatch)
-    );
 
-    let mut pull = pull.clone();
     pull.after_seq = i64::MAX;
     let mut sent = batch(vec![&second]);
     sent.after_seq = pull.after_seq;
-    assert_eq!(
-        validate_batch(&pull, &sent, 1000),
-        Err(WireError::InvalidField("seq"))
-    );
-    sent.events.clear();
-    sent.has_more = false;
-    assert_eq!(validate_batch(&pull, &sent, 1000), Ok(()));
+    assert_position_error(&pull, sent, WireError::InvalidField("seq"));
+
+    let mut empty = batch(vec![]);
+    empty.after_seq = pull.after_seq;
+    let body = encode(&Message::Batch(empty));
+    let Message::Batch(decoded) = decode(&body).unwrap() else {
+        panic!("expected Batch")
+    };
+    assert_eq!(validate_batch(&pull, &decoded, body.len()), Ok(()));
 }
