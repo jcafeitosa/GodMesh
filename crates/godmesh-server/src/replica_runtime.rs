@@ -202,7 +202,8 @@ impl ReplicaRuntime {
                     });
                 }
                 finish(&mut stream, deadline)?;
-                Err(AttemptError::Remote(error.error))
+                // O wire não informa se a falha remota é transitória.
+                Err(AttemptError::Remote)
             }
             _ => Err(AttemptError::Protocol),
         }
@@ -267,7 +268,7 @@ enum Cycle {
 enum AttemptError {
     Transport(SessionError),
     Effect(EffectError),
-    Remote(ErrorCode),
+    Remote,
     Timeout,
     Protocol,
 }
@@ -278,7 +279,6 @@ impl AttemptError {
             Self::Transport(
                 SessionError::Busy | SessionError::Transport | SessionError::Timeout,
             )
-            | Self::Remote(ErrorCode::StorageUnavailable)
             | Self::Timeout => true,
             Self::Effect(error) => error.is_retryable(),
             _ => false,
@@ -431,9 +431,8 @@ fn error_on_wire(error: &EffectError) -> Option<ErrorCode> {
         Effect::Authority | Effect::Fence | Effect::M1c(_) | Effect::M3(_) => {
             ErrorCode::AuthorityBlocked
         }
-        error if error.is_retryable() => ErrorCode::StorageUnavailable,
-        Effect::Storage(_) | Effect::Replication(Replica::Storage(_)) => {
-            ErrorCode::AuthorityBlocked
+        Effect::Storage(_) | Effect::Timeout | Effect::Replication(Replica::Storage(_)) => {
+            ErrorCode::StorageUnavailable
         }
         Effect::Replication(Replica::Policy) => ErrorCode::ResidenceDenied,
         Effect::Replication(Replica::ProofMissing) => ErrorCode::ProofMissing,
@@ -522,17 +521,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_storage_retry_requires_a_transient_failure() {
+    fn storage_error_on_wire_preserves_its_class_without_promising_retry() {
         let transient = EffectError::Storage(sqlx::Error::PoolTimedOut);
         let permanent =
             EffectError::Storage(sqlx::Error::Protocol("invalid storage response".into()));
 
-        let transient_code = error_on_wire(&transient).unwrap();
-        assert_eq!(transient_code, ErrorCode::StorageUnavailable);
-        assert!(AttemptError::Remote(transient_code).retryable());
+        for error in [&transient, &permanent] {
+            let code = error_on_wire(error).unwrap();
+            assert_eq!(code, ErrorCode::StorageUnavailable);
+            assert!(!AttemptError::Remote.retryable());
+        }
 
-        let permanent_code = error_on_wire(&permanent).unwrap();
-        assert_eq!(permanent_code, ErrorCode::AuthorityBlocked);
-        assert!(!AttemptError::Remote(permanent_code).retryable());
+        for error in [EffectError::Authority, EffectError::Fence] {
+            let code = error_on_wire(&error).unwrap();
+            assert_eq!(code, ErrorCode::AuthorityBlocked);
+            assert!(!AttemptError::Remote.retryable());
+        }
+
+        assert!(AttemptError::Effect(transient).retryable());
+        assert!(!AttemptError::Effect(permanent).retryable());
     }
 }
