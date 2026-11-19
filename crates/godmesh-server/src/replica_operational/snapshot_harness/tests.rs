@@ -1,13 +1,11 @@
-use crate as server;
 use godmesh_federation::snapshot::{SnapshotIdentity, SnapshotLimits};
 use std::{
     num::{NonZeroU32, NonZeroUsize},
     sync::Arc,
 };
 
+use super::super::fixture;
 use super::*;
-#[path = "../../../tests/common/replica_fixture.rs"]
-mod fixture;
 use fixture::{CLASS, CLUSTER, ReceiverFixture, boot_source, deadline};
 
 const WINDOW: Window = Window {

@@ -3,6 +3,8 @@
 mod db;
 mod intent_marker;
 mod link;
+#[cfg(feature = "snapshot-harness")]
+pub mod restore_lab;
 mod resume;
 mod settings;
 #[cfg(any(test, feature = "snapshot-harness"))]
@@ -10,6 +12,12 @@ pub mod snapshot_harness;
 
 pub use link::{authorize_link_in_tx, authorize_link_until};
 pub use settings::{ConfigError, Pin, ReplicaConfig, Role};
+
+#[cfg(test)]
+use crate as server;
+#[cfg(test)]
+#[path = "../../tests/common/replica_fixture.rs"]
+mod fixture;
 
 use std::{fmt, future::Future, sync::Arc, time::Duration};
 
@@ -58,8 +66,12 @@ pub enum EffectError {
     CommitUnknown(Option<sqlx::Error>),
     ResumeInconsistent,
     SnapshotPending,
+    #[cfg(feature = "snapshot-harness")]
+    RestoreClosed,
     StalePull,
-    SuspendedHistory { blocked_next_seq: i64 },
+    SuspendedHistory {
+        blocked_next_seq: i64,
+    },
 }
 
 impl EffectError {
@@ -145,6 +157,8 @@ impl fmt::Display for PreflightError {
 impl std::error::Error for PreflightError {}
 
 pub struct ReplicaService {
+    #[cfg(feature = "snapshot-harness")]
+    restore_gate: Option<restore_lab::AdmissionGate>,
     config: ReplicaConfig,
     portable: Arc<PortableJoin>,
     m3: Arc<BundleService>,
@@ -175,6 +189,8 @@ impl ReplicaService {
             return Err(PreflightError::Mismatch);
         }
         let service = Self {
+            #[cfg(feature = "snapshot-harness")]
+            restore_gate: None,
             config,
             portable,
             m3,
@@ -383,6 +399,27 @@ impl ReplicaService {
     }
 
     async fn transact_with<T, E: From<EffectError>>(
+        &self,
+        deadline: Instant,
+        effect: impl AsyncFnOnce(&mut ClusterGuard<'_, '_>, i64) -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.transact_restore(deadline, async |guard, now| {
+            #[cfg(feature = "snapshot-harness")]
+            if let Some(gate) = &self.restore_gate {
+                gate.authorize(guard).await?;
+            }
+            effect(guard, now).await
+        })
+        .await
+    }
+
+    #[cfg(feature = "snapshot-harness")]
+    pub fn with_restore_gate(mut self, gate: restore_lab::AdmissionGate) -> Self {
+        self.restore_gate = Some(gate);
+        self
+    }
+
+    async fn transact_restore<T, E: From<EffectError>>(
         &self,
         deadline: Instant,
         effect: impl AsyncFnOnce(&mut ClusterGuard<'_, '_>, i64) -> Result<T, E>,

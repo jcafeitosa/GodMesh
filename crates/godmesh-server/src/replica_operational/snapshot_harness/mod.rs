@@ -95,7 +95,7 @@ fn deadline_check(deadline: Instant) -> Result<(), SnapshotEffectError> {
     }
 }
 
-fn check_scope(
+pub(super) fn check_scope(
     svc: &ReplicaService,
     peer: SessionPeer<'_>,
     policy: &SnapshotPolicy,
@@ -123,7 +123,10 @@ fn check_scope(
     Ok(())
 }
 
-fn snapshot_limits(policy: &SnapshotPolicy, bytes: usize) -> Result<Limits, SnapshotEffectError> {
+pub(super) fn snapshot_limits(
+    policy: &SnapshotPolicy,
+    bytes: usize,
+) -> Result<Limits, SnapshotEffectError> {
     Ok(Limits::new(
         policy.limits.max_events.get() as usize,
         policy.limits.max_event_bytes.get() as usize,
@@ -153,6 +156,40 @@ pub async fn capture(
     policy: &SnapshotPolicy,
     deadline: Instant,
 ) -> Result<Vec<u8>, SnapshotEffectError> {
+    capture_range(
+        svc,
+        signer,
+        peer,
+        CaptureRange::Latest { base },
+        window,
+        policy,
+        deadline,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CaptureRange {
+    Latest {
+        base: i64,
+    },
+    #[cfg(feature = "snapshot-harness")]
+    Fixed {
+        base: i64,
+        cut: i64,
+        digest: [u8; 32],
+    },
+}
+
+pub(super) async fn capture_range(
+    svc: &ReplicaService,
+    signer: &NodeIdentity,
+    peer: SessionPeer<'_>,
+    range: CaptureRange,
+    window: Window,
+    policy: &SnapshotPolicy,
+    deadline: Instant,
+) -> Result<Vec<u8>, SnapshotEffectError> {
     check_scope(svc, peer, policy, Role::Origin)?;
     if signer.node_id() != policy.origin.node_id
         || signer.public_key_hex() != policy.origin.public_key
@@ -162,7 +199,14 @@ pub async fn capture(
     svc.transact_with(deadline, async |guard, now| {
         svc.gates(guard, peer, now).await?;
         window.check(now)?;
-        let (class, _, cut) = snapshot_read::scope(guard, svc.series()).await?;
+        let (class, _, prefix) = snapshot_read::scope(guard, svc.series()).await?;
+        let (base, cut) = match range {
+            CaptureRange::Latest { base } => (base, prefix),
+            #[cfg(feature = "snapshot-harness")]
+            CaptureRange::Fixed { base, cut, .. } if cut <= prefix => (base, cut),
+            #[cfg(feature = "snapshot-harness")]
+            CaptureRange::Fixed { .. } => return Err(ReplicaError::SequenceGap.into()),
+        };
         if class != policy.retention_class {
             return Err(SnapshotEffectError::Scope);
         }
@@ -203,6 +247,16 @@ pub async fn capture(
         let events: Vec<_> = frames.iter().map(Vec::as_slice).collect();
         if i64::try_from(events.len()) != Ok(count) {
             return Err(SnapshotEffectError::LimitExceeded);
+        }
+        #[cfg(feature = "snapshot-harness")]
+        if let CaptureRange::Fixed { digest, .. } = range {
+            use godmesh_federation::restore_evidence::proofs_digest;
+            if proofs_digest(count as u64, events.iter().copied())
+                .map_err(|_| SnapshotEffectError::SnapshotConflict)?
+                != digest
+            {
+                return Err(SnapshotEffectError::SnapshotConflict);
+            }
         }
         manifest.events_digest = hex::encode(snapshot::events_digest(&events)?);
         manifest.canonical_bytes()?;
@@ -393,46 +447,17 @@ impl EligibleReceiver {
             if prefix != base {
                 return Err(SnapshotEffectError::CheckpointMismatch);
             }
-            let frames: Vec<_> = events.iter().map(|event| event.to_vec()).collect();
-            deadline_check(deadline)?;
-            let applied =
-                Replication::apply_copy_in_tx(guard, svc.series(), authority, &frames, || now)
-                    .await?;
-            if (
-                applied.first,
-                applied.last,
-                applied.prefix,
-                applied.inserted,
-            ) != (first, cut, cut, events.len())
-            {
-                return Err(SnapshotEffectError::CheckpointMismatch);
-            }
-            let proof_expires_at = snapshot_read::exact_local_expiry(
+            apply_new_in_tx(NewApplication {
+                svc,
                 guard,
-                svc.series(),
-                authority.origin,
-                base,
+                authority,
+                facts,
                 events,
+                region,
                 now,
-            )
-            .await?;
-            let expires_at =
-                receipt_expiry(now, current.seconds, window.expires_at, proof_expires_at)?;
-            receipt::insert(
-                guard.connection(),
-                local,
-                svc.series(),
-                cut,
-                &receipt::Receipt {
-                    identity: facts.receipt,
-                    policy_id: current.id,
-                    policy_version: current.version,
-                    applied_at: now,
-                    proof_expires_at,
-                    expires_at,
-                    jurisdiction: region,
-                },
-            )
+                deadline,
+                current,
+            })
             .await?;
             Ok(PersistedLocal {
                 first,
@@ -442,6 +467,118 @@ impl EligibleReceiver {
         })
         .await
     }
+}
+
+struct NewApplication<'a, 'tx, 'db> {
+    svc: &'a ReplicaService,
+    guard: &'a mut crate::portable_join::ClusterGuard<'tx, 'db>,
+    authority: super::replication::CopyAuthority<'a>,
+    facts: intent::Facts,
+    events: &'a [&'a [u8]],
+    region: String,
+    now: i64,
+    deadline: Instant,
+    current: receipt::Policy,
+}
+
+async fn apply_new_in_tx(input: NewApplication<'_, '_, '_>) -> Result<(), SnapshotEffectError> {
+    let NewApplication {
+        svc,
+        guard,
+        authority,
+        facts,
+        events,
+        region,
+        now,
+        deadline,
+        current,
+    } = input;
+    let base = facts.receipt.base;
+    let cut = facts.cut;
+    let first = base + 1;
+    let window = facts.window;
+    let local = &svc.local_pin().node_id;
+    let frames: Vec<_> = events.iter().map(|event| event.to_vec()).collect();
+    deadline_check(deadline)?;
+    let applied =
+        Replication::apply_copy_in_tx(guard, svc.series(), authority, &frames, || now).await?;
+    if (
+        applied.first,
+        applied.last,
+        applied.prefix,
+        applied.inserted,
+    ) != (first, cut, cut, events.len())
+    {
+        return Err(SnapshotEffectError::CheckpointMismatch);
+    }
+    let proof_expires_at =
+        snapshot_read::exact_local_expiry(guard, svc.series(), authority.origin, base, events, now)
+            .await?;
+    let expires_at = receipt_expiry(now, current.seconds, window.expires_at, proof_expires_at)?;
+    receipt::insert(
+        guard.connection(),
+        local,
+        svc.series(),
+        cut,
+        &receipt::Receipt {
+            identity: facts.receipt,
+            policy_id: current.id,
+            policy_version: current.version,
+            applied_at: now,
+            proof_expires_at,
+            expires_at,
+            jurisdiction: region,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+#[cfg(feature = "snapshot-harness")]
+pub(super) async fn apply_closed_in_tx(
+    ctx: RestoreApplication<'_, '_, '_>,
+) -> Result<(), SnapshotEffectError> {
+    let facts = package_facts(ctx.raw, ctx.verified)?;
+    let local = &ctx.svc.local_pin().node_id;
+    let current = receipt::policy(
+        ctx.guard.connection(),
+        local,
+        ctx.svc.series(),
+        &ctx.region,
+        None,
+    )
+    .await?;
+    if receipt::load(ctx.guard.connection(), local, ctx.svc.series(), facts.cut)
+        .await?
+        .is_some()
+    {
+        return Err(SnapshotEffectError::SnapshotConflict);
+    }
+    facts.window.check(ctx.now)?;
+    apply_new_in_tx(NewApplication {
+        svc: ctx.svc,
+        guard: ctx.guard,
+        authority: ctx.authority,
+        facts,
+        events: ctx.verified.events(),
+        region: ctx.region,
+        now: ctx.now,
+        deadline: ctx.deadline,
+        current,
+    })
+    .await
+}
+
+#[cfg(feature = "snapshot-harness")]
+pub(super) struct RestoreApplication<'a, 'tx, 'db> {
+    pub svc: &'a ReplicaService,
+    pub guard: &'a mut crate::portable_join::ClusterGuard<'tx, 'db>,
+    pub authority: super::replication::CopyAuthority<'a>,
+    pub raw: &'a [u8],
+    pub verified: &'a VerifiedSnapshot<'a>,
+    pub region: String,
+    pub now: i64,
+    pub deadline: Instant,
 }
 
 fn ready(state: ReceiverState) -> Result<i64, SnapshotEffectError> {
