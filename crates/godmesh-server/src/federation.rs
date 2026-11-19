@@ -903,8 +903,13 @@ fn peer_record(row: &sqlx::postgres::PgRow) -> Result<PeerRecord, ApiError> {
 /// # Errors
 /// `503` banco, ou estado de confiança persistido ilegível (invariante).
 pub async fn list_peers(pool: &PgPool) -> Result<Vec<PeerRecord>, ApiError> {
+    let mut connection = pool.acquire().await?;
+    list_peers_on(&mut connection).await
+}
+
+pub(crate) async fn list_peers_on(connection: &mut sqlx::PgConnection) -> Result<Vec<PeerRecord>, ApiError> {
     let rows = sqlx::query(peer_query!("ORDER BY node_id"))
-        .fetch_all(pool)
+        .fetch_all(connection)
         .await?;
     rows.iter().map(peer_record).collect()
 }

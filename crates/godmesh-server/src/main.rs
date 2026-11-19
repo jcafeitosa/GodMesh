@@ -72,7 +72,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use godmesh_federation::NodeIdentity;
-use godmesh_federation::link::LinkState;
 use godmesh_federation::node::{
     FederationConfig, FederationNode, LinkAuthorizationError, LinkAuthorizer, LinkIdentity,
     LinkPermit,
@@ -811,7 +810,7 @@ async fn run(config: Config) -> Result<(), String> {
     };
 
     let peer_task = runtime_federation.as_ref().map(|node| {
-        spawn_peers_maintenance(
+        godmesh_server::peer_maintenance::spawn(
             pool.clone(),
             Arc::clone(node),
             peers_refresh,
@@ -912,12 +911,11 @@ async fn run(config: Config) -> Result<(), String> {
     })
     .await;
     let served = runtime::finish_after_http(result, &shutdown_tx, &pool, async move {
+        if let Some(task) = peer_task {
+            let _ = task.await;
+        }
         if let Some(node) = runtime_federation {
             node.shutdown();
-        }
-        if let Some(task) = peer_task {
-            task.abort();
-            let _ = task.await;
         }
         if let Some(publisher) = publisher {
             let _ = publisher.await;
@@ -943,45 +941,6 @@ async fn run(config: Config) -> Result<(), String> {
     );
     println!("godmesh-server: encerrado");
     Ok(())
-}
-
-/// Recarrega a allowlist e mantém os enlaces de saída com os pares autorizados.
-///
-/// Duas responsabilidades, nesta ordem a cada ciclo:
-///
-/// 1. **Allowlist**: recarrega `federation_peer`. Aprovar/revogar pela API passa
-///    a valer sem reiniciar o processo. Falha de leitura **não** limpa o
-///    registro: erro de banco não pode virar "nenhum par" nem "todos os pares" —
-///    mantém-se o último snapshot conhecido e o erro vai para stderr.
-/// 2. **Enlace**: disca para cada par `authorized` que ainda não está `ready`,
-///    usando os `endpoints` que ele declarou no manifesto (formato `quic://IP:porta`).
-///    Sem esta etapa o nó só escutaria: a malha nunca fecharia handshake.
-///    Falha de discagem não promove nada — o estado só vira `ready` por
-///    handshake verificado (ADR-072 §2, invariante 6).
-fn spawn_peers_maintenance(
-    pool: sqlx::PgPool,
-    node: Arc<FederationNode>,
-    interval: Duration,
-    mut parar: tokio::sync::watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {}
-                _ = parar.changed() => return,
-            }
-            match federation::list_peers(&pool).await {
-                Ok(peers) => node.registry().replace(peers),
-                Err(e) => eprintln!(
-                    "godmesh-server: recarga da allowlist de pares falhou; mantendo o último \
-                     snapshot conhecido: {e:?}"
-                ),
-            }
-            dial_pending_peers(&node).await;
-        }
-    })
 }
 
 /// Coleta o host no intervalo configurado e publica o snapshot.
@@ -1052,60 +1011,12 @@ async fn publicar(collector: &Collector, published: &SharedSnapshot) {
     }
 }
 
-/// Disca para os pares autorizados que não têm enlace `ready`.
-///
-/// `ready` observado é o único motivo para não discar de novo: `unknown` e
-/// `rejected` voltam a ser tentados no próximo ciclo, porque a decisão pode ter
-/// mudado (aprovação nova) — e a tentativa é barata.
-async fn dial_pending_peers(node: &FederationNode) {
-    for peer in node.registry().peers() {
-        if !peer.is_authorized() || peer.node_id == node.identity().node_id() {
-            continue;
-        }
-        if node
-            .links()
-            .snapshot(&peer.node_id)
-            .is_some_and(|snapshot| snapshot.state == LinkState::Ready)
-        {
-            continue;
-        }
-        for endpoint in &peer.endpoints {
-            let Some(addr) = parse_quic_endpoint(endpoint) else {
-                eprintln!(
-                    "godmesh-server: endpoint de {} ignorado (esperado quic://IP:porta): {endpoint}",
-                    peer.node_id
-                );
-                continue;
-            };
-            match node.dial(addr).await {
-                Ok(_) => break,
-                Err(e) => eprintln!(
-                    "godmesh-server: enlace com {} por {endpoint} não subiu: {e}",
-                    peer.node_id
-                ),
-            }
-        }
-    }
-}
-
-/// `quic://IP:porta` do manifesto → endereço de socket.
-///
-/// Esquema diferente é `None` (não se disca para o que não foi declarado como
-/// QUIC), e o chamador registra o motivo — endereço não é permissão (ADR-072 §2,
-/// invariante 8), então nada aqui autoriza nada.
-fn parse_quic_endpoint(endpoint: &str) -> Option<SocketAddr> {
-    endpoint
-        .trim()
-        .strip_prefix("quic://")
-        .and_then(|addr| addr.parse::<SocketAddr>().ok())
-}
-
 // Módulo de testes no fim do arquivo: `clippy::items-after-test-module`
 // (negado por `-D clippy::all`) exige que nenhum item venha depois dele.
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, DEFAULT_BIND_ADDR, federation_runtime_from, parse_quic_endpoint, resolve_bind_addr,
+        Args, DEFAULT_BIND_ADDR, federation_runtime_from, resolve_bind_addr,
     };
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
@@ -1213,20 +1124,6 @@ mod tests {
         assert_eq!(listener.config.region, "br-sul");
         assert_eq!(listener.bind.port(), 0);
         let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
-    }
-
-    #[test]
-    fn endpoint_do_manifesto_so_vira_socket_em_quic() {
-        let esperado: std::net::SocketAddr = "127.0.0.1:7443".parse().expect("endereço");
-        assert_eq!(
-            parse_quic_endpoint("quic://127.0.0.1:7443"),
-            Some(esperado)
-        );
-        assert_eq!(parse_quic_endpoint("  quic://127.0.0.1:7443  "), Some(esperado));
-        // Esquema diferente ou endereço ilegível não são "quase certos".
-        assert_eq!(parse_quic_endpoint("https://127.0.0.1:7443"), None);
-        assert_eq!(parse_quic_endpoint("127.0.0.1:7443"), None);
-        assert_eq!(parse_quic_endpoint("quic://sem-porta"), None);
     }
 
     #[test]

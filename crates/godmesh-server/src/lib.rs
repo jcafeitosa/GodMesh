@@ -23,6 +23,7 @@ pub mod lifecycle;
 pub mod metrics;
 pub mod observability;
 pub mod migrate;
+pub mod peer_maintenance;
 pub mod portable_join;
 pub mod publisher;
 pub mod replica_operational;
