@@ -251,7 +251,14 @@ impl PeerRecord {
 /// fecha com código explícito de revogação; o par aprende por quê).
 #[derive(Debug, Default)]
 pub struct PeerRegistry {
-    inner: RwLock<HashMap<String, PeerRecord>>,
+    inner: RwLock<RegistryState>,
+}
+
+#[derive(Debug, Default)]
+struct RegistryState {
+    records: HashMap<String, PeerRecord>,
+    // Evidência operacional persiste entre recargas e não cadastra pares.
+    operational_seen: HashMap<String, i64>,
 }
 
 impl PeerRegistry {
@@ -261,37 +268,28 @@ impl PeerRegistry {
         Self::default()
     }
 
-    /// Insere/substitui um par. Preserva `last_seen_at` quando o registro novo
-    /// não traz evidência própria (0), porque evidência de vida não se perde por
-    /// recarga de configuração.
-    pub fn insert(&self, record: PeerRecord) {
+    /// Insere/substitui um par. Preserva evidência operacional e, no modo
+    /// legado, conserva `last_seen_at` quando o registro novo traz zero.
+    pub fn insert(&self, mut record: PeerRecord) {
         let mut guard = self.write();
-        let last_seen_at = match guard.get(&record.node_id) {
-            Some(existing) if record.last_seen_at == 0 => existing.last_seen_at,
-            _ => record.last_seen_at,
-        };
-        let mut record = record;
-        record.last_seen_at = last_seen_at;
-        guard.insert(record.node_id.clone(), record);
+        guard.merge_observation(&mut record);
+        guard.records.insert(record.node_id.clone(), record);
     }
 
     /// Substitui o conjunto inteiro pelo snapshot da autoridade persistida.
     ///
-    /// Par que deixou de estar autorizado no banco **sai** do registro: a
-    /// allowlist é o snapshot, não a união dele com o passado. `last_seen_at`
-    /// observado é preservado por `node_id`.
+    /// A allowlist é o snapshot completo. A evidência operacional é preservada
+    /// por identidade e sua presença não mantém a chave na allowlist.
     pub fn replace(&self, records: impl IntoIterator<Item = PeerRecord>) {
-        let mut replacement = HashMap::new();
-        for record in records {
-            let mut record = record;
-            if let Some(previous) = self.read().get(&record.node_id)
-                && record.last_seen_at == 0
-            {
-                record.last_seen_at = previous.last_seen_at;
-            }
-            replacement.insert(record.node_id.clone(), record);
+        let mut replacement: HashMap<_, _> = records
+            .into_iter()
+            .map(|record| (record.node_id.clone(), record))
+            .collect();
+        let mut guard = self.write();
+        for record in replacement.values_mut() {
+            guard.merge_observation(record);
         }
-        *self.write() = replacement;
+        guard.records = replacement;
     }
 
     /// Muda o estado de confiança pela máquina de estados canônica.
@@ -301,7 +299,7 @@ impl PeerRegistry {
     /// ignorado: não existe "revogação atrasada" rebaixando estado.
     pub fn set_trust_state(&self, node_id: &str, next: TrustState, epoch: Option<u64>) -> bool {
         let mut guard = self.write();
-        let Some(record) = guard.get_mut(node_id) else {
+        let Some(record) = guard.records.get_mut(node_id) else {
             return false;
         };
         if let Some(epoch) = epoch {
@@ -329,13 +327,13 @@ impl PeerRegistry {
     /// Registro do par, copiado (nunca um empréstimo através de `await`).
     #[must_use]
     pub fn record(&self, node_id: &str) -> Option<PeerRecord> {
-        self.read().get(node_id).cloned()
+        self.read().records.get(node_id).cloned()
     }
 
     /// Todos os pares conhecidos, ordenados por `node_id`.
     #[must_use]
     pub fn peers(&self) -> Vec<PeerRecord> {
-        let mut peers: Vec<_> = self.read().values().cloned().collect();
+        let mut peers: Vec<_> = self.read().records.values().cloned().collect();
         peers.sort_by(|a, b| a.node_id.cmp(&b.node_id));
         peers
     }
@@ -343,13 +341,13 @@ impl PeerRegistry {
     /// Quantidade de pares conhecidos.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.read().len()
+        self.read().records.len()
     }
 
     /// Se o registro está vazio.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.read().is_empty()
+        self.read().records.is_empty()
     }
 
     /// A chave está registrada? Decidido pela **chave**, nunca pelo nome do
@@ -358,31 +356,67 @@ impl PeerRegistry {
     pub fn knows_key(&self, public_key: &[u8; PUBLIC_KEY_LEN]) -> bool {
         let wanted = hex::encode(public_key);
         self.read()
+            .records
             .values()
             .any(|record| record.public_key == wanted)
     }
 
     /// Registra evidência de vida do par. Não muda `trust_state`: heartbeat não
-    /// autoriza, só informa (ADR-072 §2, invariante 6).
+    /// autoriza, só informa (ADR-072 §2, invariante 6). Pares com observação
+    /// operacional recebem atualizações somente do caminho autorizado.
     pub fn touch(&self, node_id: &str, seen_at: i64) {
         let mut guard = self.write();
-        if let Some(record) = guard.get_mut(node_id) {
+        if !guard.operational_seen.contains_key(node_id)
+            && let Some(record) = guard.records.get_mut(node_id)
+        {
             record.last_seen_at = seen_at;
         }
     }
 
+    pub(crate) fn touch_operational(&self, node_id: &str, seen_at: i64) {
+        self.write().observe_operational(node_id, seen_at);
+    }
+
     /// Leitura com lock envenenado tratado como registro vazio (falha fechada:
     /// sem registro, nenhuma chave é aceita).
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, PeerRecord>> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, RegistryState> {
         self.inner
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, PeerRecord>> {
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, RegistryState> {
         self.inner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl RegistryState {
+    fn merge_observation(&mut self, record: &mut PeerRecord) {
+        if let Some(highest) = self.operational_seen.get_mut(&record.node_id) {
+            *highest = (*highest).max(record.last_seen_at);
+            record.last_seen_at = *highest;
+        } else if record.last_seen_at == 0
+            && let Some(previous) = self.records.get(&record.node_id)
+        {
+            record.last_seen_at = previous.last_seen_at;
+        }
+    }
+
+    fn observe_operational(&mut self, node_id: &str, seen_at: i64) {
+        let existing = self.records.get_mut(node_id);
+        let seen_at = existing
+            .as_ref()
+            .map_or(seen_at, |record| seen_at.max(record.last_seen_at));
+        let highest = self
+            .operational_seen
+            .entry(node_id.to_owned())
+            .or_insert(seen_at);
+        *highest = (*highest).max(seen_at);
+        if let Some(record) = existing {
+            record.last_seen_at = *highest;
+        }
     }
 }
 
@@ -390,6 +424,45 @@ impl PeerRegistry {
 mod tests {
     use super::*;
     use crate::identity::NodeIdentity;
+
+    #[test]
+    fn observacao_operacional_nao_regride_com_touch_ou_recarga() {
+        let registry = PeerRegistry::new();
+        let mut record = PeerRecord::authorized_from_key(&[5; 32], "cluster-br-sul");
+        let node_id = record.node_id.clone();
+        registry.insert(record.clone());
+
+        registry.touch_operational(&node_id, 42);
+        registry.touch_operational(&node_id, 30);
+        assert_eq!(registry.record(&node_id).unwrap().last_seen_at, 42);
+
+        record.last_seen_at = 12;
+        registry.insert(record.clone());
+        assert_eq!(registry.record(&node_id).unwrap().last_seen_at, 42);
+
+        let mut newer = record.clone();
+        newer.last_seen_at = 53;
+        registry.replace([newer]);
+        registry.touch(&node_id, 29);
+        registry.touch(&node_id, 90);
+        assert_eq!(registry.record(&node_id).unwrap().last_seen_at, 53);
+        registry.replace([record.clone()]);
+        assert_eq!(registry.record(&node_id).unwrap().last_seen_at, 53);
+
+        registry.replace([]);
+        assert!(registry.record(&node_id).is_none());
+        assert!(!registry.knows_key(&[5; 32]));
+        registry.touch(&node_id, 90);
+        registry.replace([record.clone()]);
+        assert_eq!(registry.record(&node_id).unwrap().last_seen_at, 53);
+
+        registry.replace(std::iter::once(record).chain(std::iter::from_fn(|| {
+            // A recarga já leu o registro antigo quando recebe esta observação.
+            registry.touch_operational(&node_id, 64);
+            None
+        })));
+        assert_eq!(registry.record(&node_id).unwrap().last_seen_at, 64);
+    }
 
     fn manifest() -> SignedManifest {
         let identity = NodeIdentity::generate_in_memory().expect("identidade");
@@ -600,7 +673,10 @@ mod tests {
         // O banco agora só autoriza a primeira chave.
         registry.replace([PeerRecord::authorized_from_key(&key(4), "br-south")]);
         assert_eq!(registry.len(), 1);
-        assert!(registry.record(&dropped).is_none(), "par removido sai do registro");
+        assert!(
+            registry.record(&dropped).is_none(),
+            "par removido sai do registro"
+        );
         assert_eq!(
             registry.record(&kept).expect("par").last_seen_at,
             99,

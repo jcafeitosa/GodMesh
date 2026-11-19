@@ -551,13 +551,13 @@ async fn establish_operational(
                     .map_err(|error| error.rejection)?;
                 let _permit = link.authorize().await?;
                 let seen_at = now_unix();
-                let snapshot = ready_snapshot(connection, accepted, seen_at);
+                let mut snapshot = ready_snapshot(connection, accepted, seen_at);
                 if !shared.links.mark_operational_ready(
-                    &link.remote.node_id, snapshot.clone(), link.validity.clone(),
+                    &link.remote.node_id, &mut snapshot, link.validity.clone(),
                 ) {
                     return Err(Rejection::NotAuthorized);
                 }
-                shared.registry.touch(&link.remote.node_id, seen_at);
+                shared.registry.touch_operational(&link.remote.node_id, seen_at);
                 Ok(snapshot)
             } => result?,
         };
@@ -710,7 +710,7 @@ async fn receive_heartbeats(
             if !shared.links.beat_operational(node_id, connection, seen_at) {
                 return Ok(());
             }
-            shared.registry.touch(node_id, seen_at);
+            shared.registry.touch_operational(node_id, seen_at);
             continue;
         }
         let seen_at = now_unix();

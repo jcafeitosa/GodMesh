@@ -121,11 +121,23 @@ impl Entry {
     }
 }
 
+#[derive(Debug, Default)]
+struct PeerEntries {
+    connections: Vec<Entry>,
+    operational_last_seen_at: Option<i64>,
+}
+
+impl PeerEntries {
+    fn observe(&mut self, observation: Option<i64>) {
+        self.operational_last_seen_at = self.operational_last_seen_at.max(observation);
+    }
+}
+
 /// Registro de enlaces observados, compartilhado entre os nós QUIC e o serviço
 /// de diagnóstico.
 #[derive(Debug)]
 pub struct PeerLinks {
-    inner: Mutex<HashMap<String, Vec<Entry>>>,
+    inner: Mutex<HashMap<String, PeerEntries>>,
     freshness: Duration,
 }
 
@@ -152,24 +164,21 @@ impl PeerLinks {
         now: Instant,
     ) {
         let mut guard = self.lock();
-        guard.insert(
-            node_id.to_owned(),
-            vec![Entry {
-                state: LinkState::Ready,
-                last_seen_at: Some(last_seen_at),
-                rtt_ms,
-                alpn: Some(alpn),
-                peer_version: Some(peer_version),
-                last_beat: now,
-                validity: None,
-            }],
-        );
+        guard.entry(node_id.to_owned()).or_default().connections = vec![Entry {
+            state: LinkState::Ready,
+            last_seen_at: Some(last_seen_at),
+            rtt_ms,
+            alpn: Some(alpn),
+            peer_version: Some(peer_version),
+            last_beat: now,
+            validity: None,
+        }];
     }
 
     pub(crate) fn mark_operational_ready(
         &self,
         node_id: &str,
-        snapshot: LinkSnapshot,
+        snapshot: &mut LinkSnapshot,
         validity: LinkValidity,
     ) -> bool {
         let mut guard = self.lock();
@@ -178,14 +187,17 @@ impl PeerLinks {
             return false;
         }
         let entries = guard.entry(node_id.to_owned()).or_default();
+        entries.observe(snapshot.last_seen_at);
+        snapshot.last_seen_at = entries.operational_last_seen_at;
+        let entries = &mut entries.connections;
         // Conserve enlaces paralelos e descarte apenas o histórico sem conexão.
         entries.retain(|entry| entry.validity.is_some());
         entries.push(Entry {
             state: snapshot.state,
-            last_seen_at: snapshot.last_seen_at,
+            last_seen_at: None,
             rtt_ms: snapshot.rtt_ms,
-            alpn: snapshot.negotiated_alpn,
-            peer_version: snapshot.peer_version,
+            alpn: snapshot.negotiated_alpn.clone(),
+            peer_version: snapshot.peer_version.clone(),
             last_beat: now,
             validity: Some(validity),
         });
@@ -197,6 +209,7 @@ impl PeerLinks {
         let now = Instant::now();
         guard.get(node_id).is_some_and(|entries| {
             entries
+                .connections
                 .iter()
                 .any(|entry| entry.belongs_to(connection) && entry.is_ready(now, self.freshness))
         })
@@ -210,21 +223,26 @@ impl PeerLinks {
     ) -> bool {
         let mut guard = self.lock();
         let now = Instant::now();
-        if let Some(entry) = guard.get_mut(node_id).and_then(|entries| {
-            entries
-                .iter_mut()
-                .find(|entry| entry.belongs_to(connection) && entry.is_ready(now, self.freshness))
-        }) {
-            entry.last_seen_at = Some(seen_at);
-            entry.last_beat = now;
-            return true;
-        }
-        false
+        let Some(entries) = guard.get_mut(node_id) else {
+            return false;
+        };
+        let Some(entry) = entries
+            .connections
+            .iter_mut()
+            .find(|entry| entry.belongs_to(connection) && entry.is_ready(now, self.freshness))
+        else {
+            return false;
+        };
+        entry.last_beat = now;
+        entries.observe(Some(seen_at));
+        true
     }
 
     pub(crate) fn close_operational(&self, node_id: &str, connection: &Connection) {
         let mut guard = self.lock();
-        if let Some(entries) = guard.get_mut(node_id)
+        if let Some(entries) = guard
+            .get_mut(node_id)
+            .map(|entries| &mut entries.connections)
             && let Some(index) = entries
                 .iter()
                 .position(|entry| entry.belongs_to(connection))
@@ -247,7 +265,7 @@ impl PeerLinks {
         let mut guard = self.lock();
         if let Some(entry) = guard
             .get_mut(node_id)
-            .and_then(|entries| entries.last_mut())
+            .and_then(|entries| entries.connections.last_mut())
         {
             entry.last_seen_at = Some(seen_at);
             entry.last_beat = now;
@@ -261,7 +279,7 @@ impl PeerLinks {
         let mut guard = self.lock();
         if let Some(entry) = guard
             .get_mut(node_id)
-            .and_then(|entries| entries.last_mut())
+            .and_then(|entries| entries.connections.last_mut())
         {
             entry.state = LinkState::Unknown;
             entry.rtt_ms = None;
@@ -276,13 +294,16 @@ impl PeerLinks {
     pub(crate) fn record_rejection(&self, node_id: &str, operational: bool) {
         let mut guard = self.lock();
         if operational
-            && guard
-                .get(node_id)
-                .is_some_and(|entries| entries.iter().any(|entry| entry.validity.is_some()))
+            && guard.get(node_id).is_some_and(|entries| {
+                entries
+                    .connections
+                    .iter()
+                    .any(|entry| entry.validity.is_some())
+            })
         {
             return;
         }
-        let entries = guard.entry(node_id.to_owned()).or_default();
+        let entries = &mut guard.entry(node_id.to_owned()).or_default().connections;
         if let Some(entry) = entries.last_mut() {
             entry.state = LinkState::Rejected;
             entry.rtt_ms = None;
@@ -306,6 +327,7 @@ impl PeerLinks {
         let mut expired = Vec::new();
         let mut guard = self.lock();
         for (node_id, entries) in guard.iter_mut() {
+            let entries = &mut entries.connections;
             let mut changed = false;
             for entry in entries.iter_mut() {
                 if entry.state == LinkState::Ready
@@ -339,10 +361,11 @@ impl PeerLinks {
         let entries = guard.get(node_id)?;
         let now = Instant::now();
         let entry = entries
+            .connections
             .iter()
             .rev()
             .find(|entry| entry.is_ready(now, self.freshness))
-            .or_else(|| entries.last())?;
+            .or_else(|| entries.connections.last())?;
         let invalid = !entry.is_current(now)
             || (entry.state == LinkState::Ready && !entry.is_ready(now, self.freshness));
         Some(LinkSnapshot {
@@ -351,7 +374,7 @@ impl PeerLinks {
             } else {
                 entry.state
             },
-            last_seen_at: entry.last_seen_at,
+            last_seen_at: entries.operational_last_seen_at.or(entry.last_seen_at),
             rtt_ms: if invalid { None } else { entry.rtt_ms },
             negotiated_alpn: entry.alpn.clone(),
             peer_version: entry.peer_version.clone(),
@@ -366,7 +389,7 @@ impl PeerLinks {
             .unwrap_or_else(LinkSnapshot::never_seen)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<Entry>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, PeerEntries>> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -380,6 +403,66 @@ mod tests {
 
     fn id(byte: u8) -> String {
         node_id_for(&[byte; 32])
+    }
+
+    #[tokio::test]
+    async fn observacao_operacional_fica_no_par_apesar_do_timestamp_do_enlace() {
+        use crate::identity::NodeIdentity;
+        use crate::peer::{PeerRecord, PeerRegistry};
+        use crate::transport;
+        use std::sync::Arc;
+
+        let identity = NodeIdentity::generate_in_memory().unwrap();
+        let tls = transport::NodeTls::self_issued(&identity).unwrap();
+        let registry = Arc::new(PeerRegistry::new());
+        registry.insert(PeerRecord::authorized_from_key(
+            &identity.public_key_bytes(),
+            "cluster",
+        ));
+        let addr = ([127, 0, 0, 1], 0).into();
+        let server = transport::bind_server(
+            addr,
+            transport::server_config(registry.clone(), &tls).unwrap(),
+        )
+        .unwrap();
+        let client = transport::bind_client(addr).unwrap();
+        let connect = || async {
+            let outgoing = client
+                .connect_with(
+                    transport::client_config(registry.clone(), &tls).unwrap(),
+                    server.local_addr().unwrap(),
+                    transport::CONNECT_SERVER_NAME,
+                )
+                .unwrap();
+            let (local, remote) = tokio::join!(outgoing, async {
+                server.accept().await.unwrap().await.unwrap()
+            });
+            (local.unwrap(), remote)
+        };
+        let (first, _remote) = connect().await;
+        let (second, _other_remote) = connect().await;
+        let (trust, _) = watch::channel(0);
+        let (deadline, _) = watch::channel(None);
+        let validity = |connection: &Connection| LinkValidity {
+            connection: connection.clone(),
+            trust: trust.subscribe(),
+            deadline: deadline.subscribe(),
+        };
+        let links = PeerLinks::new(Duration::from_secs(2));
+        let node_id = identity.node_id();
+        let mut snapshot = LinkSnapshot {
+            state: LinkState::Ready,
+            last_seen_at: Some(42),
+            ..LinkSnapshot::never_seen()
+        };
+        assert!(links.mark_operational_ready(node_id, &mut snapshot, validity(&first)));
+        assert!(links.beat_operational(node_id, &first, 30));
+        assert_eq!(links.snapshot(node_id).unwrap().last_seen_at, Some(42));
+        links.close_operational(node_id, &first);
+        snapshot.last_seen_at = Some(32);
+        assert!(links.mark_operational_ready(node_id, &mut snapshot, validity(&second)));
+        assert_eq!(snapshot.last_seen_at, Some(42));
+        assert!(links.operational_is_ready(node_id, &second));
     }
 
     #[test]

@@ -728,6 +728,18 @@ async fn fechamento_de_uma_conexao_preserva_outro_enlace_do_mesmo_par() {
     handshake::initiate(&first, &peer.identity, &peer.config, &peer.registry)
         .await
         .unwrap();
+    let links = managed.links();
+    let first_seen = wait_for_state(&links, &peer.id, LinkState::Ready)
+        .await
+        .last_seen_at
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while now_unix() <= first_seen {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("segundo handshake em outro segundo");
     let second = peer.connect(managed.addr()).await;
     let mut second_config = peer.config.clone();
     second_config.software_version = "0.2.0".into();
@@ -742,13 +754,15 @@ async fn fechamento_de_uma_conexao_preserva_outro_enlace_do_mesmo_par() {
             .unwrap();
         heartbeat.read_to_end(12).await.unwrap();
     }
+    let newest = links.snapshot_or_never_seen(&peer.id).last_seen_at.unwrap();
+    assert!(newest > first_seen);
     second.close(0u32.into(), b"fim do segundo enlace");
-    let links = managed.links();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let snapshot = links.snapshot_or_never_seen(&peer.id);
             if snapshot.peer_version.as_deref() == Some(VERSION) {
                 assert_eq!(snapshot.state, LinkState::Ready);
+                assert_eq!(snapshot.last_seen_at, Some(newest));
                 break;
             }
             sleep(Duration::from_millis(10)).await;
@@ -757,7 +771,12 @@ async fn fechamento_de_uma_conexao_preserva_outro_enlace_do_mesmo_par() {
     .await
     .expect("o primeiro enlace deve voltar a representar o par");
     first.close(0u32.into(), b"fim do primeiro enlace");
-    wait_for_state(&managed.links(), &peer.id, LinkState::Unknown).await;
+    let closed = wait_for_state(&links, &peer.id, LinkState::Unknown).await;
+    assert_eq!(closed.last_seen_at, Some(newest));
+    assert_eq!(
+        managed.registry.record(&peer.id).unwrap().last_seen_at,
+        newest
+    );
     managed.node.shutdown();
 }
 
@@ -848,7 +867,7 @@ async fn silencio_fecha_apenas_o_enlace_operacional_afetado() {
 
 #[tokio::test]
 async fn heartbeat_atrasado_entre_varreduras_nao_renova_evidencia() {
-    let interval = Duration::from_secs(2);
+    let interval = Duration::from_secs(3);
     let managed = node_with_authorizer(
         config().with_heartbeat(interval, 1),
         Some(TestAuthorizer::new(Ok(None))),
@@ -866,12 +885,14 @@ async fn heartbeat_atrasado_entre_varreduras_nao_renova_evidencia() {
         .unwrap();
     initial.read_to_end(12).await.unwrap();
 
-    // Desloque o último heartbeat em relação ao monitor e ao emissor local.
-    sleep(Duration::from_millis(400)).await;
-    managed.registry.touch(&peer.id, 1);
+    // Use outro segundo Unix para confirmar a aplicação do heartbeat e
+    // desloque seu prazo em relação ao monitor e ao emissor local.
+    let before = managed.registry.record(&peer.id).unwrap().last_seen_at;
+    sleep(Duration::from_millis(1150)).await;
+    assert!(now_unix() > before);
     send_test_heartbeat(&connection, 1).await;
     tokio::time::timeout(Duration::from_millis(400), async {
-        while managed.registry.record(&peer.id).unwrap().last_seen_at == 1 {
+        while managed.registry.record(&peer.id).unwrap().last_seen_at <= before {
             sleep(Duration::from_millis(5)).await;
         }
     })
@@ -879,6 +900,7 @@ async fn heartbeat_atrasado_entre_varreduras_nao_renova_evidencia() {
     .expect("primeiro heartbeat aceito");
     let links = managed.links();
     let last_seen = links.snapshot_or_never_seen(&peer.id).last_seen_at.unwrap();
+    assert!(last_seen > before);
     assert_eq!(
         managed.registry.record(&peer.id).unwrap().last_seen_at,
         last_seen
