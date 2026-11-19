@@ -18,6 +18,7 @@
 #   migrations/0014_federation_replication.sql
 #   migrations/0015_federation_replica_resume.sql
 #   migrations/0016_federation_snapshot_receipt.sql
+#   migrations/0017_federation_snapshot_intent.sql
 # depois roda todos os `*_invariants.sql` e falha (exit != 0) se algum bloco
 # `NOTICE: OK` esperado não aparecer.
 #
@@ -96,6 +97,8 @@ aplicar "$raiz/migrations/0014_federation_replication.sql"
 aplicar "$raiz/migrations/0015_federation_replica_resume.sql"
 
 aplicar "$raiz/migrations/0016_federation_snapshot_receipt.sql"
+
+aplicar "$raiz/migrations/0017_federation_snapshot_intent.sql"
 
 if [ -n "$sabotagem" ]; then
     [ -f "$sabotagem" ] || { echo "erro: sabotagem inexistente: $sabotagem" >&2; exit 2; }
@@ -241,6 +244,14 @@ verificar "$tests/0016_invariants.sql" \
     "OK 4: versão histórica de comprovante imutável" \
     "OK 5: referência bloqueia exclusão e recriação da versão histórica" \
     "OK 6: comprovante recusa chave de política de outra série"
+
+verificar "$tests/0017_invariants.sql" \
+    "OK 1: 0017 sem seed" \
+    "OK 2: detalhe preserva versão histórica inativa" \
+    "OK 3: detalhe recusa política de outra série" \
+    "OK 4: detalhe vincula token e marcador ativos" \
+    "OK 5: redução mantém o marcador e seu token" \
+    "OK 6: token antigo não vincula detalhe a nova intenção"
 
 rm -f "$saida"
 
