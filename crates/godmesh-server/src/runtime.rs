@@ -5,12 +5,12 @@
 //! por isso o medidor de requisições em voo aqui. A contagem é lida no instante
 //! do sinal, que é exatamente o conjunto que a drenagem precisa terminar.
 //!
-//! Ordem: sinal → para de aceitar → requisições em voo terminam → `pool.close()`
-//! (nenhuma conexão nova, conexões devolvidas fecham) → processo sai com 0.
+//! O binário aguarda o HTTP e os serviços auxiliares antes de fechar o pool.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -118,7 +118,13 @@ where
     Ok(ServeReport { drained })
 }
 
-/// Cancela e aguarda serviços que compartilham o pool antes de fechá-lo.
+const POOL_CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// Cancela e aguarda os serviços auxiliares antes de fechar o pool.
+///
+/// Uma consulta cancelada no cliente pode continuar bloqueada no PostgreSQL.
+/// Se a devolução da conexão ainda estiver esperando pelo banco, o prazo
+/// permite concluir a saída do processo e derrubar os sockets restantes.
 pub async fn finish_after_http(
     http: Result<ServeReport, String>,
     shutdown: &tokio::sync::watch::Sender<bool>,
@@ -127,7 +133,12 @@ pub async fn finish_after_http(
 ) -> Result<ServeReport, String> {
     let _ = shutdown.send(true);
     let auxiliary = cleanup.await;
-    pool.close().await;
+    if tokio::time::timeout(POOL_CLOSE_GRACE, pool.close())
+        .await
+        .is_err()
+    {
+        eprintln!("godmesh-server: prazo esgotado ao aguardar o fechamento do pool PostgreSQL");
+    }
     http.and_then(|report| auxiliary.map(|()| report))
 }
 
@@ -165,6 +176,7 @@ pub async fn shutdown_signal() {
 mod tests {
     use super::InFlight;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     #[test]
     fn medidor_comeca_zerado() {
@@ -223,5 +235,76 @@ mod tests {
             assert_eq!(ended.is_err(), failing);
             assert!(pool.is_closed());
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_termina_com_consulta_cancelada_ainda_bloqueada_no_postgres() {
+        let Ok(url) = std::env::var("GODMESH_TEST_DATABASE_URL") else {
+            return;
+        };
+        let observer = sqlx::PgPool::connect(&url).await.unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let mut blocker = observer.begin().await.unwrap();
+        let lock: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(113, $1)")
+            .bind(lock)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+
+        let (shutdown, mut stopped) = tokio::sync::watch::channel(false);
+        let reader = tokio::spawn(async move {
+            tokio::select! {
+                _ = stopped.changed() => {}
+                result = sqlx::query("SELECT pg_advisory_xact_lock(113, $1)")
+                    .bind(lock)
+                    .execute(&mut *tx) => panic!("consulta terminou antes do cancelamento: {result:?}"),
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                    .bind(lock)
+                    .bind(pid)
+                    .fetch_one(&observer)
+                    .await
+                    .unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("consulta aguardando o lock externo");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            super::finish_after_http(
+                Ok(super::ServeReport { drained: 0 }),
+                &shutdown,
+                &pool,
+                async {
+                    reader.await.unwrap();
+                    Ok(())
+                },
+            ),
+        )
+        .await;
+        blocker.rollback().await.unwrap();
+        pool.close().await;
+        assert!(
+            result
+                .expect("shutdown antes de liberar o lock externo")
+                .is_ok()
+        );
     }
 }
