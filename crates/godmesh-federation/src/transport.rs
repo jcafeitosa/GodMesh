@@ -41,6 +41,8 @@ use crate::peer::PeerRegistry;
 pub const ALPN_V1: &[u8] = b"godmesh/1";
 /// O mesmo ALPN em texto, para comparação com o manifesto assinado.
 pub const ALPN_V1_TEXT: &str = "godmesh/1";
+/// ALPN do listener HTTPS dedicado para configuração.
+pub const ALPN_HTTP1: &[u8] = b"http/1.1";
 
 /// Nome de servidor apresentado pelo cliente.
 ///
@@ -139,14 +141,7 @@ pub fn server_config(
     registry: Arc<PeerRegistry>,
     tls: &NodeTls,
 ) -> Result<ServerConfig, TransportError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = Arc::new(KeyAllowlist::new(registry, &provider));
-    let mut config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| TransportError::Tls(e.to_string()))?
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(tls.certs.clone(), tls.key.clone_key())
-        .map_err(|e| TransportError::Tls(e.to_string()))?;
+    let mut config = rustls_server(tls, AcceptedKeys::Registry(registry))?;
     config.alpn_protocols = vec![ALPN_V1.to_vec()];
     let quic =
         QuicServerConfig::try_from(config).map_err(|e| TransportError::Quic(e.to_string()))?;
@@ -155,28 +150,80 @@ pub fn server_config(
     Ok(server_config)
 }
 
-/// Configuração QUIC de **cliente**: apresenta certificado de cliente e valida o
-/// certificado do servidor pela mesma allowlist de chaves.
+/// Configuração QUIC de cliente com a allowlist dinâmica do registro.
 ///
 /// # Errors
-/// Erro de `rustls`/`quinn` se a configuração for inconsistente.
+/// Erro de `rustls` ou `quinn` quando a configuração é inconsistente.
 pub fn client_config(
     registry: Arc<PeerRegistry>,
     tls: &NodeTls,
 ) -> Result<quinn::ClientConfig, TransportError> {
+    let mut config = rustls_client(tls, AcceptedKeys::Registry(registry))?;
+    config.alpn_protocols = vec![ALPN_V1.to_vec()];
+    let quic =
+        QuicClientConfig::try_from(config).map_err(|e| TransportError::Quic(e.to_string()))?;
+    Ok(quinn::ClientConfig::new(Arc::new(quic)))
+}
+
+/// Configuração mTLS HTTP/1.1 de servidor com pins fixos de clientes.
+/// Usa TLS 1.3 sem retomada nem dados antecipados.
+///
+/// # Errors
+/// Erro de `rustls` quando a configuração é inconsistente.
+pub fn http1_server_tls(
+    tls: &NodeTls,
+    client_pins: Vec<[u8; PUBLIC_KEY_LEN]>,
+) -> Result<rustls::ServerConfig, TransportError> {
+    let mut config = rustls_server(tls, AcceptedKeys::Pins(client_pins))?;
+    config.alpn_protocols = vec![ALPN_HTTP1.to_vec()];
+    config.max_early_data_size = 0;
+    config.send_tls13_tickets = 0;
+    config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    Ok(config)
+}
+
+/// Configuração mTLS HTTP/1.1 de cliente com um único pin do servidor.
+///
+/// # Errors
+/// Erro de `rustls` quando a configuração é inconsistente.
+pub fn http1_client_tls(
+    tls: &NodeTls,
+    server_pin: [u8; PUBLIC_KEY_LEN],
+) -> Result<rustls::ClientConfig, TransportError> {
+    let mut config = rustls_client(tls, AcceptedKeys::Pins(vec![server_pin]))?;
+    config.alpn_protocols = vec![ALPN_HTTP1.to_vec()];
+    config.resumption = rustls::client::Resumption::disabled();
+    config.enable_early_data = false;
+    Ok(config)
+}
+
+fn rustls_server(
+    tls: &NodeTls,
+    keys: AcceptedKeys,
+) -> Result<rustls::ServerConfig, TransportError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = Arc::new(KeyAllowlist::new(registry, &provider));
-    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+    let verifier = Arc::new(KeyAllowlist::new(keys, &provider));
+    rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| TransportError::Tls(e.to_string()))?
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(tls.certs.clone(), tls.key.clone_key())
+        .map_err(|e| TransportError::Tls(e.to_string()))
+}
+
+fn rustls_client(
+    tls: &NodeTls,
+    keys: AcceptedKeys,
+) -> Result<rustls::ClientConfig, TransportError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = Arc::new(KeyAllowlist::new(keys, &provider));
+    rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| TransportError::Tls(e.to_string()))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_client_auth_cert(tls.certs.clone(), tls.key.clone_key())
-        .map_err(|e| TransportError::Tls(e.to_string()))?;
-    config.alpn_protocols = vec![ALPN_V1.to_vec()];
-    let quic =
-        QuicClientConfig::try_from(config).map_err(|e| TransportError::Quic(e.to_string()))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic)))
+        .map_err(|e| TransportError::Tls(e.to_string()))
 }
 
 /// Transporte: keep-alive do QUIC ligado (o heartbeat é da aplicação; isto evita
@@ -185,8 +232,7 @@ fn transport_config() -> quinn::TransportConfig {
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
     transport.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(15))
-            .unwrap_or_default(),
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(15)).unwrap_or_default(),
     ));
     transport
 }
@@ -216,7 +262,7 @@ pub fn bind_client(addr: std::net::SocketAddr) -> std::io::Result<Endpoint> {
 pub fn peer_public_key(connection: &Connection) -> Option<[u8; PUBLIC_KEY_LEN]> {
     let identity = connection.peer_identity()?;
     let certs = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
-    ed25519_public_key(certs.first()?)
+    certificate_public_key(certs.first()?)
 }
 
 /// ALPN efetivamente negociado na conexão.
@@ -248,7 +294,8 @@ pub fn require_alpn(connection: &Connection) -> Result<String, TransportError> {
 ///
 /// Só o `SubjectPublicKeyInfo` importa. Recusa qualquer outra curva/algoritmo em
 /// vez de aceitar "o que der".
-fn ed25519_public_key(cert: &CertificateDer<'_>) -> Option<[u8; PUBLIC_KEY_LEN]> {
+#[must_use]
+pub fn certificate_public_key(cert: &CertificateDer<'_>) -> Option<[u8; PUBLIC_KEY_LEN]> {
     let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref()).ok()?;
     let spki = &parsed.tbs_certificate.subject_pki;
     if spki.algorithm.algorithm.as_bytes() != ED25519_OID {
@@ -263,6 +310,11 @@ fn reject(reason: &'static str) -> Error {
     ))))
 }
 
+enum AcceptedKeys {
+    Registry(Arc<PeerRegistry>),
+    Pins(Vec<[u8; PUBLIC_KEY_LEN]>),
+}
+
 /// Verificador de certificado nos dois sentidos, por **allowlist de chaves**.
 ///
 /// Implementa `ServerCertVerifier` (cliente valida servidor) e
@@ -272,31 +324,33 @@ fn reject(reason: &'static str) -> Error {
 /// propósito, porque o padrão dele é validação por cadeia de CA, que este
 /// desenho não usa.
 struct KeyAllowlist {
-    registry: Arc<PeerRegistry>,
+    keys: AcceptedKeys,
     supported: WebPkiSupportedAlgorithms,
 }
 
 impl fmt::Debug for KeyAllowlist {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KeyAllowlist")
-            .field("peers", &self.registry.peers().len())
-            .finish_non_exhaustive()
+        f.debug_struct("KeyAllowlist").finish_non_exhaustive()
     }
 }
 
 impl KeyAllowlist {
-    fn new(registry: Arc<PeerRegistry>, provider: &rustls::crypto::CryptoProvider) -> Self {
+    fn new(keys: AcceptedKeys, provider: &rustls::crypto::CryptoProvider) -> Self {
         Self {
-            registry,
+            keys,
             supported: provider.signature_verification_algorithms,
         }
     }
 
     /// Regra única dos dois sentidos.
     fn accepts(&self, cert: &CertificateDer<'_>) -> Result<(), Error> {
-        let key = ed25519_public_key(cert)
+        let key = certificate_public_key(cert)
             .ok_or_else(|| reject("certificado de par sem chave Ed25519"))?;
-        if !self.registry.knows_key(&key) {
+        let pinned = match &self.keys {
+            AcceptedKeys::Registry(registry) => registry.knows_key(&key),
+            AcceptedKeys::Pins(pins) => pins.contains(&key),
+        };
+        if !pinned {
             return Err(reject("chave pública do par não registrada"));
         }
         Ok(())
@@ -393,7 +447,7 @@ mod tests {
     fn certificate_key_is_the_identity_key() {
         let identity = NodeIdentity::generate_in_memory().expect("identidade");
         let tls = NodeTls::self_issued(&identity).expect("certificado");
-        let key = ed25519_public_key(&tls.certs[0]).expect("spki legível");
+        let key = certificate_public_key(&tls.certs[0]).expect("spki legível");
         assert_eq!(key, identity.public_key_bytes());
     }
 
@@ -404,7 +458,7 @@ mod tests {
         let provider = rustls::crypto::ring::default_provider();
 
         let empty = Arc::new(PeerRegistry::new());
-        let verifier = KeyAllowlist::new(Arc::clone(&empty), &provider);
+        let verifier = KeyAllowlist::new(AcceptedKeys::Registry(Arc::clone(&empty)), &provider);
         assert!(verifier.accepts(&tls.certs[0]).is_err());
 
         let registry = Arc::new(PeerRegistry::new());
@@ -412,7 +466,7 @@ mod tests {
             &identity.public_key_bytes(),
             "br-south",
         ));
-        let verifier = KeyAllowlist::new(Arc::clone(&registry), &provider);
+        let verifier = KeyAllowlist::new(AcceptedKeys::Registry(Arc::clone(&registry)), &provider);
         assert!(verifier.accepts(&tls.certs[0]).is_ok());
     }
 
@@ -422,7 +476,7 @@ mod tests {
         let garbage = CertificateDer::from(vec![0u8; 64]);
         let registry = Arc::new(PeerRegistry::new());
         let provider = rustls::crypto::ring::default_provider();
-        let verifier = KeyAllowlist::new(registry, &provider);
+        let verifier = KeyAllowlist::new(AcceptedKeys::Registry(registry), &provider);
         assert!(verifier.accepts(&garbage).is_err());
     }
 
@@ -430,7 +484,7 @@ mod tests {
     fn only_ed25519_is_advertised() {
         let registry = Arc::new(PeerRegistry::new());
         let provider = rustls::crypto::ring::default_provider();
-        let verifier = KeyAllowlist::new(registry, &provider);
+        let verifier = KeyAllowlist::new(AcceptedKeys::Registry(registry), &provider);
         assert_eq!(
             <KeyAllowlist as ServerCertVerifier>::supported_verify_schemes(&verifier),
             vec![SignatureScheme::ED25519]

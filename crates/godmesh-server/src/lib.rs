@@ -12,6 +12,7 @@ pub mod admission;
 pub mod api;
 pub mod auth;
 pub mod config_bundle;
+pub mod config_https;
 pub mod events;
 pub mod federation;
 pub mod http;
