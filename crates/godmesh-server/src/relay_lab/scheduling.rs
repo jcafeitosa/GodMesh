@@ -2,10 +2,10 @@ use std::sync::Mutex;
 
 use tokio::sync::{Mutex as Fifo, Notify};
 
-/// Serializa transações de crédito e rechecagem antes de adquirir uma Lease.
+/// Serializa transações de abertura, crédito e rechecagem antes de adquirir uma Lease.
 #[derive(Default)]
 pub(super) struct Scheduler {
-    credits: Fifo<()>,
+    normal: Fifo<()>,
     state: Mutex<State>,
     changed: Notify,
 }
@@ -17,8 +17,8 @@ struct State {
 }
 
 impl Scheduler {
-    pub(super) async fn credit(&self) -> Turn<'_> {
-        let _fifo = self.credits.lock().await;
+    pub(super) async fn normal(&self) -> Turn<'_> {
+        let _fifo = self.normal.lock().await;
         self.enter(false).await
     }
 
@@ -78,9 +78,9 @@ mod tests {
     #[tokio::test]
     async fn credits_enter_fifo_with_only_one_active() {
         let scheduler = Scheduler::default();
-        let current = scheduler.credit().await;
-        let mut first = pin!(scheduler.credit());
-        let mut second = pin!(scheduler.credit());
+        let current = scheduler.normal().await;
+        let mut first = pin!(scheduler.normal());
+        let mut second = pin!(scheduler.normal());
         assert!(poll(first.as_mut()).is_pending());
         assert!(poll(second.as_mut()).is_pending());
 
@@ -97,8 +97,8 @@ mod tests {
     #[tokio::test]
     async fn waiting_recheck_goes_before_queued_credit() {
         let scheduler = Scheduler::default();
-        let current = scheduler.credit().await;
-        let mut credit = pin!(scheduler.credit());
+        let current = scheduler.normal().await;
+        let mut credit = pin!(scheduler.normal());
         let mut recheck = pin!(scheduler.recheck());
         assert!(poll(credit.as_mut()).is_pending());
         assert!(poll(recheck.as_mut()).is_pending());
@@ -116,8 +116,8 @@ mod tests {
     #[tokio::test]
     async fn dropping_pending_recheck_releases_its_priority() {
         let scheduler = Scheduler::default();
-        let current = scheduler.credit().await;
-        let mut credit = pin!(scheduler.credit());
+        let current = scheduler.normal().await;
+        let mut credit = pin!(scheduler.normal());
         let mut recheck = Box::pin(scheduler.recheck());
         assert!(poll(credit.as_mut()).is_pending());
         assert!(poll(recheck.as_mut()).is_pending());

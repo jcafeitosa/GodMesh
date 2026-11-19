@@ -220,14 +220,22 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
         admission.open(&r1.id, &pin(&d2), Instant::now()).await,
         Err(Error::RouteDenied)
     ));
-    let d1_route = admission
-        .open(&r1.id, &pin(&e), Instant::now())
-        .await
-        .unwrap();
-    let d2_route = admission
-        .open(&r2.id, &pin(&e), Instant::now())
-        .await
-        .unwrap();
+    let mut opening_lock = f.pool.begin().await.unwrap();
+    portable.lock_cluster(&mut opening_lock).await.unwrap();
+    let opened_at = Instant::now();
+    let requester = pin(&e);
+    let (d1_route, d2_route, ()) = tokio::join!(
+        admission.open(&r1.id, &requester, opened_at),
+        admission.open(&r2.id, &requester, opened_at),
+        async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            opening_lock.rollback().await.unwrap();
+        }
+    );
+    let d1_route = d1_route.unwrap();
+    let d2_route = d2_route.unwrap();
+    assert_eq!(d1_route.open_deadline(), opened_at + Duration::from_secs(2));
+    assert_eq!(d2_route.open_deadline(), d1_route.open_deadline());
     assert_eq!(
         d1_route.enqueue(Direction::ToDestination, vec![1]),
         Err(Error::RouteUnavailable)
@@ -241,8 +249,16 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
         .open(&r1.id, &pin(&e), Instant::now())
         .await
         .unwrap();
-    d1_route.confirm_token().await.unwrap();
-    d2_route.confirm_token().await.unwrap();
+    let mut token_lock = f.pool.begin().await.unwrap();
+    portable.lock_cluster(&mut token_lock).await.unwrap();
+    let (d1_token, d2_token, ()) =
+        tokio::join!(d1_route.confirm_token(), d2_route.confirm_token(), async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            token_lock.rollback().await.unwrap();
+        });
+    d1_token.unwrap();
+    d2_token.unwrap();
+
     let directions = [Direction::ToDestination, Direction::FromDestination];
     let mut credits = Vec::new();
     for direction in directions {
