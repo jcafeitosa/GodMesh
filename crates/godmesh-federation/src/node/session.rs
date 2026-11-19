@@ -35,6 +35,48 @@ pub struct SessionLimits {
     pub max_streams_per_connection: NonZeroUsize,
 }
 
+/// Limites da fixture com snapshot. O teto A2 permanece em `a2.max_frame_bytes`.
+#[cfg(feature = "snapshot-harness")]
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotSessionLimits {
+    pub a2: SessionLimits,
+    pub max_session_frame_bytes: NonZeroU32,
+    pub max_control_bytes: NonZeroU32,
+    pub max_snapshot_bytes: NonZeroU32,
+}
+
+#[cfg(feature = "snapshot-harness")]
+impl SnapshotSessionLimits {
+    fn control_cap(self) -> u32 {
+        self.max_control_bytes
+            .min(self.max_session_frame_bytes)
+            .get()
+    }
+
+    fn body_cap(self, negotiated_max: NonZeroU32) -> u32 {
+        self.max_snapshot_bytes
+            .min(self.max_session_frame_bytes)
+            .min(negotiated_max)
+            .get()
+    }
+}
+
+/// Primeiro frame já lido pelo dispatcher após a promoção.
+#[cfg(feature = "snapshot-harness")]
+#[derive(Debug, PartialEq, Eq)]
+pub enum StreamOpening {
+    A2(Vec<u8>),
+    Snapshot(Vec<u8>),
+}
+
+#[cfg(feature = "snapshot-harness")]
+#[derive(PartialEq, Eq)]
+enum StreamProfile {
+    Unselected,
+    A2,
+    Snapshot,
+}
+
 /// Identifica uma conexão operacional durante a vida do processo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(u64);
@@ -80,6 +122,8 @@ struct SessionState {
     link: Arc<OperationalLink>,
     links: Arc<PeerLinks>,
     max_frame_bytes: u32,
+    #[cfg(feature = "snapshot-harness")]
+    snapshot: Option<SnapshotSessionLimits>,
     attempt_timeout: Duration,
     slots: Arc<Semaphore>,
     accept: Mutex<()>,
@@ -140,6 +184,7 @@ impl OperationalSession {
         link: Arc<OperationalLink>,
         links: Arc<PeerLinks>,
         limits: SessionLimits,
+        #[cfg(feature = "snapshot-harness")] snapshot: Option<SnapshotSessionLimits>,
     ) -> Option<Self> {
         let id = NEXT_SESSION
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
@@ -149,6 +194,8 @@ impl OperationalSession {
             link,
             links,
             max_frame_bytes: limits.max_frame_bytes.get(),
+            #[cfg(feature = "snapshot-harness")]
+            snapshot,
             attempt_timeout: limits.attempt_timeout,
             slots: Arc::new(Semaphore::new(limits.max_streams_per_connection.get())),
             accept: Mutex::new(()),
@@ -239,6 +286,8 @@ pub struct OperationalBiStream {
     recv: RecvStream,
     sent_fin: bool,
     received_fin: bool,
+    #[cfg(feature = "snapshot-harness")]
+    profile: StreamProfile,
     deadline: Instant,
 }
 
@@ -257,6 +306,8 @@ impl OperationalBiStream {
             recv,
             sent_fin: false,
             received_fin: false,
+            #[cfg(feature = "snapshot-harness")]
+            profile: StreamProfile::Unselected,
             deadline,
         }
     }
@@ -298,8 +349,120 @@ impl OperationalBiStream {
         }
     }
 
-    /// Lê um corpo limitado. O FIN permanece para validação explícita.
+    fn select_a2(&mut self) -> Result<(), SessionError> {
+        self.check_open()?;
+        #[cfg(feature = "snapshot-harness")]
+        {
+            if self.profile == StreamProfile::Snapshot {
+                return Err(SessionError::InvalidFrame);
+            }
+            self.profile = StreamProfile::A2;
+        }
+        Ok(())
+    }
+
+    /// Lê um frame A2 limitado. O FIN permanece para validação explícita.
     pub async fn read_frame(&mut self) -> Result<Vec<u8>, SessionError> {
+        self.select_a2()?;
+        self.read_bounded_frame(self.state.max_frame_bytes, None)
+            .await
+    }
+
+    /// Escreve um frame A2 com prefixo, deixando o envio aberto.
+    pub async fn write_frame(&mut self, body: &[u8]) -> Result<(), SessionError> {
+        self.check_open()?;
+        let length = checked_length(body, self.state.max_frame_bytes, None)?;
+        self.select_a2()?;
+        self.write_sized_frame(body, length).await
+    }
+
+    /// Consome a abertura uma vez e entrega o frame A2 ou o primeiro controle.
+    #[cfg(feature = "snapshot-harness")]
+    pub async fn read_opening(&mut self) -> Result<StreamOpening, SessionError> {
+        self.check_open()?;
+        if self.profile != StreamProfile::Unselected {
+            return Err(self.incoming_error(SessionError::InvalidFrame));
+        }
+        // Mesmo que a leitura seja interrompida, o escape não pode ser lido de novo.
+        self.profile = StreamProfile::A2;
+        let length = self.read_prefix().await?;
+        if length != 0 {
+            return self
+                .read_payload(length, self.state.max_frame_bytes, None)
+                .await
+                .map(StreamOpening::A2);
+        }
+        let Some(limits) = self.state.snapshot else {
+            return Err(self.incoming_error(SessionError::InvalidFrame));
+        };
+        let control = self.read_bounded_frame(limits.control_cap(), None).await?;
+        self.profile = StreamProfile::Snapshot;
+        Ok(StreamOpening::Snapshot(control))
+    }
+
+    /// Escreve o escape zero e o primeiro controle, apenas em uma stream nova.
+    #[cfg(feature = "snapshot-harness")]
+    pub async fn write_snapshot_opening(&mut self, control: &[u8]) -> Result<(), SessionError> {
+        self.check_open()?;
+        if self.profile != StreamProfile::Unselected || self.sent_fin {
+            return Err(SessionError::InvalidFrame);
+        }
+        let limits = self.state.snapshot.ok_or(SessionError::InvalidFrame)?;
+        let length = checked_length(control, limits.control_cap(), None)?;
+        self.profile = StreamProfile::Snapshot;
+        self.write_bytes(&0u32.to_be_bytes()).await?;
+        self.write_sized_frame(control, length).await
+    }
+
+    #[cfg(feature = "snapshot-harness")]
+    fn snapshot_limits(&mut self) -> Result<SnapshotSessionLimits, SessionError> {
+        self.check_open()?;
+        if self.profile != StreamProfile::Snapshot {
+            return Err(SessionError::InvalidFrame);
+        }
+        self.state.snapshot.ok_or(SessionError::InvalidFrame)
+    }
+
+    /// Lê um controle sob o teto de controle da sessão.
+    #[cfg(feature = "snapshot-harness")]
+    pub async fn read_snapshot_control(&mut self) -> Result<Vec<u8>, SessionError> {
+        let cap = self.snapshot_limits()?.control_cap();
+        self.read_bounded_frame(cap, None).await
+    }
+
+    /// Escreve um controle sob o teto de controle da sessão.
+    #[cfg(feature = "snapshot-harness")]
+    pub async fn write_snapshot_control(&mut self, control: &[u8]) -> Result<(), SessionError> {
+        let cap = self.snapshot_limits()?.control_cap();
+        let length = checked_length(control, cap, None)?;
+        self.write_sized_frame(control, length).await
+    }
+
+    /// Lê os bytes integrais de B1, exigindo o comprimento declarado antes de alocar.
+    #[cfg(feature = "snapshot-harness")]
+    pub async fn read_snapshot_body(
+        &mut self,
+        expected_len: NonZeroU32,
+        negotiated_max: NonZeroU32,
+    ) -> Result<Vec<u8>, SessionError> {
+        let cap = self.snapshot_limits()?.body_cap(negotiated_max);
+        self.read_bounded_frame(cap, Some(expected_len.get())).await
+    }
+
+    /// Escreve os bytes integrais de B1 após conferir comprimento e tetos.
+    #[cfg(feature = "snapshot-harness")]
+    pub async fn write_snapshot_body(
+        &mut self,
+        body: &[u8],
+        declared_len: NonZeroU32,
+        negotiated_max: NonZeroU32,
+    ) -> Result<(), SessionError> {
+        let cap = self.snapshot_limits()?.body_cap(negotiated_max);
+        let length = checked_length(body, cap, Some(declared_len.get()))?;
+        self.write_sized_frame(body, length).await
+    }
+
+    async fn read_prefix(&mut self) -> Result<u32, SessionError> {
         self.check_open()?;
         let mut header = [0; 4];
         before_deadline(self.deadline, self.recv.read_exact(&mut header))
@@ -307,12 +470,30 @@ impl OperationalBiStream {
             .map_err(|_| self.timed_out())?
             .map_err(|error| self.incoming_error(exact_error(error)))?;
         self.check_open()?;
-        let length = u32::from_be_bytes(header);
-        if length == 0 || length > self.state.max_frame_bytes {
+        Ok(u32::from_be_bytes(header))
+    }
+
+    async fn read_bounded_frame(
+        &mut self,
+        cap: u32,
+        expected: Option<u32>,
+    ) -> Result<Vec<u8>, SessionError> {
+        let length = self.read_prefix().await?;
+        self.read_payload(length, cap, expected).await
+    }
+
+    async fn read_payload(
+        &mut self,
+        length: u32,
+        cap: u32,
+        expected: Option<u32>,
+    ) -> Result<Vec<u8>, SessionError> {
+        if !valid_length(length, cap, expected) {
             return Err(self.incoming_error(SessionError::InvalidFrame));
         }
         self.check_open()?;
-        let size = usize::try_from(length).map_err(|_| SessionError::InvalidFrame)?;
+        let size =
+            usize::try_from(length).map_err(|_| self.incoming_error(SessionError::InvalidFrame))?;
         let mut body = vec![0; size];
         before_deadline(self.deadline, self.recv.read_exact(&mut body))
             .await
@@ -322,22 +503,20 @@ impl OperationalBiStream {
         Ok(body)
     }
 
-    /// Escreve um corpo com prefixo, deixando o envio aberto.
-    pub async fn write_frame(&mut self, body: &[u8]) -> Result<(), SessionError> {
+    async fn write_sized_frame(&mut self, body: &[u8], length: u32) -> Result<(), SessionError> {
+        self.write_bytes(&length.to_be_bytes()).await?;
+        self.write_bytes(body).await
+    }
+
+    async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), SessionError> {
         self.check_open()?;
-        let length = u32::try_from(body.len()).map_err(|_| SessionError::InvalidFrame)?;
-        if length == 0 || length > self.state.max_frame_bytes {
-            return Err(SessionError::InvalidFrame);
+        if let Err(error) = before_deadline(self.deadline, self.send.write_all(bytes))
+            .await
+            .map_err(|_| self.timed_out())?
+        {
+            self.abort();
+            return Err(write_error(error));
         }
-        before_deadline(self.deadline, self.send.write_all(&length.to_be_bytes()))
-            .await
-            .map_err(|_| self.timed_out())?
-            .map_err(write_error)?;
-        self.check_open()?;
-        before_deadline(self.deadline, self.send.write_all(body))
-            .await
-            .map_err(|_| self.timed_out())?
-            .map_err(write_error)?;
         self.check_open()
     }
 
@@ -369,6 +548,17 @@ impl Drop for OperationalBiStream {
     fn drop(&mut self) {
         self.abort();
     }
+}
+
+fn valid_length(length: u32, cap: u32, expected: Option<u32>) -> bool {
+    length != 0 && length <= cap && expected.is_none_or(|expected| length == expected)
+}
+
+fn checked_length(body: &[u8], cap: u32, expected: Option<u32>) -> Result<u32, SessionError> {
+    let length = u32::try_from(body.len()).map_err(|_| SessionError::InvalidFrame)?;
+    valid_length(length, cap, expected)
+        .then_some(length)
+        .ok_or(SessionError::InvalidFrame)
 }
 
 async fn before_deadline<T>(
