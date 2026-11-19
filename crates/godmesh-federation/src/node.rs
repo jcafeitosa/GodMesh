@@ -30,6 +30,13 @@ use crate::peer::PeerRegistry;
 use crate::transport::{self, TransportError};
 use crate::{now_unix, transport::ALPN_V1_TEXT};
 
+mod session;
+
+pub use session::{
+    OperationalBiStream, OperationalSession, OperationalSessionHandler, SessionError, SessionId,
+    SessionLimits,
+};
+
 /// Intervalo de heartbeat padrão: 5 s.
 pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// Heartbeats perdidos tolerados antes de `unknown`: 3 (15 s no padrão).
@@ -151,6 +158,8 @@ pub enum LinkAuthorizationError {
     Denied,
     /// A autoridade durável não pôde ser consultada.
     Unavailable,
+    /// A consulta atingiu um limite de prazo da tentativa.
+    Timeout,
 }
 
 /// Autorização que mantém a proteção até o fim da atualização local.
@@ -181,6 +190,19 @@ pub trait LinkAuthorizer: Send + Sync {
         local: &'a LinkIdentity,
         remote: &'a LinkIdentity,
     ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>>;
+
+    /// Autoriza uma stream dentro do prazo absoluto de admissão. O transporte
+    /// limita a espera. Implementações com SQL podem usar o mesmo deadline
+    /// para limitar locks e instruções e devem limpar a transação ao cancelar.
+    /// Retorne [LinkAuthorizationError::Timeout] quando esses limites expirarem.
+    fn authorize_until<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+        _deadline: tokio::time::Instant,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
+        self.authorize(local, remote)
+    }
 
     /// Assina as alterações de confiança. Publique assim que a mudança durável
     /// for confirmada. Qualquer notificação ou o fechamento do canal invalida
@@ -225,6 +247,7 @@ struct NodeShared {
     registry: Arc<PeerRegistry>,
     links: Arc<PeerLinks>,
     authorizer: Option<Arc<dyn LinkAuthorizer>>,
+    session_handler: Option<(SessionLimits, Arc<dyn OperationalSessionHandler>)>,
 }
 
 /// Nó de federação com endpoint QUIC ativo.
@@ -261,6 +284,51 @@ impl FederationNode {
         addr: SocketAddr,
         authorizer: Option<Arc<dyn LinkAuthorizer>>,
     ) -> Result<Self, TransportError> {
+        Self::bind_inner(identity, config, registry, addr, authorizer, None)
+    }
+
+    /// Abre o endpoint com dispatcher para conexões operacionais autorizadas.
+    ///
+    /// # Errors
+    /// Limites de sessão inválidos ou as mesmas falhas de [Self::bind].
+    pub fn bind_with_session_handler(
+        identity: Arc<NodeIdentity>,
+        config: FederationConfig,
+        registry: Arc<PeerRegistry>,
+        addr: SocketAddr,
+        authorizer: Arc<dyn LinkAuthorizer>,
+        limits: SessionLimits,
+        handler: Arc<dyn OperationalSessionHandler>,
+    ) -> Result<Self, TransportError> {
+        if limits.max_streams_per_connection.get() > tokio::sync::Semaphore::MAX_PERMITS
+            || usize::try_from(limits.max_frame_bytes.get()).is_err()
+            || limits.attempt_timeout.is_zero()
+            || tokio::time::Instant::now()
+                .checked_add(limits.attempt_timeout)
+                .is_none()
+        {
+            return Err(TransportError::Quic(
+                "limites de sessão inválidos".to_owned(),
+            ));
+        }
+        Self::bind_inner(
+            identity,
+            config,
+            registry,
+            addr,
+            Some(authorizer),
+            Some((limits, handler)),
+        )
+    }
+
+    fn bind_inner(
+        identity: Arc<NodeIdentity>,
+        config: FederationConfig,
+        registry: Arc<PeerRegistry>,
+        addr: SocketAddr,
+        authorizer: Option<Arc<dyn LinkAuthorizer>>,
+        session_handler: Option<(SessionLimits, Arc<dyn OperationalSessionHandler>)>,
+    ) -> Result<Self, TransportError> {
         let tls = transport::NodeTls::self_issued(&identity)?;
         let server = transport::server_config(Arc::clone(&registry), &tls)?;
         let client = transport::client_config(Arc::clone(&registry), &tls)?;
@@ -273,6 +341,7 @@ impl FederationNode {
             registry,
             links: Arc::new(PeerLinks::new(freshness)),
             authorizer,
+            session_handler,
         };
         let node = Self {
             shared,
@@ -446,6 +515,7 @@ struct OperationalLink {
     authorizer: Arc<dyn LinkAuthorizer>,
     local: LinkIdentity,
     remote: LinkIdentity,
+    alpn: String,
     validity: LinkValidity,
     deadline: watch::Sender<Option<Instant>>,
 }
@@ -456,7 +526,7 @@ impl OperationalLink {
         connection: &Connection,
         authorizer: Arc<dyn LinkAuthorizer>,
     ) -> Result<Self, Rejection> {
-        transport::require_alpn(connection).map_err(|_| Rejection::AlpnMismatch)?;
+        let alpn = transport::require_alpn(connection).map_err(|_| Rejection::AlpnMismatch)?;
         let remote_key = transport::peer_public_key(connection).ok_or(Rejection::KeyMismatch)?;
         let identity = |public_key| LinkIdentity {
             node_id: node_id_for(&public_key),
@@ -470,6 +540,7 @@ impl OperationalLink {
             authorizer,
             local: identity(shared.identity.public_key_bytes()),
             remote: identity(remote_key),
+            alpn,
             validity: LinkValidity {
                 connection: connection.clone(),
                 trust,
@@ -490,6 +561,10 @@ impl OperationalLink {
         .await
         .map_err(|_| Rejection::NotAuthorized)?
         .map_err(|_| Rejection::NotAuthorized)?;
+        self.keep_permit(permit)
+    }
+
+    fn keep_permit(&self, permit: LinkPermit) -> Result<LinkPermit, Rejection> {
         if let Some(expires_at) = permit.expires_at {
             // Uma nova consulta pode encurtar o enlace. Para estendê-lo,
             // reabra a conexão sob a nova vigência.
@@ -571,6 +646,18 @@ async fn establish_operational(
 }
 
 async fn run_operational(shared: NodeShared, link: OperationalLink) {
+    let link = Arc::new(link);
+    let callback = shared.session_handler.as_ref().map(|(limits, handler)| {
+        let link = Arc::clone(&link);
+        let links = Arc::clone(&shared.links);
+        let limits = *limits;
+        let handler = Arc::clone(handler);
+        tokio::spawn(async move {
+            if let Some(session) = OperationalSession::new(link, links, limits) {
+                handler.run(session).await;
+            }
+        })
+    });
     let connection = &link.validity.connection;
     let node_id = &link.remote.node_id;
     let result = tokio::select! {
@@ -586,6 +673,11 @@ async fn run_operational(shared: NodeShared, link: OperationalLink) {
         connection.close(0u32.into(), b"enlace encerrado");
     }
     shared.links.close_operational(node_id, connection);
+    // O fechamento acorda cancelled(); aguarde a limpeza cooperativa depois
+    // de retirar o estado desta conexão, sem bloquear outras sessões.
+    if let Some(callback) = callback {
+        let _ = callback.await;
+    }
 }
 
 fn close_with_rejection(connection: &Connection, rejection: Rejection) {
