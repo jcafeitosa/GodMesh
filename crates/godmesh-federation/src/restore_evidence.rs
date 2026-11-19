@@ -14,7 +14,8 @@ use crate::{
 };
 
 pub use commitments::{
-    ControlState, CopyAcl, CopyPolicy, Fence, Reconciliation, RevocationReference, proofs_digest,
+    ControlState, CopyAcl, CopyPolicy, Fence, ProofsDigest, Reconciliation, RevocationReference,
+    proofs_digest,
 };
 
 const MAX_INT: u64 = i64::MAX as u64;
