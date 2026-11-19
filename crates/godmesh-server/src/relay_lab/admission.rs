@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     net::{SocketAddr, SocketAddrV4},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -21,7 +22,7 @@ use crate::{
 use super::{
     Direction, Error, Probe, SendCredit, Usage,
     quotas::{OPEN_TIMEOUT, Quotas, Reservation},
-    scheduling::Scheduler,
+    scheduling::{OpeningTurn, Scheduler, Turn},
 };
 
 const CHECK_BUDGET: Duration = Duration::from_millis(100);
@@ -124,6 +125,11 @@ pub struct RelayAdmission {
 }
 
 impl RelayAdmission {
+    #[cfg(test)]
+    pub(super) fn opening_scheduler(&self) -> &super::scheduling::Scheduler {
+        &self.scheduler
+    }
+
     pub fn new(
         registry: Registry,
         portable: Arc<PortableJoin>,
@@ -207,6 +213,9 @@ impl RelayAdmission {
         let open_deadline = opened_at
             .checked_add(OPEN_TIMEOUT)
             .ok_or(Error::RouteUnavailable)?;
+        let _opening_turn = timeout_at(open_deadline, self.scheduler.opening())
+            .await
+            .map_err(|_| Error::RouteUnavailable)?;
         let mut reservation = self
             .authorize(&route, open_deadline, |_, checked_now| {
                 self.quotas.reserve_route(
@@ -229,10 +238,9 @@ impl RelayAdmission {
     async fn authorize<T>(
         &self,
         route: &Route,
-        limit: Instant,
+        deadline: Instant,
         decision: impl FnOnce(Instant, &dyn Fn() -> Result<Instant, Error>) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let deadline = limit.min(Instant::now() + CHECK_BUDGET);
         if deadline <= Instant::now() {
             return Err(Error::RouteUnavailable);
         }
@@ -357,6 +365,9 @@ impl RouteInstance {
 
     /// O chamador só solicita esta transição depois de verificar o token da stream.
     pub async fn confirm_token(&self) -> Result<Instant, Error> {
+        let _opening_turn = self
+            .wait_opening_until(self.open_deadline, self.admission.scheduler.opening())
+            .await?;
         self.authorize(self.open_deadline, |next, checked_now| {
             self.reservation.forward(checked_now)?;
             Ok(next)
@@ -378,7 +389,7 @@ impl RouteInstance {
         let _turn = tokio::select! {
             biased;
             _ = cancelled.wait_for(|cancelled| *cancelled) => return Err(Error::Cancelled),
-            turn = self.admission.scheduler.credit() => turn,
+            turn = self.admission.scheduler.normal() => turn,
         };
         self.authorize(Instant::now() + CHECK_BUDGET, |_, checked_now| {
             self.reservation.take(direction, checked_now)
@@ -392,18 +403,9 @@ impl RouteInstance {
     }
 
     async fn recheck_until(&self, deadline: Instant) -> Result<Instant, Error> {
-        let mut cancelled = self.cancellation();
-        let _turn = tokio::select! {
-            biased;
-            _ = cancelled.wait_for(|cancelled| *cancelled) => return Err(Error::Cancelled),
-            result = timeout_at(deadline, self.admission.scheduler.recheck()) => match result {
-                Ok(turn) => turn,
-                Err(_) => {
-                    self.cancel();
-                    return Err(Error::RouteUnavailable);
-                }
-            },
-        };
+        let _turn = self
+            .wait_turn_until(deadline, self.admission.scheduler.recheck())
+            .await?;
         self.authorize(deadline, |next, _| {
             if *self.reservation.cancellation().borrow() {
                 return Err(Error::Cancelled);
@@ -411,6 +413,44 @@ impl RouteInstance {
             Ok(next)
         })
         .await
+    }
+
+    async fn wait_opening_until<'a>(
+        &'a self,
+        deadline: Instant,
+        turn: impl Future<Output = OpeningTurn<'a>>,
+    ) -> Result<OpeningTurn<'a>, Error> {
+        let mut cancelled = self.cancellation();
+        tokio::select! {
+            biased;
+            _ = cancelled.wait_for(|cancelled| *cancelled) => Err(Error::Cancelled),
+            result = timeout_at(deadline, turn) => match result {
+                Ok(turn) => Ok(turn),
+                Err(_) => {
+                    self.cancel();
+                    Err(Error::RouteUnavailable)
+                }
+            },
+        }
+    }
+
+    async fn wait_turn_until<'a>(
+        &'a self,
+        deadline: Instant,
+        turn: impl Future<Output = Turn<'a>>,
+    ) -> Result<Turn<'a>, Error> {
+        let mut cancelled = self.cancellation();
+        tokio::select! {
+            biased;
+            _ = cancelled.wait_for(|cancelled| *cancelled) => Err(Error::Cancelled),
+            result = timeout_at(deadline, turn) => match result {
+                Ok(turn) => Ok(turn),
+                Err(_) => {
+                    self.cancel();
+                    Err(Error::RouteUnavailable)
+                }
+            },
+        }
     }
 
     /// Executar em tarefa independente de filas e envios da instância.

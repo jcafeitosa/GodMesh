@@ -220,14 +220,22 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
         admission.open(&r1.id, &pin(&d2), Instant::now()).await,
         Err(Error::RouteDenied)
     ));
-    let d1_route = admission
-        .open(&r1.id, &pin(&e), Instant::now())
-        .await
-        .unwrap();
-    let d2_route = admission
-        .open(&r2.id, &pin(&e), Instant::now())
-        .await
-        .unwrap();
+    let mut opening_lock = f.pool.begin().await.unwrap();
+    portable.lock_cluster(&mut opening_lock).await.unwrap();
+    let opened_at = Instant::now();
+    let requester = pin(&e);
+    let (d1_route, d2_route, ()) = tokio::join!(
+        admission.open(&r1.id, &requester, opened_at),
+        admission.open(&r2.id, &requester, opened_at),
+        async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            opening_lock.rollback().await.unwrap();
+        }
+    );
+    let d1_route = d1_route.unwrap();
+    let d2_route = d2_route.unwrap();
+    assert_eq!(d1_route.open_deadline(), opened_at + Duration::from_secs(2));
+    assert_eq!(d2_route.open_deadline(), d1_route.open_deadline());
     assert_eq!(
         d1_route.enqueue(Direction::ToDestination, vec![1]),
         Err(Error::RouteUnavailable)
@@ -241,15 +249,51 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
         .open(&r1.id, &pin(&e), Instant::now())
         .await
         .unwrap();
-    d1_route.confirm_token().await.unwrap();
-    d2_route.confirm_token().await.unwrap();
-    d1_route.enqueue(Direction::ToDestination, vec![1]).unwrap();
-    let used = d1_route
-        .next_credit(Direction::ToDestination)
-        .await
-        .unwrap()
-        .unwrap();
-    d1_route.enqueue(Direction::ToDestination, vec![2]).unwrap();
+    let mut token_lock = f.pool.begin().await.unwrap();
+    portable.lock_cluster(&mut token_lock).await.unwrap();
+    let d1 = d1_route.confirm_token();
+    let d2 = d2_route.confirm_token();
+    let (d1_token, d2_token, ()) = tokio::join!(d1, d2, async {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        token_lock.rollback().await.unwrap();
+    });
+    d1_token.unwrap();
+    d2_token.unwrap();
+    // Simula D1 retida depois de obter a vaga opening e antes do guard M1C.
+    // Crédito de D2 não usa essa fila e deve continuar elegível.
+    let d1_opening = admission.opening_scheduler().opening().await;
+    let d2_credit = tokio::time::timeout(
+        Duration::from_millis(100),
+        d2_route.next_credit(Direction::ToDestination),
+    )
+    .await;
+    assert!(
+        d2_credit.is_ok(),
+        "D2 credit must not wait for D1 opening FIFO"
+    );
+    assert!(d2_credit.unwrap().is_ok(), "D2 credit authorization failed");
+    let d2_recheck = tokio::time::timeout(Duration::from_millis(100), d2_route.recheck()).await;
+    assert!(
+        d2_recheck.is_ok(),
+        "D2 recheck must not wait for D1 opening FIFO"
+    );
+    assert!(
+        d2_recheck.unwrap().is_ok(),
+        "D2 recheck authorization failed"
+    );
+    assert!(!*d2_route.cancellation().borrow(), "D2 must remain active");
+    drop(d1_opening);
+
+    let directions = [Direction::ToDestination, Direction::FromDestination];
+    let mut credits = Vec::new();
+    for direction in directions {
+        d1_route.enqueue(direction, vec![1]).unwrap();
+        credits.push(d1_route.next_credit(direction).await.unwrap().unwrap());
+        d1_route.enqueue(direction, vec![2, 3]).unwrap();
+        let before = admission.usage(Some(f.origin.node_id()), direction);
+        assert_eq!((before.queued_frames, before.queued_bytes), (1, 6));
+        assert_eq!((before.debited_frames, before.debited_bytes), (1, 5));
+    }
 
     // Controle durável sem passar pelo sinal local de trust.
     sqlx::query("UPDATE federation_peer SET trust_state='revoked' WHERE node_id=$1")
@@ -266,20 +310,55 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
     );
     assert!(invalidated.elapsed() <= Duration::from_millis(350));
     assert!(*d1_route.cancellation().borrow());
-    let usage = admission.usage(Some(f.origin.node_id()), Direction::ToDestination);
-    assert_eq!((usage.queued_frames, usage.debited_frames), (0, 1));
-    drop(used);
+    for direction in directions {
+        assert!(matches!(
+            d1_route.next_credit(direction).await,
+            Err(Error::Cancelled)
+        ));
+        assert_eq!(d1_route.enqueue(direction, vec![4]), Err(Error::Cancelled));
+        let after = admission.usage(Some(f.origin.node_id()), direction);
+        assert_eq!(
+            (
+                after.queued_frames,
+                after.queued_bytes,
+                after.cancelled_frames
+            ),
+            (0, 0, 1)
+        );
+        assert_eq!((after.debited_frames, after.debited_bytes), (1, 5));
+
+        d2_route.enqueue(direction, vec![7]).unwrap();
+        let credit = d2_route.next_credit(direction).await.unwrap().unwrap();
+        assert_eq!(credit.datagram(), &[7]);
+    }
+    let probe = admission.reserve_probe().unwrap();
+    probe.enqueue(vec![8; 64]).unwrap();
+    assert_eq!(probe.take(Instant::now()).unwrap(), Some(vec![8; 64]));
+
     d1_route.recollect();
-    d2_route
-        .enqueue(Direction::FromDestination, vec![7])
+    // Restabelece a autoridade para medir a ocupação restante da vaga de D1.
+    sqlx::query("UPDATE federation_peer SET trust_state='authorized' WHERE node_id=$1")
+        .bind(f.origin.node_id())
+        .execute(&f.pool)
+        .await
         .unwrap();
-    drop(
-        d2_route
-            .next_credit(Direction::FromDestination)
-            .await
-            .unwrap()
-            .unwrap(),
-    );
+    drop(credits.pop().unwrap());
+    assert!(matches!(
+        admission.open(&r1.id, &pin(&e), Instant::now()).await,
+        Err(Error::QuotaExceeded)
+    ));
+    drop(credits);
+    let replacement = admission
+        .open(&r1.id, &pin(&e), Instant::now())
+        .await
+        .unwrap();
+    replacement.confirm_token().await.unwrap();
+    for direction in directions {
+        assert!(replacement.next_credit(direction).await.unwrap().is_none());
+        let usage = admission.usage(Some(f.origin.node_id()), direction);
+        assert_eq!((usage.debited_frames, usage.debited_bytes), (1, 5));
+    }
+    replacement.recollect();
 
     let mut lock = f.pool.begin().await.unwrap();
     portable.lock_cluster(&mut lock).await.unwrap();
@@ -318,11 +397,6 @@ async fn autoridade_revalida_token_debito_e_rechecagem_sem_sinal() {
     d2_route.recollect();
 
     clock.store(110, Ordering::SeqCst);
-    sqlx::query("UPDATE federation_peer SET trust_state='authorized' WHERE node_id=$1")
-        .bind(f.origin.node_id())
-        .execute(&f.pool)
-        .await
-        .unwrap();
     let first = admission
         .open(&r1.id, &pin(&e), Instant::now())
         .await
