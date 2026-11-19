@@ -2179,10 +2179,11 @@ mod pinned_dial {
                 route.outer.shutdown();
             } else {
                 route.cancellation.cancel();
-                assert!(matches!(
-                    relay.cancel(),
-                    DialCancellation::AlreadyPromoted(_)
-                ));
+                let DialCancellation::AlreadyPromoted(promoted) = relay.cancel() else {
+                    panic!("a promoção ocorreu antes do cancelamento");
+                };
+                assert_eq!(promoted.snapshot().state, LinkState::Unknown);
+                assert_eq!(promoted.snapshot().rtt_ms, None);
             }
             tokio::time::timeout(Duration::from_secs(1), original.cancelled())
                 .await

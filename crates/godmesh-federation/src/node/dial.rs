@@ -15,7 +15,7 @@ use super::session::RelayValidity;
 use super::{LinkError, NodeShared, close_with_rejection, establish_pinned};
 use crate::handshake::Rejection;
 use crate::identity::node_id_for;
-use crate::link::{LinkSnapshot, PeerLinks};
+use crate::link::{LinkSnapshot, LinkState, PeerLinks};
 use crate::relay_fallback::{FallbackError, ReapedDirect};
 use crate::transport;
 
@@ -68,7 +68,8 @@ pub struct PromotedDial {
 }
 
 impl PromotedDial {
-    /// Fotografia no ponto da promoção.
+    /// Fotografia no ponto da promoção, ou `Unknown` se obtida pelo
+    /// cancelamento de uma discagem relay cuja rota já ficou inválida.
     pub fn snapshot(&self) -> &LinkSnapshot {
         &self.snapshot
     }
@@ -107,7 +108,17 @@ impl DialAttempt {
     /// Cancela enquanto pendente. Se a promoção já venceu, devolve a
     /// capacidade de invalidar a conexão exata sob a política do chamador.
     pub fn cancel(&self) -> DialCancellation {
-        self.state.cancel()
+        if let Some(result) = self.state.while_relay_current(|| self.state.cancel()) {
+            return result;
+        }
+        match self.state.cancel() {
+            DialCancellation::AlreadyPromoted(mut promoted) => {
+                promoted.snapshot.state = LinkState::Unknown;
+                promoted.snapshot.rtt_ms = None;
+                DialCancellation::AlreadyPromoted(promoted)
+            }
+            result => result,
+        }
     }
 
     pub(crate) fn fallback_binding(&self) -> (&Arc<()>, &DialTarget) {
@@ -153,16 +164,9 @@ impl DialAttempt {
         let promoted = result.map_err(|_| {
             DialError::Link(LinkError::Connect("tarefa de discagem interrompida".into()))
         })??;
-        #[cfg(feature = "relay-harness")]
-        if let Some(relay) = &self.state.relay
-            && relay
-                .upgrade()
-                .and_then(|route| route.while_active(|| ()))
-                .is_none()
-        {
-            return Err(DialError::Cancelled);
-        }
-        Ok(promoted)
+        self.state
+            .while_relay_current(|| promoted)
+            .ok_or(DialError::Cancelled)
     }
 }
 
@@ -271,18 +275,19 @@ impl AttemptState {
         node_id: &str,
         publish: impl FnOnce() -> Result<LinkSnapshot, Rejection>,
     ) -> Result<LinkSnapshot, Rejection> {
+        self.while_relay_current(|| self.publish(shared, connection, node_id, publish))
+            .unwrap_or_else(|| {
+                self.cancel();
+                Err(Rejection::Transport)
+            })
+    }
+
+    fn while_relay_current<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
         #[cfg(feature = "relay-harness")]
         if let Some(relay) = &self.relay {
-            let Some(result) = relay.upgrade().and_then(|route| {
-                route.while_active(|| self.publish(shared, connection, node_id, publish))
-            }) else {
-                self.cancel();
-                return Err(Rejection::Transport);
-            };
-            return result;
+            return relay.upgrade()?.while_active(operation);
         }
-
-        self.publish(shared, connection, node_id, publish)
+        Some(operation())
     }
 
     fn publish(
