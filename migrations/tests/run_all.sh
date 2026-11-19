@@ -16,6 +16,7 @@
 #   migrations/0012_federation_portable_join.sql
 #   migrations/0013_federation_config_bundle.sql
 #   migrations/0014_federation_replication.sql
+#   migrations/0015_federation_replica_resume.sql
 # depois roda todos os `*_invariants.sql` e falha (exit != 0) se algum bloco
 # `NOTICE: OK` esperado não aparecer.
 #
@@ -90,6 +91,8 @@ aplicar "$raiz/migrations/0011_federation_decision_epoch.sql"
 aplicar "$raiz/migrations/0012_federation_portable_join.sql"
 aplicar "$raiz/migrations/0013_federation_config_bundle.sql"
 aplicar "$raiz/migrations/0014_federation_replication.sql"
+
+aplicar "$raiz/migrations/0015_federation_replica_resume.sql"
 
 if [ -n "$sabotagem" ]; then
     [ -f "$sabotagem" ] || { echo "erro: sabotagem inexistente: $sabotagem" >&2; exit 2; }
@@ -221,6 +224,12 @@ verificar "$tests/0014_invariants.sql" \
     "OK 1: 0014 sem política ou ACL implícita" \
     "OK 2: epoch alternativo não duplica reserva" \
     "OK 3: versão histórica não muda após retirada"
+
+verificar "$tests/0015_invariants.sql" \
+    "OK 1: 0015 semeia zero suspensões" \
+    "OK 2: suspensão referencia reserva sem criar checkpoint" \
+    "OK 3: suspensão exige destino exato da reserva" \
+    "OK 4: suspensão exige sequência positiva"
 
 rm -f "$saida"
 
