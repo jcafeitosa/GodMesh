@@ -11,7 +11,6 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::uri::{Authority, PathAndQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode, Version, header};
-use axum::response::{IntoResponse, Response};
 use godmesh_federation::transport::{self, NodeTls};
 use godmesh_federation::{NodeIdentity, node_id_for};
 use hyper::body::{Body as _, Incoming};
@@ -208,7 +207,7 @@ async fn serve_connection(
                     Ok(response) => response,
                     Err(never) => match never {},
                 },
-                Err(error) => reject_request(error),
+                Err(error) => crate::config_operational::transport_refusal(error),
             };
             // O prazo de escrita começa após o router produzir a resposta.
             write_deadline.send_replace(Some(Instant::now() + limits.body_timeout));
@@ -260,24 +259,6 @@ async fn bounded_request(
     parts.extensions.insert(ConnectInfo(peer.remote_addr));
     parts.extensions.insert(peer);
     Ok(Request::from_parts(parts, Body::from(bytes)))
-}
-
-fn reject_request(error: HttpsError) -> Response {
-    let (status, code) = match error {
-        HttpsError::BodyTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
-        HttpsError::Timeout => (StatusCode::REQUEST_TIMEOUT, "request_timeout"),
-        _ => (StatusCode::BAD_REQUEST, "invalid_request"),
-    };
-    (
-        status,
-        axum::Json(serde_json::json!({
-            "error": code,
-            "detail": error.to_string(),
-            "hint": "verifique o perfil e os limites HTTPS",
-            "ack_class": "transport_accepted",
-        })),
-    )
-        .into_response()
 }
 
 /// Resultado HTTP já enquadrado, com a identidade autenticada naquela conexão.

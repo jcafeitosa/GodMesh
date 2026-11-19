@@ -2,7 +2,11 @@ use std::{fmt, future::Future, pin::Pin};
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header, uri::PathAndQuery};
 use godmesh_federation::config_bundle::authenticate_bundle;
-use tokio::sync::watch;
+use sqlx::{Postgres, Transaction};
+use tokio::{
+    sync::watch,
+    time::{Instant, timeout_at},
+};
 
 use super::{
     ConfigPlane, Peer, Publisher,
@@ -138,6 +142,10 @@ impl PullError {
 }
 
 fn storage(_: sqlx::Error) -> PullError {
+    no_effect()
+}
+
+fn no_effect() -> PullError {
     PullError::Storage {
         effect_unknown: false,
     }
@@ -214,10 +222,13 @@ impl ConfigPlane {
         publisher: &Publisher,
         target: &PathAndQuery,
     ) -> Result<PullResult, PullError> {
-        let expected = self.conditional_hash().await?;
+        let deadline = Instant::now() + self.config.pull_timeout;
+        let expected = timeout_at(deadline, self.conditional_hash())
+            .await
+            .map_err(|_| no_effect())??;
         let conditional = expected.as_ref().map(etag);
-        let response = match tokio::time::timeout(
-            self.config.pull_timeout,
+        let response = match timeout_at(
+            deadline,
             client.get(publisher, target, conditional.as_ref()),
         )
         .await
@@ -258,7 +269,7 @@ impl ConfigPlane {
                 if tag.as_ref() != Some(bundle.hash()) {
                     return Err(PullError::Protocol);
                 }
-                self.accept_download(response).await
+                self.accept_download(response, deadline).await
             }
             StatusCode::SERVICE_UNAVAILABLE => {
                 let error = parse_remote_error(&response.headers, &response.body)
@@ -273,65 +284,90 @@ impl ConfigPlane {
         }
     }
 
-    async fn accept_download(&self, response: PullResponse) -> Result<PullResult, PullError> {
-        let mut tx = self.begin().await.map_err(storage)?;
-        let written = async {
-            let mut guard = self
-                .portable
-                .lock_cluster_guard(&mut tx)
-                .await
-                .map_err(|_| PullError::Storage {
-                    effect_unknown: false,
-                })?;
-            let now = self.clock.now_unix();
-            let pin = self.config.publisher().ok_or(PullError::WrongRole)?;
-            if !matches_publisher(&response.peer, pin) {
-                return Ok(PullResult::Denied(PullDenial::Pin));
-            }
-            // Para pull, o publicador é sempre um par remoto. Mesmo um pin
-            // configurado para a própria identidade não substitui a prova.
-            let authorized = async {
-                self.portable.authorize_local_at(&mut guard, now).await?;
-                self.portable
-                    .authorize_peer_at(
-                        &mut guard,
-                        &response.peer.node_id,
-                        &hex::encode(response.peer.public_key),
-                        now,
-                    )
-                    .await
-            }
-            .await;
-            match authorized {
-                Ok(_) => {}
-                Err(PortableJoinError::Storage(_) | PortableJoinError::Encoding(_)) => {
-                    return Err(PullError::Storage {
-                        effect_unknown: false,
-                    });
-                }
-                Err(_) => return Ok(PullResult::Denied(PullDenial::Authority)),
-            }
-            Ok(PullResult::Written(
-                self.bundle
-                    .accept_in_tx(&mut guard, &self.portable, &response.body, now)
-                    .await?,
-            ))
+    async fn accept_download(
+        &self,
+        response: PullResponse,
+        deadline: Instant,
+    ) -> Result<PullResult, PullError> {
+        if Instant::now() >= deadline {
+            return Err(no_effect());
         }
-        .await;
+        let mut tx = timeout_at(deadline, self.begin())
+            .await
+            .map_err(|_| no_effect())?
+            .map_err(storage)?;
+        let written = timeout_at(deadline, self.prepare_download(&mut tx, &response))
+            .await
+            .map_err(|_| no_effect())?;
         match written {
             Ok(PullResult::Written(outcome)) => {
-                self.commit_write(tx, outcome)
+                // timeout_at pode consultar o futuro interior no instante
+                // limite. Não inicie COMMIT se o orçamento já acabou.
+                if Instant::now() >= deadline {
+                    return Err(no_effect());
+                }
+                let unknown = || PullError::Storage {
+                    effect_unknown: true,
+                };
+                timeout_at(deadline, self.commit_write(tx, outcome))
                     .await
-                    .map_err(|_| PullError::Storage {
-                        effect_unknown: true,
-                    })?;
+                    .map_err(|_| unknown())?
+                    .map_err(|_| unknown())?;
                 Ok(PullResult::Written(outcome))
             }
             other => {
-                tx.rollback().await.map_err(storage)?;
+                timeout_at(deadline, tx.rollback())
+                    .await
+                    .map_err(|_| no_effect())?
+                    .map_err(storage)?;
                 other
             }
         }
+    }
+
+    async fn prepare_download(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        response: &PullResponse,
+    ) -> Result<PullResult, PullError> {
+        let mut guard = self
+            .portable
+            .lock_cluster_guard(tx)
+            .await
+            .map_err(|_| no_effect())?;
+        let now = self.clock.now_unix();
+        let pin = self.config.publisher().ok_or(PullError::WrongRole)?;
+        if !matches_publisher(&response.peer, pin) {
+            return Ok(PullResult::Denied(PullDenial::Pin));
+        }
+        // Para pull, o publicador é sempre um par remoto. Mesmo um pin
+        // configurado para a própria identidade não substitui a prova.
+        let authorized = async {
+            self.portable.authorize_local_at(&mut guard, now).await?;
+            self.portable
+                .authorize_peer_at(
+                    &mut guard,
+                    &response.peer.node_id,
+                    &hex::encode(response.peer.public_key),
+                    now,
+                )
+                .await
+        }
+        .await;
+        match authorized {
+            Ok(_) => {}
+            Err(PortableJoinError::Storage(_) | PortableJoinError::Encoding(_)) => {
+                return Err(PullError::Storage {
+                    effect_unknown: false,
+                });
+            }
+            Err(_) => return Ok(PullResult::Denied(PullDenial::Authority)),
+        }
+        Ok(PullResult::Written(
+            self.bundle
+                .accept_in_tx(&mut guard, &self.portable, &response.body, now)
+                .await?,
+        ))
     }
 
     /// Cancelar o shutdown cancela a tentativa, a espera de retry ou a cadência.

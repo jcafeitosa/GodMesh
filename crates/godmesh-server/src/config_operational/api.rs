@@ -261,6 +261,16 @@ impl IntoResponse for Failure {
     }
 }
 
+pub(crate) fn transport_refusal(error: crate::config_https::HttpsError) -> Response {
+    use crate::config_https::HttpsError;
+    let code = match error {
+        HttpsError::BodyTooLarge => ErrorCode::Large,
+        HttpsError::Timeout => ErrorCode::BodyTimeout,
+        _ => ErrorCode::BadRequest,
+    };
+    Failure::from(code).into_response()
+}
+
 fn json_response(status: StatusCode, body: &impl Serialize) -> Response {
     bytes_response(
         status,

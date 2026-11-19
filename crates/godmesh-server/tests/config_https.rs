@@ -320,20 +320,56 @@ async fn limita_corpo_streaming_e_preserva_o_limite_exato() {
     let caller = NodeIdentity::generate_in_memory().unwrap();
     let router = Router::new().route(PATH, put(|body: axum::body::Bytes| async move { body }));
     let (addr, pin, stop, task) = start(router, limits(), caller.public_key_bytes()).await;
-    for (chunks, expected) in [
+    for (chunks, encoding, status, error) in [
         (
             b"10\r\n1234567890123456\r\n0\r\n\r\n".as_slice(),
-            b"HTTP/1.1 200 ".as_slice(),
+            "",
+            200,
+            None,
         ),
-        (b"10\r\n1234567890123456\r\n1\r\na\r\n", b"HTTP/1.1 413 "),
-        (b"5\r\nabc", b"HTTP/1.1 408 "),
+        (
+            b"10\r\n1234567890123456\r\n1\r\na\r\n",
+            "",
+            413,
+            Some(("payload_too_large", false)),
+        ),
+        (b"5\r\nabc", "", 408, Some(("request_timeout", true))),
+        (
+            b"",
+            "Content-Encoding: gzip\r\n",
+            400,
+            Some(("config_bad_request", false)),
+        ),
+        (b"Z\r\n", "", 400, Some(("config_bad_request", false))),
     ] {
         let mut stream = raw_tls(addr, client_config(&caller, pin)).await.unwrap();
-        stream.write_all(b"PUT /v1/federation/config HTTP/1.1\r\nHost: fixture\r\nTransfer-Encoding: chunked\r\n\r\n")
-            .await.unwrap();
+        let request = format!(
+            "PUT /v1/federation/config HTTP/1.1\r\nHost: fixture\r\nTransfer-Encoding: chunked\r\n{encoding}\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
         stream.write_all(chunks).await.unwrap();
         let response = read_http(&mut stream).await;
-        assert!(response.starts_with(expected), "status inesperado");
+        assert!(
+            response.starts_with(format!("HTTP/1.1 {status} ").as_bytes()),
+            "status inesperado"
+        );
+        if let Some((error, retryable)) = error {
+            let end = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            let headers = std::str::from_utf8(&response[..end])
+                .unwrap()
+                .to_ascii_lowercase();
+            let body = &response[end + 4..];
+            assert!(headers.contains("content-type: application/json"));
+            assert!(headers.contains(&format!("content-length: {}", body.len())));
+            let json: serde_json::Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(json.as_object().unwrap().len(), 6);
+            assert_eq!(json["error"], error);
+            assert_eq!(json["retryable"], retryable);
+            assert_eq!(json["docs_url"], "/v1/meta");
+            assert_eq!(json["ack_class"], "transport_accepted");
+            assert!(json["detail"].as_str().is_some_and(|v| !v.is_empty()));
+            assert!(json["hint"].as_str().is_some_and(|v| !v.is_empty()));
+        }
     }
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();

@@ -4,6 +4,8 @@ mod api;
 mod pull;
 mod settings;
 
+pub(crate) use api::transport_refusal;
+
 use std::sync::Arc;
 
 use godmesh_federation::NodeIdentity;

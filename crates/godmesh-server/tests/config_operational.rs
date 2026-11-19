@@ -1268,3 +1268,114 @@ async fn api_serializa_etag_publicacao_e_resolucao_com_revogacao() {
         app.abort();
     }
 }
+
+#[tokio::test]
+async fn pull_prazo_no_postgres_condicional_e_aceitacao() {
+    let Some(a) = database("deadline_a").await else {
+        return;
+    };
+    let b = database("deadline_b").await.unwrap();
+    let s = Scenario::new(a, b, "https://127.0.0.1").await;
+    let mut cfg = s.receiver_settings.clone();
+    cfg.pull_timeout = Duration::from_millis(300);
+    cfg.max_attempts = std::num::NonZeroUsize::MIN;
+    let plane = plane(s.receiver_portable.clone(), s.receiver.clone(), cfg).await;
+    let (frame, hash) = signed(&s.voters, 1, 1, 1);
+    let reply = data_reply(frame, &hash);
+    let no_network = Script::new(peer(&s.issuer), []);
+    let mut barrier = s.receiver_db.begin().await.unwrap();
+    s.receiver_portable
+        .lock_cluster_guard(&mut barrier)
+        .await
+        .unwrap();
+    let conditional =
+        tokio::time::timeout(Duration::from_secs(2), plane.poll_cycle(&no_network)).await;
+    barrier.rollback().await.unwrap();
+    assert_eq!(
+        conditional.expect("leitura condicional deve respeitar o prazo"),
+        Err(PullError::Storage {
+            effect_unknown: false
+        })
+    );
+    assert!(no_network.seen.lock().unwrap().is_empty());
+
+    let gated = Arc::new(Gated::new(peer(&s.issuer), reply.clone()));
+    let runner = {
+        let (plane, gated) = (plane.clone(), gated.clone());
+        tokio::spawn(async move { plane.poll_cycle(gated.as_ref()).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), gated.started.notified())
+        .await
+        .unwrap();
+    let mut barrier = s.receiver_db.begin().await.unwrap();
+    s.receiver_portable
+        .lock_cluster_guard(&mut barrier)
+        .await
+        .unwrap();
+    gated.release.notify_one();
+    let accepting = tokio::time::timeout(Duration::from_secs(2), runner).await;
+    barrier.rollback().await.unwrap();
+    assert_eq!(
+        accepting
+            .expect("aceitação deve respeitar o prazo")
+            .unwrap(),
+        Err(PullError::Storage {
+            effect_unknown: false
+        })
+    );
+    assert_eq!(snapshot(&s.receiver_db).await, (0, 0));
+    let resumed = Script::new(peer(&s.issuer), [Ok(reply)]);
+    assert_eq!(
+        plane.poll_cycle(&resumed).await.unwrap(),
+        PullResult::Written(WriteOutcome::Accepted)
+    );
+}
+
+#[tokio::test]
+async fn pull_commit_lento_tem_efeito_desconhecido_e_notifica_apos_confirmacao() {
+    let Some(a) = database("commit_deadline_a").await else {
+        return;
+    };
+    let b = database("commit_deadline_b").await.unwrap();
+    let s = Scenario::new(a, b, "https://127.0.0.1").await;
+    let mut cfg = s.receiver_settings.clone();
+    cfg.pull_timeout = Duration::from_millis(500);
+    let plane = plane(s.receiver_portable.clone(), s.receiver.clone(), cfg).await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION delay_pull_commit() RETURNS trigger LANGUAGE plpgsql AS
+        'BEGIN PERFORM pg_advisory_xact_lock(81421); RETURN NEW; END';
+        CREATE CONSTRAINT TRIGGER delay_pull_commit AFTER INSERT ON federation_config_audit
+        DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION delay_pull_commit();",
+    )
+    .execute(&s.receiver_db)
+    .await
+    .unwrap();
+    let mut barrier = s.receiver_db.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(81421)")
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    let (frame, hash) = signed(&s.voters, 1, 1, 1);
+    let client = Script::new(peer(&s.issuer), [Ok(data_reply(frame, &hash))]);
+    let mut changes = plane.changes();
+    let result = tokio::time::timeout(Duration::from_secs(2), plane.poll_cycle(&client)).await;
+    assert_eq!(snapshot(&s.receiver_db).await, (0, 0));
+    assert!(!changes.has_changed().unwrap());
+    barrier.rollback().await.unwrap();
+    assert_eq!(
+        result.expect("COMMIT deve respeitar o prazo"),
+        Err(PullError::Storage {
+            effect_unknown: true
+        })
+    );
+    tokio::time::timeout(Duration::from_secs(2), changes.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot(&s.receiver_db).await, (1, 1));
+    assert_eq!(
+        client.seen.lock().unwrap().len(),
+        1,
+        "efeito desconhecido não entra em retry"
+    );
+}
