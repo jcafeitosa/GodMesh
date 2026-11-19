@@ -197,7 +197,7 @@ impl TaskGuard {
         target: DialTarget,
         connecting: Connecting,
     ) -> Result<PromotedDial, DialError> {
-        let result = self.connect(shared, target, connecting).await;
+        let result = self.connect(&shared, &target, connecting).await;
         let mut phase = self.0.lock();
         match &*phase {
             Phase::Cancelled => Err(DialError::Cancelled),
@@ -205,6 +205,9 @@ impl TaskGuard {
             Phase::Pending(connection) => {
                 if let Some(connection) = connection {
                     cancel_connection(connection);
+                }
+                if matches!(&result, Err(DialError::Link(LinkError::Rejected { .. }))) {
+                    shared.links.mark_rejected(&target.node_id);
                 }
                 *phase = Phase::Finished;
                 Err(result.err().unwrap_or(DialError::Finished))
@@ -215,8 +218,8 @@ impl TaskGuard {
 
     async fn connect(
         &self,
-        shared: NodeShared,
-        target: DialTarget,
+        shared: &NodeShared,
+        target: &DialTarget,
         connecting: Connecting,
     ) -> Result<(), DialError> {
         let connection = tokio::select! {
@@ -231,7 +234,7 @@ impl TaskGuard {
             close_with_rejection(&connection, Rejection::KeyMismatch);
             return Err(DialError::PinMismatch);
         }
-        establish_pinned(&shared, &connection, &self.0)
+        establish_pinned(shared, &connection, &self.0)
             .await
             .map(|_| ())
             .map_err(|error| DialError::Link(super::handshake_link_error(error)))

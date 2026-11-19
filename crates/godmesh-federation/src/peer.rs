@@ -330,6 +330,15 @@ impl PeerRegistry {
         self.read().records.get(node_id).cloned()
     }
 
+    pub(crate) fn with_record<T>(
+        &self,
+        node_id: &str,
+        read: impl FnOnce(Option<&PeerRecord>) -> T,
+    ) -> T {
+        let guard = self.read();
+        read(guard.records.get(node_id))
+    }
+
     /// Todos os pares conhecidos, ordenados por `node_id`.
     #[must_use]
     pub fn peers(&self) -> Vec<PeerRecord> {

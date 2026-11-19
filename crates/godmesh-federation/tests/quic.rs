@@ -1858,6 +1858,39 @@ mod pinned_dial {
         }
     }
 
+    struct DeadlineObserver {
+        authority: Arc<PromotionGate>,
+        calls: AtomicUsize,
+    }
+
+    impl LinkAuthorizer for DeadlineObserver {
+        fn authorize<'a>(
+            &'a self,
+            local: &'a LinkIdentity,
+            remote: &'a LinkIdentity,
+        ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>>
+        {
+            self.authority.authorize(local, remote)
+        }
+
+        fn authorize_until<'a>(
+            &'a self,
+            local: &'a LinkIdentity,
+            remote: &'a LinkIdentity,
+            deadline: tokio::time::Instant,
+        ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>>
+        {
+            let remaining = deadline.duration_since(tokio::time::Instant::now());
+            assert!(remaining > Duration::from_secs(4) && remaining <= Duration::from_secs(5));
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.authority.authorize(local, remote)
+        }
+
+        fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+            self.authority.subscribe()
+        }
+    }
+
     #[tokio::test]
     async fn pin_errado_fecha_antes_do_manifesto() {
         let caller = node(config());
@@ -1893,6 +1926,33 @@ mod pinned_dial {
         for peer in [&caller, &expected, &other] {
             peer.node.shutdown();
         }
+    }
+
+    #[tokio::test]
+    async fn recusa_explicita_preserva_evidencia_do_par_pinado() {
+        let caller = node(config());
+        let other = node(config());
+        caller
+            .registry
+            .insert(other.record_for(TrustState::Authorized));
+        other
+            .registry
+            .insert(caller.record_for(TrustState::Pending));
+        let mut attempt = caller
+            .node
+            .start_dial(target(&other, other.addr()))
+            .unwrap();
+        assert!(matches!(
+            attempt.wait().await,
+            Err(DialError::Link(godmesh_federation::node::LinkError::Rejected { code, .. }))
+                if code == Rejection::NotAuthorized.code()
+        ));
+        assert_eq!(
+            caller.links().snapshot_or_never_seen(&other.id).state,
+            LinkState::Rejected
+        );
+        caller.node.shutdown();
+        other.node.shutdown();
     }
 
     #[tokio::test]
@@ -1984,9 +2044,13 @@ mod pinned_dial {
                 reject: false,
                 authority: TestAuthorizer::new(Ok(None)),
             });
+            let observer = Arc::new(DeadlineObserver {
+                authority: gate.clone(),
+                calls: AtomicUsize::new(0),
+            });
             let (tx, mut callbacks) = tokio::sync::mpsc::unbounded_channel();
             let caller =
-                bind_session_fixture(&raw, gate.clone(), config(), Arc::new(SessionSink(tx)));
+                bind_session_fixture(&raw, observer.clone(), config(), Arc::new(SessionSink(tx)));
             caller
                 .registry()
                 .insert(remote.record_for(TrustState::Authorized));
@@ -1998,6 +2062,7 @@ mod pinned_dial {
             tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
                 .await
                 .unwrap();
+            assert_eq!(observer.calls.load(Ordering::Relaxed), 2);
             if by_drop {
                 drop(attempt);
             } else {
@@ -2053,6 +2118,152 @@ mod pinned_dial {
         current.invalidate();
         wait_for_state(&caller.links(), &other.id, LinkState::Unknown).await;
         caller.node.shutdown();
+        other.node.shutdown();
+    }
+    #[tokio::test]
+    async fn permit_que_fica_pronto_apos_prazo_nao_promove() {
+        struct LatePermit(tokio::sync::watch::Sender<u64>);
+        impl LinkAuthorizer for LatePermit {
+            fn authorize<'a>(
+                &'a self,
+                _: &'a LinkIdentity,
+                _: &'a LinkIdentity,
+            ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>>
+            {
+                Box::pin(async { Ok(LinkPermit::new(Box::new(()), None)) })
+            }
+
+            fn authorize_until<'a>(
+                &'a self,
+                local: &'a LinkIdentity,
+                remote: &'a LinkIdentity,
+                deadline: tokio::time::Instant,
+            ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>>
+            {
+                Box::pin(async move {
+                    // Simula uma consulta que devolve o resultado no primeiro poll
+                    // após a pausa do executor, antes de o timer poder ser observado.
+                    std::thread::sleep(
+                        deadline.saturating_duration_since(tokio::time::Instant::now())
+                            + Duration::from_millis(10),
+                    );
+                    self.authorize(local, remote).await
+                })
+            }
+
+            fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+                self.0.subscribe()
+            }
+        }
+
+        let remote = node(config());
+        let raw = RawPeer::new(config());
+        let (tx, mut callbacks) = tokio::sync::mpsc::unbounded_channel();
+        let caller = bind_session_fixture(
+            &raw,
+            Arc::new(LatePermit(tokio::sync::watch::channel(0).0)),
+            config(),
+            Arc::new(SessionSink(tx)),
+        );
+        caller
+            .registry()
+            .insert(remote.record_for(TrustState::Authorized));
+        remote.registry.insert(PeerRecord::authorized_from_key(
+            &caller.identity().public_key_bytes(),
+            CLUSTER,
+        ));
+        let mut attempt = caller.start_dial(target(&remote, remote.addr())).unwrap();
+        assert!(matches!(
+            attempt.wait().await,
+            Err(DialError::Link(godmesh_federation::node::LinkError::Rejected { code, .. }))
+                if code == Rejection::NotAuthorized.code()
+        ));
+        assert!(callbacks.try_recv().is_err());
+        assert_ne!(
+            caller.links().snapshot_or_never_seen(&remote.id).state,
+            LinkState::Ready
+        );
+        caller.shutdown();
+        remote.node.shutdown();
+    }
+
+    #[tokio::test]
+    async fn promocao_operacional_e_recusa_preservam_sessao_substituta() {
+        let other = node(config());
+        let raw = RawPeer::new(config());
+        let (tx, mut callbacks) = tokio::sync::mpsc::unbounded_channel();
+        let caller = bind_session_fixture(
+            &raw,
+            TestAuthorizer::new(Ok(None)),
+            config(),
+            Arc::new(SessionSink(tx)),
+        );
+        caller
+            .registry()
+            .insert(other.record_for(TrustState::Authorized));
+        let caller_key = caller.identity().public_key_bytes();
+        other
+            .registry
+            .insert(PeerRecord::authorized_from_key(&caller_key, CLUSTER));
+        let mut first = caller.start_dial(target(&other, other.addr())).unwrap();
+        first.wait().await.unwrap();
+        let old_session = next_session(&mut callbacks).await;
+        let mut second = caller.start_dial(target(&other, other.addr())).unwrap();
+        let current = second.wait().await.unwrap();
+        let new_session = next_session(&mut callbacks).await;
+        assert_ne!(old_session.id(), new_session.id());
+
+        let refusing_registry = Arc::new(PeerRegistry::new());
+        refusing_registry.insert(
+            PeerRecord::authorized_from_key(&caller_key, CLUSTER)
+                .with_trust_state(TrustState::Pending),
+        );
+        let tls = transport::NodeTls::self_issued(other.node.identity()).unwrap();
+        let endpoint = transport::bind_server(
+            ([127, 0, 0, 1], 0).into(),
+            transport::server_config(Arc::clone(&refusing_registry), &tls).unwrap(),
+        )
+        .unwrap();
+        let refusing_addr = endpoint.local_addr().unwrap();
+        let peer_identity = NodeIdentity::generate_in_memory().unwrap();
+        let rejecting_peer = tokio::spawn(async move {
+            let connection = endpoint.accept().await.unwrap().await.unwrap();
+            let rejected =
+                handshake::accept(&connection, &peer_identity, &config(), &refusing_registry)
+                    .await
+                    .unwrap_err();
+            assert_eq!(rejected.rejection, Rejection::NotAuthorized);
+        });
+        let mut refused = caller.start_dial(target(&other, refusing_addr)).unwrap();
+        assert!(matches!(
+            refused.wait().await,
+            Err(DialError::Link(
+                godmesh_federation::node::LinkError::Rejected { .. }
+            ))
+        ));
+        assert_eq!(
+            caller.links().snapshot_or_never_seen(&other.id).state,
+            LinkState::Ready
+        );
+
+        rejecting_peer.await.unwrap();
+        let DialCancellation::AlreadyPromoted(old) = first.cancel() else {
+            panic!("promoção venceu")
+        };
+        old.invalidate();
+        tokio::time::timeout(Duration::from_secs(2), old_session.cancelled())
+            .await
+            .unwrap();
+        assert!(new_session.open_bi(attempt_deadline()).await.is_ok());
+        assert_eq!(
+            caller.links().snapshot_or_never_seen(&other.id).state,
+            LinkState::Ready
+        );
+        current.invalidate();
+        tokio::time::timeout(Duration::from_secs(2), new_session.cancelled())
+            .await
+            .unwrap();
+        caller.shutdown();
         other.node.shutdown();
     }
 }
