@@ -578,6 +578,11 @@ fn advice(e: &ApiError) -> (&'static str, bool, &'static str) {
             false,
             "o nó precisa completar ingresso e aprovação (POST /v1/federation/join-requests); revogado não volta: nova identidade, novo epoch",
         ),
+        ApiError::ConfigFenceBlocked(_) => (
+            "a configuração do cluster bloqueia a escrita federada",
+            true,
+            "verifique a configuração efetiva do nó e repita após a recuperação",
+        ),
         ApiError::EventScopeDenied(_) => (
             "fora do escopo concedido: origem diferente do assinante, tenant diferente do grant ou tupla (node, tenant, stream) sem linha em federation_peer_scope",
             false,
@@ -684,6 +689,7 @@ fn probes() -> Vec<ApiError> {
             ApiError::FederationInvariant("sonda".to_owned()),
             ApiError::EventSignatureInvalid("sonda".to_owned()),
             ApiError::EventNodeUnauthorized("sonda".to_owned()),
+            ApiError::ConfigFenceBlocked("sonda".to_owned()),
             ApiError::EventScopeDenied("sonda".to_owned()),
             ApiError::EventNotFresh("sonda".to_owned()),
             ApiError::EventEpochStale {
@@ -921,6 +927,11 @@ pub(crate) fn error_parts(e: &ApiError) -> (StatusCode, &'static str, String) {
         ApiError::EventNodeUnauthorized(detail) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             "event_node_unauthorized",
+            detail.clone(),
+        ),
+        ApiError::ConfigFenceBlocked(detail) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "config_fence_blocked",
             detail.clone(),
         ),
         ApiError::EventScopeDenied(detail) => (
