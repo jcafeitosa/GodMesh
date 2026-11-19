@@ -433,6 +433,11 @@ fn advice(e: &ApiError) -> (&'static str, bool, &'static str) {
             false,
             "registre a política para a jurisdição antes de reenviar; classes válidas em GET /v1/meta → capabilities.retention_classes",
         ),
+        ApiError::EventNamespaceReserved => (
+            "o namespace está reservado para replicação de metadados em todos os epochs",
+            false,
+            "use um namespace não reservado para escritas por esta rota",
+        ),
         ApiError::SequenceGap { .. } => (
             "a posição enviada salta a lacuna esperada da stream",
             true,
@@ -626,6 +631,7 @@ fn probes() -> Vec<ApiError> {
             ApiError::InvalidRequest("sonda do catálogo".to_owned()),
             ApiError::GrantDenied(GrantDecision::DenyNotEnumerated),
             ApiError::RetentionPolicyMissing,
+            ApiError::EventNamespaceReserved,
             ApiError::SequenceGap {
                 expected: 1,
                 got: 2,
@@ -778,6 +784,11 @@ pub(crate) fn error_parts(e: &ApiError) -> (StatusCode, &'static str, String) {
             StatusCode::CONFLICT,
             "retention_policy_missing",
             "classe de retenção sem política aplicável à jurisdição do tenant".to_owned(),
+        ),
+        ApiError::EventNamespaceReserved => (
+            StatusCode::CONFLICT,
+            "event_namespace_reserved",
+            "o namespace da posição está reservado para replicação de metadados".to_owned(),
         ),
         ApiError::SequenceGap { expected, got } => (
             StatusCode::CONFLICT,

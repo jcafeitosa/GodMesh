@@ -827,3 +827,63 @@ async fn m1bi_0011_inicializa_piso_por_aprovador_e_preserva_historico() {
     let same_floors: Vec<(String, i64)> = sqlx::query_as(floor).fetch_all(&pool).await.unwrap();
     assert_eq!(same_floors, floors);
 }
+
+#[tokio::test]
+async fn m4a1_aplica_0014_sem_converter_posicao_e_checkpoint_legados() {
+    let Some(base) = base_url() else {
+        eprintln!("SKIP: DATABASE_URL ausente");
+        return;
+    };
+    let _guard = sole_lock().await;
+    recreate_sa(&admin_pool(&base).await).await;
+    let pool = pool_for(&sa_url(&base)).await;
+    let dir = migrations_dir();
+    const REPLICA_MIGRATION: &str = "0014_federation_replication.sql";
+    let prior = std::env::temp_dir().join(format!("godmesh-m4a1-{}", std::process::id()));
+    std::fs::create_dir(&prior).unwrap();
+    for name in nomes_de_migracao(&dir) {
+        if name.as_str() < REPLICA_MIGRATION {
+            std::fs::copy(dir.join(&name), prior.join(&name)).unwrap();
+        }
+    }
+    migrate::migrate(&pool, &prior).await.unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO event_position
+            (origin_node, tenant_id, stream_id, partition, authority_epoch, seq,
+             retention_class, jurisdiction)
+         VALUES ('legacy-node', 'tenant', 'm4a.metadata.legado', 0, 7, 1, 'mensagem', 'BR');
+         INSERT INTO sync_inbox_state
+            (origin_node, tenant_id, stream_id, partition, authority_epoch, contiguous_prefix)
+         VALUES ('legacy-node', 'tenant', 'm4a.metadata.legado', 0, 7, 1);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let snapshot = "SELECT jsonb_build_array(
+        (SELECT to_jsonb(e) FROM event_position e WHERE origin_node = 'legacy-node'),
+        (SELECT to_jsonb(s) FROM sync_inbox_state s WHERE origin_node = 'legacy-node')
+    )::text";
+    let rows: String = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
+    let before = control_rows(&pool).await;
+    assert_eq!(before.len(), 13);
+
+    std::fs::copy(dir.join(REPLICA_MIGRATION), prior.join(REPLICA_MIGRATION)).unwrap();
+    let report = migrate::migrate(&pool, &prior).await.unwrap();
+    assert_eq!(report.applied, [REPLICA_MIGRATION]);
+    let after = control_rows(&pool).await;
+    assert_eq!(&after[..13], before.as_slice());
+    let rerun = migrate::migrate(&pool, &prior).await.unwrap();
+    assert!(rerun.applied.is_empty());
+    assert_eq!(control_rows(&pool).await, after);
+    let current: String = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
+    assert_eq!(current, rows);
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM federation_replica_namespace),
+                (SELECT count(*) FROM federation_replica_proof)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (0, 0));
+    std::fs::remove_dir_all(prior).unwrap();
+}

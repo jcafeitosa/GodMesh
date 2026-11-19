@@ -37,7 +37,8 @@ use sqlx::PgPool;
 use crate::api::ApiError;
 use crate::auth::VerifiedGrant;
 use crate::events::{
-    begin_event_write, contiguous_prefix, resolve_jurisdiction, resolve_retention_class,
+    begin_event_write, contiguous_prefix, reject_reserved_namespace, resolve_jurisdiction,
+    resolve_retention_class,
 };
 
 /// Teto de posições por lote. Limite desta fatia, declarado e recusado — nunca
@@ -129,7 +130,8 @@ pub struct InboxGap {
 /// para lote vazio, acima de [`MAX_INBOX_BATCH`] ou posição inválida;
 /// `CursorIncomparable` para posição de outra partição/epoch/stream/origem que
 /// não o namespace do lote; `RetentionScopeUnresolved`/`RetentionPolicyMissing`
-/// sem jurisdição ou política; `InboxGap` (409) quando o lote salta posição — o
+/// sem jurisdição ou política; `EventNamespaceReserved` (409) para namespace
+/// reservado à réplica; `InboxGap` (409) quando o lote salta posição — o
 /// prefixo aceito até a lacuna é gravado e reportado; `Storage` para falha de
 /// banco.
 pub async fn receive_batch(
@@ -195,6 +197,14 @@ pub async fn receive_batch(
         &anchor.stream_id,
         partition,
         None,
+    )
+    .await?;
+    reject_reserved_namespace(
+        &mut tx,
+        &anchor.origin_node,
+        tenant_id,
+        &anchor.stream_id,
+        partition,
     )
     .await?;
     let jurisdiction = resolve_jurisdiction(&mut tx, tenant_id).await?;

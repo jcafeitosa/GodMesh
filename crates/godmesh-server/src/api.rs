@@ -69,6 +69,8 @@ pub enum ApiError {
     GrantDenied(GrantDecision),
     /// Classe sem política efetiva para a jurisdição do tenant (ADR-062).
     RetentionPolicyMissing,
+    /// O namespace pertence ao escritor de réplicas (M4-A1, 409).
+    EventNamespaceReserved,
     /// Salto em relação ao prefixo contíguo da stream (ADR-057): nenhuma lacuna
     /// é saltada; o chamador precisa enviar a posição esperada.
     SequenceGap {

@@ -518,6 +518,29 @@ async fn catalogo_de_erros_cobre_todo_codigo_documentado() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reserva_de_replica_e_diagnosticada_nos_dois_escritores_legados() {
+    let addr = serve_sem_banco().await;
+    let metadata = meta(addr);
+    let spec = openapi(addr);
+    let code = "event_namespace_reserved";
+    let entry = metadata["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["error"] == code)
+        .expect("erro de reserva publicado");
+    assert_eq!(entry["http_status"], 409);
+    assert_eq!(entry["retryable"], false);
+    for path in ["/v1/events", "/v1/sync/inbox"] {
+        let conflict = &spec["paths"][path]["post"]["responses"]["409"];
+        assert!(
+            conflict["description"].as_str().unwrap().contains(code),
+            "409 de {path} deve listar {code}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn corpo_de_erro_real_e_acionavel_e_estavel() {
     let addr = serve_sem_banco().await;

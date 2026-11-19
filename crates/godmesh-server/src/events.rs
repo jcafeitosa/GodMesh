@@ -162,8 +162,7 @@ pub struct EventPage {
 /// Verifica o envelope assinado **antes de qualquer efeito de escrita** e
 /// persiste a posição, ou reconhece a repetição da mesma posição.
 ///
-/// Ordem das verificações, deliberada — cada recusa devolve 422 com código
-/// próprio, **sem INSERT e sem linha nova em `event_position`**:
+/// Ordem das verificações antes de inserir qualquer linha em `event_position`:
 ///
 /// 1. sujeito verificado e predicado do grant;
 /// 2. formato do envelope e **origem = assinante** (nó comprometido não pode
@@ -177,9 +176,9 @@ pub struct EventPage {
 ///    `(node_id, tenant_id, stream_id)` presente em `federation_peer_scope`
 ///    (ausência de linha é negativa: falha fechada);
 /// 7. `issued_at` dentro da janela de frescor;
-/// 8. na transação da escrita: epoch não regressivo por namespace → jurisdição
-///    → política de retenção → repetição → prefixo contíguo. A política vem
-///    antes da repetição para que uma classe removida falhe fechado em replay.
+/// 8. na transação da escrita: reserva do namespace → epoch não regressivo
+///    → jurisdição → política de retenção → repetição → prefixo contíguo.
+///    A política antecede a repetição para verificar a classe vigente no replay.
 ///
 /// O `now` é injetado (o caso de uso não lê o relógio sozinho) para que a
 /// janela de frescor seja testável sem esperar tempo de parede.
@@ -191,6 +190,7 @@ pub struct EventPage {
 /// `EventNodeUnauthorized`, `EventScopeDenied`, `EventNotFresh` e
 /// `EventEpochStale` para as negações desta fatia; `RetentionScopeUnresolved`
 /// sem jurisdição declarada; `RetentionPolicyMissing` sem classe/cópia primária;
+/// `EventNamespaceReserved` para namespace reservado à réplica;
 /// `SequenceGap` para salto no prefixo contíguo; `Storage` para falha de banco.
 pub async fn create_event(
     pool: &PgPool,
@@ -378,6 +378,14 @@ pub async fn create_event_with_fence(
             other => other.to_string(),
         }));
     }
+    reject_reserved_namespace(
+        &mut tx,
+        &event.position.origin_node,
+        tenant_id,
+        &event.position.stream_id,
+        partition,
+    )
+    .await?;
 
     // Epoch não regressivo por namespace `(origem, tenant, stream, partição)` —
     // a mesma dimensão do prefixo contíguo. Depois que a stream reconheceu a
@@ -763,6 +771,21 @@ pub(crate) async fn begin_event_write(
             .await
             .map_err(portable_event_error)?;
     }
+    lock_event_namespace(&mut tx, origin_node, tenant_id, stream_id, partition)
+        .await
+        .map_err(ApiError::Storage)?;
+    Ok(tx)
+}
+
+/// Ordena ingest, Inbox e réplica sob a mesma chave, inclusive entre epochs.
+/// Usar a conexão de uma transação READ COMMITTED.
+pub(crate) async fn lock_event_namespace(
+    connection: &mut sqlx::PgConnection,
+    origin_node: &str,
+    tenant_id: &str,
+    stream_id: &str,
+    partition: i32,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended( \
             jsonb_build_array('godmesh.event_position'::text, $1::text, $2::text, \
@@ -772,10 +795,36 @@ pub(crate) async fn begin_event_write(
     .bind(tenant_id)
     .bind(stream_id)
     .bind(partition)
-    .execute(&mut *tx)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Consultar depois de adquirir o lock do namespace, com um snapshot novo.
+pub(crate) async fn reject_reserved_namespace(
+    connection: &mut sqlx::PgConnection,
+    origin_node: &str,
+    tenant_id: &str,
+    stream_id: &str,
+    partition: i32,
+) -> Result<(), ApiError> {
+    let reserved: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM federation_replica_namespace
+             WHERE origin_node = $1 AND tenant_id = $2 AND stream_id = $3 AND partition = $4
+         )",
+    )
+    .bind(origin_node)
+    .bind(tenant_id)
+    .bind(stream_id)
+    .bind(partition)
+    .fetch_one(connection)
     .await
     .map_err(ApiError::Storage)?;
-    Ok(tx)
+    if reserved {
+        return Err(ApiError::EventNamespaceReserved);
+    }
+    Ok(())
 }
 
 fn portable_event_error(error: PortableJoinError) -> ApiError {

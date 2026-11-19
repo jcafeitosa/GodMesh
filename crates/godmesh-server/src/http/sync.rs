@@ -28,6 +28,7 @@ pub(super) fn register(reg: &mut Registry) {
                 "retention_scope_unresolved",
                 "retention_policy_missing",
                 "sequence_gap",
+                "event_namespace_reserved",
                 "storage_unavailable",
             ],
             params: &[],

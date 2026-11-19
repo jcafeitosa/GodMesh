@@ -134,6 +134,130 @@ async fn rows(pool: &PgPool, stream: &str) -> i64 {
     .expect("contagem")
 }
 
+async fn insert_reservation(connection: &mut sqlx::PgConnection, origin: &str, stream: &str) {
+    sqlx::query(
+        "INSERT INTO federation_replica_namespace (
+             origin_node, tenant_id, stream_id, partition, authority_epoch,
+             local_node, profile, profile_version, retention_class, class_version,
+             jurisdiction, policy_id, policy_version
+         ) VALUES ($1, $2, $3, 0, 7, $1, 'metadata', 1,
+                   'm4a_metadados_posicao', 1, 'BR', 'fixture', 1)",
+    )
+    .bind(origin)
+    .bind(TENANT)
+    .bind(stream)
+    .execute(connection)
+    .await
+    .expect("reserva sintética");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escritores_legados_recusam_namespace_reservado_em_qualquer_epoch() {
+    let Some(pool) = pool().await else { return };
+    declare_tenant(&pool, TENANT).await;
+    let addr = serve(pool.clone()).await;
+    let mut outcomes = Vec::new();
+    for epoch in [7, 9] {
+        for inbox in [false, true] {
+            let stream = unique("m4a.metadata.legado");
+            let node = no_autorizado(&pool, &stream).await;
+            insert_reservation(&mut pool.acquire().await.unwrap(), node.node_id(), &stream).await;
+            let (route, body) = if inbox {
+                let positions: Vec<_> = [1, 2]
+                    .iter()
+                    .map(|seq| {
+                        serde_json::json!({
+                            "origin_node": node.node_id(), "stream_id": stream,
+                            "partition": 0, "authority_epoch": epoch, "seq": seq,
+                        })
+                    })
+                    .collect();
+                (
+                    "/v1/sync/inbox",
+                    serde_json::json!({"retention_class": CLASS, "positions": positions}).to_string(),
+                )
+            } else {
+                (
+                    "/v1/events",
+                    common::envelope_assinado(&node, TENANT, &stream, 0, epoch, 1, CLASS),
+                )
+            };
+            let response = tokio::task::spawn_blocking(move || {
+                common::call(addr, "POST", route, Some(TOKEN), Some(&body))
+            })
+            .await
+            .unwrap();
+            let checkpoints: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM sync_inbox_state WHERE tenant_id = $1 AND stream_id = $2",
+            )
+            .bind(TENANT)
+            .bind(&stream)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let error = response.json();
+            outcomes.push((
+                route,
+                epoch,
+                response.status,
+                error["error"].clone(),
+                rows(&pool, &stream).await,
+                checkpoints,
+            ));
+        }
+    }
+    assert!(
+        outcomes.iter().all(|(_, _, status, code, positions, checkpoints)| {
+            *status == 409
+                && *code == "event_namespace_reserved"
+                && *positions == 0
+                && *checkpoints == 0
+        }),
+        "recusa sem posição nem checkpoint em cada rota e epoch: {outcomes:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ingest_observa_reserva_confirmada_enquanto_aguarda_o_namespace() {
+    let Some(pool) = pool().await else { return };
+    let url = common::database_url().expect("URL do banco de teste");
+    let writer_pool = common::pool_para(&url, 1).await;
+    let writer: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&writer_pool)
+        .await
+        .unwrap();
+    let addr = serve(writer_pool).await;
+    declare_tenant(&pool, TENANT).await;
+    let stream = unique("m4a.metadata.reserva-primeiro");
+    let node = no_autorizado(&pool, &stream).await;
+    let mut reservation = pool.begin().await.unwrap();
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *reservation)
+        .await
+        .unwrap();
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended(
+            jsonb_build_array('godmesh.event_position'::text, $1::text, $2::text,
+                              $3::text, 0::int)::text, 0))",
+    )
+    .bind(node.node_id())
+    .bind(TENANT)
+    .bind(&stream)
+    .execute(&mut *reservation)
+    .await
+    .unwrap();
+    insert_reservation(&mut reservation, node.node_id(), &stream).await;
+    let body = common::envelope_assinado(&node, TENANT, &stream, 0, 9, 1, CLASS);
+    let pending = tokio::task::spawn_blocking(move || post_event(addr, &body));
+    aguardar_bloqueio(&pool, writer, holder, "advisory").await;
+    reservation.commit().await.unwrap();
+
+    let (status, error) = pending.await.unwrap();
+    assert_eq!(status, 409, "{error}");
+    assert_eq!(error["error"], "event_namespace_reserved");
+    assert_eq!(rows(&pool, &stream).await, 0);
+}
+
 /// 1 + replay — caminho feliz idempotente, com contagem antes/depois.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn evento_assinado_por_no_autorizado_e_201_e_replay_e_200_sem_duplicar() {
