@@ -34,7 +34,7 @@ Identidade persistente, IPv6-first/IPv4, libp2p QUIC/TCP, bootstrap autorizado, 
 5. **Borda M5.** Especificar e verificar relay autorizado, alternativa de conectividade e comportamento de nós que perdem o caminho direto.
 6. **Aceite ponta a ponta.** Executar em pelo menos três hosts Linux independentes. Registrar identidade, versão, topologia, autorização, evidências do protocolo e resultados de queda, revogação, retomada e bloqueio de cópias fora do escopo.
 
-A M4-A2 demonstrou réplica direta de metadados sintéticos em três processos locais, com retomada após partição e perda de ACK, revogação por destino e suspensão persistente por histórico indisponível. Snapshots, relay e o aceite em hosts independentes seguem pendentes. [Evidência M4-A2](../09-equipe/evidencias/2026-11-18-m4-a2-replica-quic.md#aceite-operacional-em-três-instâncias)
+A M4-A2 demonstrou réplica direta de metadados sintéticos em três processos locais, com retomada após partição e perda de ACK, revogação por destino e suspensão persistente por histórico indisponível. A M4-B2-B demonstrou snapshot assinado por QUIC e reconciliação após perda de ACK e efeito incerto em três processos locais, em IPv4 e IPv6. Restore, relay e o aceite em hosts independentes seguem pendentes. [Evidência M4-A2](../09-equipe/evidencias/2026-11-18-m4-a2-replica-quic.md#aceite-operacional-em-três-instâncias) · [Evidência M4-B2-B](../09-equipe/evidencias/2026-11-18-m4-b2-b-transporte-snapshot.md#aceite-operacional)
 
 ## Programa D — Dados, sincronização e localização
 PostgreSQL/PostGIS, sharding/autoridade por tenant, outbox/inbox, snapshots assinados, histórico, observações, dispositivos, retenção e consentimento.
