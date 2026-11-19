@@ -46,6 +46,7 @@ pub mod m4a_wire;
 pub mod manifest;
 pub mod node;
 pub mod peer;
+pub mod snapshot;
 pub mod transport;
 
 pub use approval::{ApprovalCertificate, ApprovalError, DecisionAction};
