@@ -241,16 +241,24 @@ impl TaskGuard {
         connecting: Connecting,
     ) -> Result<PromotedDial, DialError> {
         let result = self.connect(&shared, &target, connecting).await;
+        self.complete(result, || shared.links.mark_rejected(&target.node_id))
+    }
+
+    fn complete(
+        &self,
+        result: Result<(), DialError>,
+        mark_rejected: impl FnOnce(),
+    ) -> Result<PromotedDial, DialError> {
         let mut phase = self.0.lock();
         match &*phase {
-            Phase::Cancelled => Err(DialError::Cancelled),
+            Phase::Cancelled => Err(result.err().unwrap_or(DialError::Cancelled)),
             Phase::Promoted(promoted) => Ok(promoted.clone()),
             Phase::Pending(connection) => {
                 if let Some(connection) = connection {
                     cancel_connection(connection);
                 }
                 if matches!(&result, Err(DialError::Link(LinkError::Rejected { .. }))) {
-                    shared.links.mark_rejected(&target.node_id);
+                    mark_rejected();
                 }
                 *phase = Phase::Finished;
                 Err(result.err().unwrap_or(DialError::Finished))
@@ -283,7 +291,17 @@ impl TaskGuard {
         establish_pinned(shared, &connection, &self.0)
             .await
             .map(|_| ())
-            .map_err(|error| DialError::Link(super::handshake_link_error(error)))
+            .map_err(|error| {
+                // O fechamento da conexão anexada por cancel() interrompe o
+                // handshake de aplicação. Classifique aqui, antes de recolher.
+                if error.rejection == Rejection::Transport
+                    && matches!(*self.0.lock(), Phase::Cancelled)
+                {
+                    DialError::Cancelled
+                } else {
+                    DialError::Link(super::handshake_link_error(error))
+                }
+            })
     }
 }
 
@@ -309,5 +327,68 @@ pub(super) fn validate_target(target: &DialTarget) -> Result<(), DialError> {
 fn cancel_connection(connection: &Connection) {
     if connection.close_reason().is_none() {
         connection.close(0u32.into(), b"discagem cancelada");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_failure_survives_cancellation_before_reaping() {
+        for (case, error) in [
+            DialError::PinMismatch,
+            DialError::Link(LinkError::Connect("TLS".into())),
+            DialError::Link(LinkError::Rejected {
+                code: 7,
+                reason: "authority",
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let state = Arc::new(AttemptState {
+                phase: Mutex::new(Phase::Pending(None)),
+                cancelled: Notify::new(),
+                cancelled_while_connecting: AtomicBool::new(false),
+            });
+            let ready = Arc::new(tokio::sync::Barrier::new(2));
+            let collect = Arc::new(tokio::sync::Barrier::new(2));
+            let task = {
+                let guard = TaskGuard(Arc::clone(&state));
+                let ready = Arc::clone(&ready);
+                let collect = Arc::clone(&collect);
+                tokio::spawn(async move {
+                    let result = Err(error);
+                    ready.wait().await;
+                    collect.wait().await;
+                    guard.complete(result, || panic!("cancelamento não atualiza o enlace"))
+                })
+            };
+            let mut attempt = DialAttempt {
+                binding: (
+                    Arc::new(()),
+                    DialTarget {
+                        node_id: "test".into(),
+                        public_key: [0; 32],
+                        addr: "127.0.0.1:1".parse().unwrap(),
+                    },
+                ),
+                state,
+                task: Some(task),
+            };
+            ready.wait().await;
+            assert!(matches!(attempt.cancel(), DialCancellation::Cancelled));
+            collect.wait().await;
+            let Err(FallbackError::DirectFailed(actual)) = attempt.reap_for_fallback().await else {
+                panic!("resultado concluído perdido no recolhimento");
+            };
+            assert!(matches!(
+                (case, actual),
+                (0, DialError::PinMismatch)
+                    | (1, DialError::Link(LinkError::Connect(_)))
+                    | (2, DialError::Link(LinkError::Rejected { code: 7, .. }))
+            ));
+        }
     }
 }
