@@ -46,6 +46,7 @@ pub mod m4a_wire;
 pub mod manifest;
 pub mod node;
 pub mod peer;
+pub mod relay_fallback;
 pub mod relay_wire;
 pub mod restore_evidence;
 pub mod snapshot;

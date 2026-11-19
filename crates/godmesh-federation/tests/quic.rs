@@ -2267,3 +2267,258 @@ mod pinned_dial {
         other.node.shutdown();
     }
 }
+
+mod relay_fallback {
+    use super::*;
+    use godmesh_federation::{
+        node::DialTarget,
+        relay_fallback::{DirectPathController, FallbackError},
+    };
+    use std::{num::NonZeroU64, time::Instant};
+    use tokio::net::UdpSocket;
+
+    fn generation(n: u64) -> Option<NonZeroU64> {
+        NonZeroU64::new(n)
+    }
+
+    fn target(peer: &Node, addr: SocketAddr) -> DialTarget {
+        DialTarget {
+            node_id: peer.id.clone(),
+            public_key: peer.key,
+            addr,
+        }
+    }
+
+    async fn wait_for_direct_packet(silent: &UdpSocket) {
+        let mut bytes = [0; 1500];
+        tokio::time::timeout(Duration::from_secs(2), silent.recv_from(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn m5_consumes_only_after_reaping_and_with_exact_binding() {
+        let caller = node(config());
+        let peer = node(config());
+        let wrong = node(config());
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let direct = target(&peer, silent.local_addr().unwrap());
+        let controller = DirectPathController::new(direct.clone()).unwrap();
+        let different_controller = DirectPathController::new(direct.clone()).unwrap();
+        let mut attempt = caller.node.start_dial(direct.clone()).unwrap();
+        let now = Instant::now();
+        assert!(matches!(
+            controller.lock().confirm_unavailable(&attempt, now),
+            Err(FallbackError::PathNotEffective)
+        ));
+        let evidence = {
+            let mut path = controller.lock();
+            path.set_effective(generation(1)).unwrap();
+            path.confirm_unavailable(&attempt, now).unwrap()
+        };
+        let mut second = caller.node.start_dial(direct.clone()).unwrap();
+        wait_for_direct_packet(&silent).await;
+        let mut second_reaped = second.reap_for_fallback().await.unwrap();
+        assert!(matches!(
+            controller
+                .lock()
+                .reserve(&evidence, &mut second_reaped, &direct, now),
+            Err(FallbackError::BindingMismatch)
+        ));
+        wait_for_direct_packet(&silent).await;
+        let mut reaped = attempt.reap_for_fallback().await.unwrap();
+        different_controller
+            .lock()
+            .set_effective(generation(1))
+            .unwrap();
+        assert!(matches!(
+            different_controller
+                .lock()
+                .reserve(&evidence, &mut reaped, &direct, now),
+            Err(FallbackError::BindingMismatch)
+        ));
+        for changed in [
+            target(&wrong, direct.addr),
+            target(&peer, "127.0.0.2:10001".parse().unwrap()),
+            DialTarget {
+                public_key: wrong.key,
+                ..direct.clone()
+            },
+        ] {
+            assert!(matches!(
+                controller
+                    .lock()
+                    .reserve(&evidence, &mut reaped, &changed, now),
+                Err(FallbackError::BindingMismatch)
+            ));
+        }
+        let mapped = DialTarget {
+            addr: format!("[::ffff:127.0.0.1]:{}", direct.addr.port())
+                .parse()
+                .unwrap(),
+            ..direct.clone()
+        };
+        let shim = "127.0.0.1:10000".parse().unwrap();
+        let reservation = controller
+            .lock()
+            .reserve(&evidence, &mut reaped, &mapped, now)
+            .unwrap();
+        assert_eq!(reservation.into_target(shim), target(&peer, shim));
+        assert!(matches!(
+            controller
+                .lock()
+                .reserve(&evidence, &mut reaped, &direct, now),
+            Err(FallbackError::AlreadyReserved)
+        ));
+        caller.node.shutdown();
+        peer.node.shutdown();
+        wrong.node.shutdown();
+    }
+
+    #[tokio::test]
+    async fn m5_ttl_and_generation_checked_when_reserving() {
+        let caller = node(config());
+        let peer = node(config());
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let direct = target(&peer, silent.local_addr().unwrap());
+        let controller = DirectPathController::new(direct.clone()).unwrap();
+        let mut attempt = caller.node.start_dial(direct.clone()).unwrap();
+        wait_for_direct_packet(&silent).await;
+        let now = Instant::now();
+        let evidence = {
+            let mut path = controller.lock();
+            path.set_effective(generation(1)).unwrap();
+            path.confirm_unavailable(&attempt, now).unwrap()
+        };
+        let mut reaped = attempt.reap_for_fallback().await.unwrap();
+        let mut path = controller.lock();
+        for outside in [now - Duration::from_nanos(1), now + Duration::from_secs(2)] {
+            assert!(matches!(
+                path.reserve(&evidence, &mut reaped, &direct, outside),
+                Err(FallbackError::OutsideWindow)
+            ));
+        }
+        path.set_effective(None).unwrap();
+        assert!(path.set_effective(generation(1)).is_err());
+        path.set_effective(generation(2)).unwrap();
+        assert!(matches!(
+            path.reserve(&evidence, &mut reaped, &direct, now),
+            Err(FallbackError::GenerationChanged)
+        ));
+        caller.node.shutdown();
+        peer.node.shutdown();
+    }
+
+    #[tokio::test]
+    async fn m5_direct_promotion_wins_before_cancel() {
+        let (caller, peer) = pair().await;
+        let direct = target(&peer, peer.addr());
+        let controller = DirectPathController::new(direct.clone()).unwrap();
+        let mut attempt = caller.node.start_dial(direct).unwrap();
+        {
+            let mut guard = controller.lock();
+            guard.set_effective(generation(1)).unwrap();
+            guard.confirm_unavailable(&attempt, Instant::now()).unwrap();
+        }
+        wait_for_state(&caller.links(), &peer.id, LinkState::Ready).await;
+        assert!(matches!(
+            attempt.reap_for_fallback().await,
+            Err(FallbackError::DirectPromoted)
+        ));
+        assert_eq!(
+            caller.links().snapshot_or_never_seen(&peer.id).state,
+            LinkState::Ready
+        );
+        caller.node.shutdown();
+        peer.node.shutdown();
+    }
+    #[tokio::test]
+    async fn m5_refusal_and_quinn_failure_do_not_become_connectivity_evidence() {
+        use godmesh_federation::node::{DialError, LinkError};
+
+        let caller = node(config());
+        let peer = node(config());
+        caller
+            .registry
+            .insert(peer.record_for(TrustState::Authorized));
+        peer.registry.insert(caller.record_for(TrustState::Pending));
+        let direct = target(&peer, peer.addr());
+        let controller = DirectPathController::new(direct.clone()).unwrap();
+        let mut attempt = caller.node.start_dial(direct).unwrap();
+        {
+            let mut guard = controller.lock();
+            guard.set_effective(generation(1)).unwrap();
+            guard.confirm_unavailable(&attempt, Instant::now()).unwrap();
+        }
+        wait_for_state(&caller.links(), &peer.id, LinkState::Rejected).await;
+        assert!(matches!(
+            attempt.reap_for_fallback().await,
+            Err(FallbackError::DirectFailed(DialError::Link(
+                LinkError::Rejected { .. }
+            )))
+        ));
+
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let direct = target(&peer, silent.local_addr().unwrap());
+        let controller = DirectPathController::new(direct.clone()).unwrap();
+        let mut attempt = caller.node.start_dial(direct).unwrap();
+        wait_for_direct_packet(&silent).await;
+        {
+            let mut guard = controller.lock();
+            guard.set_effective(generation(1)).unwrap();
+            guard.confirm_unavailable(&attempt, Instant::now()).unwrap();
+        }
+        caller.node.shutdown();
+        assert!(matches!(
+            attempt.reap_for_fallback().await,
+            Err(
+                FallbackError::DirectFailed(DialError::Link(LinkError::Connect(_)))
+                    | FallbackError::DirectNotCancelled
+            )
+        ));
+        peer.node.shutdown();
+    }
+
+    #[tokio::test]
+    async fn m5_cancel_after_tls_while_authority_is_pending_does_not_reserve() {
+        let remote = node(config());
+        let raw = RawPeer::new(config());
+        let gate = Arc::new(PromotionGate {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            reject: true,
+            authority: TestAuthorizer::new(Ok(None)),
+        });
+        let (caller, mut callbacks) = session_node(&raw, gate.clone());
+        caller
+            .registry()
+            .insert(remote.record_for(TrustState::Authorized));
+        remote.registry.insert(PeerRecord::authorized_from_key(
+            &caller.identity().public_key_bytes(),
+            CLUSTER,
+        ));
+        let direct = target(&remote, remote.addr());
+        let controller = DirectPathController::new(direct.clone()).unwrap();
+        let mut attempt = caller.start_dial(direct).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        {
+            let mut guard = controller.lock();
+            guard.set_effective(generation(1)).unwrap();
+            guard.confirm_unavailable(&attempt, Instant::now()).unwrap();
+        }
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), attempt.reap_for_fallback())
+                .await
+                .unwrap(),
+            Err(FallbackError::DirectNotCancelled)
+        ));
+        gate.release.notify_one();
+        assert!(callbacks.try_recv().is_err());
+        caller.shutdown();
+        remote.node.shutdown();
+    }
+}
