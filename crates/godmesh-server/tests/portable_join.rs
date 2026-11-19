@@ -35,20 +35,21 @@ async fn migracao_portatil_e_aditiva_e_idempotente() {
     let Some(pool) = empty_pool("migration").await else {
         return;
     };
+    const PORTABLE_MIGRATION: &str = "0012_federation_portable_join.sql";
+    let dir = common::migrations_dir();
     let old = std::env::temp_dir().join(format!("godmesh-m1cb-migrations-{}", std::process::id()));
     std::fs::create_dir(&old).unwrap();
-    for file in std::fs::read_dir(common::migrations_dir()).unwrap() {
+    for file in std::fs::read_dir(&dir).unwrap() {
         let file = file.unwrap();
         let name = file.file_name();
         if file.path().extension().is_some_and(|ext| ext == "sql")
-            && !name.to_string_lossy().starts_with("0012")
+            && name.to_string_lossy().as_ref() < PORTABLE_MIGRATION
         {
             std::fs::copy(file.path(), old.join(name)).unwrap();
         }
     }
     let legacy = godmesh_server::migrate::migrate(&pool, &old).await.unwrap();
     assert_eq!(legacy.applied.len(), 11);
-    std::fs::remove_dir_all(old).unwrap();
     let approved_legacy_id = format!("gmn_{}", "1".repeat(64));
     sqlx::query(
         "INSERT INTO federation_decision_epoch (approver_node_id, decision_epoch) VALUES ($1, 17)",
@@ -67,9 +68,8 @@ async fn migracao_portatil_e_aditiva_e_idempotente() {
         history.last().unwrap().0,
         "0011_federation_decision_epoch.sql"
     );
-    let upgrade = godmesh_server::migrate::migrate(&pool, &common::migrations_dir())
-        .await
-        .unwrap();
+    std::fs::copy(dir.join(PORTABLE_MIGRATION), old.join(PORTABLE_MIGRATION)).unwrap();
+    let upgrade = godmesh_server::migrate::migrate(&pool, &old).await.unwrap();
     assert_eq!(upgrade.applied, ["0012_federation_portable_join.sql"]);
     assert_eq!(upgrade.skipped_count(), 11);
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM federation_portable_roots")
@@ -77,9 +77,7 @@ async fn migracao_portatil_e_aditiva_e_idempotente() {
         .await
         .unwrap();
     assert_eq!(count, 0);
-    let repeat = godmesh_server::migrate::migrate(&pool, &common::migrations_dir())
-        .await
-        .unwrap();
+    let repeat = godmesh_server::migrate::migrate(&pool, &old).await.unwrap();
     assert!(repeat.applied.is_empty());
     assert_eq!(repeat.skipped_count(), 12);
     let after: Vec<(String, String, String)> = sqlx::query_as(
@@ -98,6 +96,7 @@ async fn migracao_portatil_e_aditiva_e_idempotente() {
     .await
     .unwrap();
     assert_eq!(legacy_floor, 17);
+    std::fs::remove_dir_all(old).unwrap();
 }
 
 use std::sync::Arc;
