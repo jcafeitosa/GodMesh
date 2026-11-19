@@ -325,6 +325,9 @@ async fn chave_do_manifesto_difere_do_certificado_tls() {
     assert_eq!(code, Rejection::KeyMismatch.code());
     assert_eq!(code, 0x474D_0004);
 
+    let observed = server.links().snapshot_or_never_seen(&raw.id);
+    assert_ne!(observed.state, LinkState::Ready);
+    assert_eq!(observed.last_seen_at, None);
     server.node.shutdown();
 }
 
@@ -1839,5 +1842,217 @@ mod snapshot_transport {
         second.finish_send().unwrap();
         assert_eq!(b_reply.read_to_end(10).await.unwrap(), b"\0\0\0\x06result");
         node.shutdown();
+    }
+}
+
+mod pinned_dial {
+    use super::*;
+    use godmesh_federation::node::{DialCancellation, DialError, DialTarget};
+    use tokio::net::UdpSocket;
+
+    fn target(peer: &Node, addr: SocketAddr) -> DialTarget {
+        DialTarget {
+            node_id: peer.id.clone(),
+            public_key: peer.key,
+            addr,
+        }
+    }
+
+    #[tokio::test]
+    async fn pin_errado_fecha_antes_do_manifesto() {
+        let caller = node(config());
+        let expected = node(config());
+        let other = node(config());
+        for peer in [&expected, &other] {
+            caller
+                .registry
+                .insert(peer.record_for(TrustState::Authorized));
+            peer.registry
+                .insert(caller.record_for(TrustState::Authorized));
+        }
+        let mut attempt = caller
+            .node
+            .start_dial(target(&expected, other.addr()))
+            .unwrap();
+        assert!(matches!(attempt.wait().await, Err(DialError::PinMismatch)));
+        assert_ne!(
+            caller.links().snapshot_or_never_seen(&other.id).state,
+            LinkState::Ready
+        );
+        assert_ne!(
+            other.links().snapshot_or_never_seen(&caller.id).state,
+            LinkState::Ready
+        );
+        assert_eq!(
+            other
+                .links()
+                .snapshot_or_never_seen(&caller.id)
+                .last_seen_at,
+            None
+        );
+        for peer in [&caller, &expected, &other] {
+            peer.node.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn discador_recusa_manifesto_do_par_quando_diverge_do_tls() {
+        let caller = node(config());
+        let pinned = node(config());
+        let another = node(config());
+        caller
+            .registry
+            .insert(pinned.record_for(TrustState::Authorized));
+        caller
+            .registry
+            .insert(another.record_for(TrustState::Authorized));
+        let registry = Arc::new(PeerRegistry::new());
+        registry.insert(caller.record_for(TrustState::Authorized));
+        let tls = transport::NodeTls::self_issued(pinned.node.identity()).unwrap();
+        let endpoint = transport::bind_server(
+            ([127, 0, 0, 1], 0).into(),
+            transport::server_config(registry, &tls).unwrap(),
+        )
+        .unwrap();
+        let addr = endpoint.local_addr().unwrap();
+        let reply = config()
+            .signed_manifest(another.node.identity())
+            .to_frame()
+            .unwrap();
+        let peer = tokio::spawn(async move {
+            let connection = endpoint.accept().await.unwrap().await.unwrap();
+            let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+            assert!(!recv.read_to_end(64 * 1024).await.unwrap().is_empty());
+            send.write_all(&reply).await.unwrap();
+            send.finish().unwrap();
+            assert_eq!(close_code(&connection).await, Rejection::KeyMismatch.code());
+        });
+        let mut attempt = caller.node.start_dial(target(&pinned, addr)).unwrap();
+        assert!(matches!(
+            attempt.wait().await,
+            Err(DialError::Link(godmesh_federation::node::LinkError::Rejected { code, .. }))
+                if code == Rejection::KeyMismatch.code()
+        ));
+        assert_eq!(
+            caller
+                .links()
+                .snapshot_or_never_seen(&pinned.id)
+                .last_seen_at,
+            None
+        );
+        peer.await.unwrap();
+        for node in [&caller, &pinned, &another] {
+            node.node.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancela_e_recolhe_discagem_em_tls_pendente() {
+        let caller = node(config());
+        let other = node(config());
+        caller
+            .registry
+            .insert(other.record_for(TrustState::Authorized));
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut attempt = caller
+            .node
+            .start_dial(target(&other, silent.local_addr().unwrap()))
+            .unwrap();
+        let mut packet = [0; 1500];
+        tokio::time::timeout(Duration::from_secs(2), silent.recv_from(&mut packet))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(attempt.cancel(), DialCancellation::Cancelled));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), attempt.wait()).await,
+            Ok(Err(DialError::Cancelled)),
+        ));
+        caller.node.shutdown();
+        other.node.shutdown();
+    }
+
+    #[tokio::test]
+    async fn cancelamento_ou_drop_apos_tls_impede_promocao() {
+        for by_drop in [false, true] {
+            let remote = node(config());
+            let raw = RawPeer::new(config());
+            let gate = Arc::new(PromotionGate {
+                calls: AtomicUsize::new(0),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                reject: false,
+                authority: TestAuthorizer::new(Ok(None)),
+            });
+            let (tx, mut callbacks) = tokio::sync::mpsc::unbounded_channel();
+            let caller =
+                bind_session_fixture(&raw, gate.clone(), config(), Arc::new(SessionSink(tx)));
+            caller
+                .registry()
+                .insert(remote.record_for(TrustState::Authorized));
+            remote.registry.insert(PeerRecord::authorized_from_key(
+                &caller.identity().public_key_bytes(),
+                CLUSTER,
+            ));
+            let mut attempt = caller.start_dial(target(&remote, remote.addr())).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+                .await
+                .unwrap();
+            if by_drop {
+                drop(attempt);
+            } else {
+                assert!(matches!(attempt.cancel(), DialCancellation::Cancelled));
+                assert!(matches!(attempt.wait().await, Err(DialError::Cancelled)));
+            }
+            gate.release.notify_one();
+            wait_for_state(
+                &remote.links(),
+                caller.identity().node_id(),
+                LinkState::Unknown,
+            )
+            .await;
+            assert!(callbacks.try_recv().is_err());
+            assert_ne!(
+                caller.links().snapshot_or_never_seen(&remote.id).state,
+                LinkState::Ready
+            );
+            caller.shutdown();
+            remote.node.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn promocao_vence_e_invalida_somente_a_conexao_original() {
+        let (caller, other) = pair().await;
+        let mut first = caller
+            .node
+            .start_dial(target(&other, other.addr()))
+            .unwrap();
+        assert_eq!(
+            first.wait().await.unwrap().snapshot().state,
+            LinkState::Ready
+        );
+        let mut second = caller
+            .node
+            .start_dial(target(&other, other.addr()))
+            .unwrap();
+        let current = second.wait().await.unwrap();
+        let DialCancellation::AlreadyPromoted(original) = first.cancel() else {
+            panic!("promoção deveria vencer");
+        };
+        original.invalidate();
+        drop(first);
+        assert_eq!(
+            caller.links().snapshot_or_never_seen(&other.id).state,
+            LinkState::Ready
+        );
+        assert_eq!(
+            other.links().snapshot_or_never_seen(&caller.id).state,
+            LinkState::Ready
+        );
+        current.invalidate();
+        wait_for_state(&caller.links(), &other.id, LinkState::Unknown).await;
+        caller.node.shutdown();
+        other.node.shutdown();
     }
 }

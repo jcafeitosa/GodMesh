@@ -98,6 +98,7 @@ struct Entry {
     /// Instante monotônico do último heartbeat — a única base para expirar.
     last_beat: Instant,
     validity: Option<LinkValidity>,
+    legacy_connection: Option<Connection>,
 }
 
 impl Entry {
@@ -105,6 +106,10 @@ impl Entry {
         self.validity
             .as_ref()
             .is_none_or(|validity| validity.is_current(now))
+            && self
+                .legacy_connection
+                .as_ref()
+                .is_none_or(|connection| connection.close_reason().is_none())
     }
 
     fn is_ready(&self, now: Instant, freshness: Duration) -> bool {
@@ -117,7 +122,13 @@ impl Entry {
     fn belongs_to(&self, connection: &Connection) -> bool {
         self.validity
             .as_ref()
-            .is_some_and(|validity| validity.connection.stable_id() == connection.stable_id())
+            .map(|validity| &validity.connection)
+            .or(self.legacy_connection.as_ref())
+            .is_some_and(|tracked| tracked.stable_id() == connection.stable_id())
+    }
+
+    fn tracked(&self) -> bool {
+        self.validity.is_some() || self.legacy_connection.is_some()
     }
 }
 
@@ -172,7 +183,51 @@ impl PeerLinks {
             peer_version: Some(peer_version),
             last_beat: now,
             validity: None,
+            legacy_connection: None,
         }];
+    }
+
+    pub(crate) fn mark_legacy_connection_ready(
+        &self,
+        node_id: &str,
+        snapshot: &LinkSnapshot,
+        connection: &Connection,
+    ) -> bool {
+        let mut guard = self.lock();
+        if connection.close_reason().is_some() {
+            return false;
+        }
+        let entries = &mut guard.entry(node_id.to_owned()).or_default().connections;
+        entries.retain(Entry::tracked);
+        entries.push(Entry {
+            state: LinkState::Ready,
+            last_seen_at: snapshot.last_seen_at,
+            rtt_ms: snapshot.rtt_ms,
+            alpn: snapshot.negotiated_alpn.clone(),
+            peer_version: snapshot.peer_version.clone(),
+            last_beat: Instant::now(),
+            validity: None,
+            legacy_connection: Some(connection.clone()),
+        });
+        true
+    }
+
+    pub(crate) fn beat_legacy_connection(
+        &self,
+        node_id: &str,
+        connection: &Connection,
+        seen_at: i64,
+    ) {
+        let mut guard = self.lock();
+        if let Some(entry) = guard.get_mut(node_id).and_then(|entries| {
+            entries
+                .connections
+                .iter_mut()
+                .find(|entry| entry.belongs_to(connection))
+        }) {
+            entry.last_seen_at = Some(seen_at);
+            entry.last_beat = Instant::now();
+        }
     }
 
     pub(crate) fn mark_operational_ready(
@@ -191,7 +246,7 @@ impl PeerLinks {
         snapshot.last_seen_at = entries.operational_last_seen_at;
         let entries = &mut entries.connections;
         // Conserve enlaces paralelos e descarte apenas o histórico sem conexão.
-        entries.retain(|entry| entry.validity.is_some());
+        entries.retain(Entry::tracked);
         entries.push(Entry {
             state: snapshot.state,
             last_seen_at: None,
@@ -200,6 +255,7 @@ impl PeerLinks {
             peer_version: snapshot.peer_version.clone(),
             last_beat: now,
             validity: Some(validity),
+            legacy_connection: None,
         });
         true
     }
@@ -238,7 +294,7 @@ impl PeerLinks {
         true
     }
 
-    pub(crate) fn close_operational(&self, node_id: &str, connection: &Connection) {
+    pub(crate) fn close_connection(&self, node_id: &str, connection: &Connection) {
         let mut guard = self.lock();
         if let Some(entries) = guard
             .get_mut(node_id)
@@ -254,6 +310,7 @@ impl PeerLinks {
                 entry.state = LinkState::Unknown;
                 entry.rtt_ms = None;
                 entry.validity = None;
+                entry.legacy_connection = None;
             }
         }
     }
@@ -288,18 +345,10 @@ impl PeerLinks {
 
     /// Tentativa de conexão recusada.
     pub fn mark_rejected(&self, node_id: &str) {
-        self.record_rejection(node_id, false);
-    }
-
-    pub(crate) fn record_rejection(&self, node_id: &str, operational: bool) {
         let mut guard = self.lock();
-        if operational
-            && guard.get(node_id).is_some_and(|entries| {
-                entries
-                    .connections
-                    .iter()
-                    .any(|entry| entry.validity.is_some())
-            })
+        if guard
+            .get(node_id)
+            .is_some_and(|entries| entries.connections.iter().any(Entry::tracked))
         {
             return;
         }
@@ -316,6 +365,7 @@ impl PeerLinks {
                 peer_version: None,
                 last_beat: Instant::now(),
                 validity: None,
+                legacy_connection: None,
             });
         }
     }
@@ -458,7 +508,7 @@ mod tests {
         assert!(links.mark_operational_ready(node_id, &mut snapshot, validity(&first)));
         assert!(links.beat_operational(node_id, &first, 30));
         assert_eq!(links.snapshot(node_id).unwrap().last_seen_at, Some(42));
-        links.close_operational(node_id, &first);
+        links.close_connection(node_id, &first);
         snapshot.last_seen_at = Some(32);
         assert!(links.mark_operational_ready(node_id, &mut snapshot, validity(&second)));
         assert_eq!(snapshot.last_seen_at, Some(42));

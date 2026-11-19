@@ -30,7 +30,11 @@ use crate::peer::PeerRegistry;
 use crate::transport::{self, TransportError};
 use crate::{now_unix, transport::ALPN_V1_TEXT};
 
+mod dial;
 mod session;
+
+use dial::AttemptState;
+pub use dial::{DialAttempt, DialCancellation, DialError, DialTarget, PromotedDial};
 
 pub use session::{
     OperationalBiStream, OperationalSession, OperationalSessionHandler, SessionError, SessionId,
@@ -480,21 +484,23 @@ impl FederationNode {
             .await
             .map_err(|e| LinkError::Connect(e.to_string()))?;
 
-        match establish(&self.shared, &connection, true).await {
-            Ok(snapshot) => Ok(snapshot),
-            Err(error) => {
-                match error.rejection {
-                    // Sem veredito do par: TLS/alerta recusou antes do protocolo.
-                    Rejection::Transport => Err(LinkError::Connect(
-                        "handshake TLS recusado antes do protocolo".to_owned(),
-                    )),
-                    rejection => Err(LinkError::Rejected {
-                        code: rejection.code(),
-                        reason: rejection.reason(),
-                    }),
-                }
-            }
-        }
+        establish(&self.shared, &connection, true)
+            .await
+            .map_err(handshake_link_error)
+    }
+
+    /// Inicia uma tentativa pinada com cancelamento serializado à promoção.
+    pub fn start_dial(&self, target: DialTarget) -> Result<DialAttempt, DialError> {
+        dial::validate_target(&target)?;
+        let connecting = self
+            .endpoint
+            .connect_with(
+                self.client_config.clone(),
+                target.addr,
+                transport::CONNECT_SERVER_NAME,
+            )
+            .map_err(|error| DialError::Link(LinkError::Connect(error.to_string())))?;
+        Ok(DialAttempt::spawn(self.shared.clone(), target, connecting))
     }
 
     /// Fecha o endpoint e aborta as tarefas deste nó.
@@ -545,24 +551,62 @@ impl FederationNode {
     }
 }
 
+fn handshake_link_error(error: HandshakeError) -> LinkError {
+    match error.rejection {
+        Rejection::Transport => {
+            LinkError::Connect("handshake TLS recusado antes do protocolo".to_owned())
+        }
+        rejection => LinkError::Rejected {
+            code: rejection.code(),
+            reason: rejection.reason(),
+        },
+    }
+}
+
+async fn establish_pinned(
+    shared: &NodeShared,
+    connection: &Connection,
+    attempt: &AttemptState,
+) -> Result<LinkSnapshot, HandshakeError> {
+    if let Some(authorizer) = &shared.authorizer {
+        establish_operational(
+            shared,
+            connection,
+            true,
+            Arc::clone(authorizer),
+            Some(attempt),
+        )
+        .await
+    } else {
+        let accepted = exchange_manifest(shared, connection, true, Some(&shared.registry)).await?;
+        let node_id = accepted.node_id.clone();
+        attempt
+            .promote(shared, connection, &node_id, || {
+                register_ready(shared, connection, accepted)
+            })
+            .map_err(|rejection| HandshakeError { rejection })
+    }
+}
+
 async fn establish(
     shared: &NodeShared,
     connection: &Connection,
     initiating: bool,
 ) -> Result<LinkSnapshot, HandshakeError> {
     let result = if let Some(authorizer) = &shared.authorizer {
-        establish_operational(shared, connection, initiating, Arc::clone(authorizer)).await
+        establish_operational(shared, connection, initiating, Arc::clone(authorizer), None).await
     } else {
         exchange_manifest(shared, connection, initiating, Some(&shared.registry))
             .await
-            .map(|accepted| register_ready(shared, connection, accepted))
+            .and_then(|accepted| {
+                register_ready(shared, connection, accepted)
+                    .map_err(|rejection| HandshakeError { rejection })
+            })
     };
     if result.is_err()
         && let Some(key) = transport::peer_public_key(connection)
     {
-        shared
-            .links
-            .record_rejection(&node_id_for(&key), shared.authorizer.is_some());
+        shared.links.mark_rejected(&node_id_for(&key));
     }
     result
 }
@@ -680,9 +724,10 @@ async fn establish_operational(
     connection: &Connection,
     initiating: bool,
     authorizer: Arc<dyn LinkAuthorizer>,
+    attempt: Option<&AttemptState>,
 ) -> Result<LinkSnapshot, HandshakeError> {
     let result = async {
-        let link = OperationalLink::new(shared, connection, authorizer)?;
+        let link = Arc::new(OperationalLink::new(shared, connection, authorizer)?);
         let snapshot = tokio::select! {
             biased;
             reason = link.invalidated() => return Err(reason),
@@ -696,18 +741,25 @@ async fn establish_operational(
                     .await
                     .map_err(|error| error.rejection)?;
                 let _permit = link.authorize().await?;
-                let seen_at = now_unix();
-                let mut snapshot = ready_snapshot(connection, accepted, seen_at);
-                if !shared.links.mark_operational_ready(
-                    &link.remote.node_id, &mut snapshot, link.validity.clone(),
-                ) {
-                    return Err(Rejection::NotAuthorized);
+                let publish = || {
+                    let seen_at = now_unix();
+                    let mut snapshot = ready_snapshot(connection, accepted, seen_at);
+                    if !shared.links.mark_operational_ready(
+                        &link.remote.node_id, &mut snapshot, link.validity.clone(),
+                    ) {
+                        return Err(Rejection::NotAuthorized);
+                    }
+                    shared.registry.touch_operational(&link.remote.node_id, seen_at);
+                    tokio::spawn(run_operational(shared.clone(), Arc::clone(&link)));
+                    Ok(snapshot)
+                };
+                if let Some(attempt) = attempt {
+                    attempt.promote(shared, connection, &link.remote.node_id, publish)
+                } else {
+                    publish()
                 }
-                shared.registry.touch_operational(&link.remote.node_id, seen_at);
-                Ok(snapshot)
             } => result?,
         };
-        tokio::spawn(run_operational(shared.clone(), link));
         Ok(snapshot)
     };
     result.await.map_err(|rejection| {
@@ -716,8 +768,7 @@ async fn establish_operational(
     })
 }
 
-async fn run_operational(shared: NodeShared, link: OperationalLink) {
-    let link = Arc::new(link);
+async fn run_operational(shared: NodeShared, link: Arc<OperationalLink>) {
     let callback = shared.session_handler.clone().map(|config| {
         let link = Arc::clone(&link);
         let links = Arc::clone(&shared.links);
@@ -747,7 +798,7 @@ async fn run_operational(shared: NodeShared, link: OperationalLink) {
     } else if connection.close_reason().is_none() {
         connection.close(0u32.into(), b"enlace encerrado");
     }
-    shared.links.close_operational(node_id, connection);
+    shared.links.close_connection(node_id, connection);
     // O fechamento acorda cancelled(); aguarde a limpeza cooperativa depois
     // de retirar o estado desta conexão, sem bloquear outras sessões.
     if let Some(callback) = callback {
@@ -776,24 +827,19 @@ fn register_ready(
     shared: &NodeShared,
     connection: &Connection,
     accepted: AcceptedPeer,
-) -> LinkSnapshot {
-    let now = Instant::now();
+) -> Result<LinkSnapshot, Rejection> {
     let seen_at = now_unix();
-    let rtt_ms = Some(u64::try_from(connection.rtt().as_millis()).unwrap_or(u64::MAX));
-    shared.links.mark_ready(
-        &accepted.node_id,
-        seen_at,
-        rtt_ms,
-        accepted.alpn.clone(),
-        accepted.software_version.clone(),
-        now,
-    );
-    shared.registry.touch(&accepted.node_id, seen_at);
-    spawn_heartbeat(shared, connection, accepted.node_id.clone());
-    shared
+    let node_id = accepted.node_id.clone();
+    let snapshot = ready_snapshot(connection, accepted, seen_at);
+    if !shared
         .links
-        .snapshot(&accepted.node_id)
-        .unwrap_or_else(LinkSnapshot::never_seen)
+        .mark_legacy_connection_ready(&node_id, &snapshot, connection)
+    {
+        return Err(Rejection::Transport);
+    }
+    shared.registry.touch(&node_id, seen_at);
+    spawn_heartbeat(shared, connection, node_id);
+    Ok(snapshot)
 }
 
 fn spawn_heartbeat(shared: &NodeShared, connection: &Connection, node_id: String) {
@@ -814,7 +860,7 @@ fn spawn_heartbeat(shared: &NodeShared, connection: &Connection, node_id: String
     let links = Arc::clone(&shared.links);
     tokio::spawn(async move {
         watcher.closed().await;
-        links.mark_unknown(&node_id);
+        links.close_connection(&node_id, &watcher);
     });
 }
 
@@ -881,7 +927,9 @@ async fn receive_heartbeats(
             continue;
         }
         let seen_at = now_unix();
-        shared.links.beat(node_id, seen_at, Instant::now());
+        shared
+            .links
+            .beat_legacy_connection(node_id, connection, seen_at);
         shared.registry.touch(node_id, seen_at);
         // Heartbeat não promove estado: se o par foi revogado depois do handshake,
         // quem decide é o registro, não este laço.
@@ -892,7 +940,7 @@ async fn receive_heartbeats(
                 Rejection::Revoked.code().into(),
                 Rejection::Revoked.reason().as_bytes(),
             );
-            shared.links.mark_unknown(node_id);
+            shared.links.close_connection(node_id, connection);
             return Ok(());
         }
     }
