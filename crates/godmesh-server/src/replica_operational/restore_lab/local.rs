@@ -187,7 +187,10 @@ async fn allocation(db: &mut PgConnection) -> Result<String, Error> {
     .await?)
 }
 
-async fn ensure_allocation(db: &mut PgConnection, binding: &Binding) -> Result<(), Error> {
+pub(super) async fn ensure_allocation(
+    db: &mut PgConnection,
+    binding: &Binding,
+) -> Result<(), Error> {
     if allocation(db).await? != binding.target_db_id {
         return Err(Error::Scope);
     }

@@ -143,7 +143,7 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
         let time = clock_time.clone();
         Arc::new(move || time.load(std::sync::atomic::Ordering::SeqCst))
     };
-    let ext = ExternalStore::new(external).with_clock(clock.clone());
+    let ext = ExternalStore::new(external.clone()).with_clock(clock.clone());
     let policy = SnapshotPolicy {
         cluster: CLUSTER.into(),
         origin: identity(&a.origin),
@@ -464,12 +464,10 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
         .await
         .unwrap();
     let promotion = signed_promotion(&high, &result, &signer);
-    let candidate = local_b
-        .promotion_candidate(a_peer, &high, &a_observed, deadline())
-        .await
-        .unwrap();
     assert!(matches!(
-        ext.consume(&promotion, &candidate, deadline()).await,
+        local_b
+            .consume_promotion(a_peer, &high, &ext, &promotion, &a_observed, deadline())
+            .await,
         Err(Error::Conflict)
     ));
     let mut mismatched = a_observed.clone();
@@ -480,14 +478,130 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
             .await
             .is_err()
     );
-    let candidate = local_b
+    local_b
         .prepare_promotion(a_peer, &high, &promotion, &a_observed, deadline())
         .await
         .unwrap();
-    ext.consume(&promotion, &candidate, deadline())
+    sqlx::query("UPDATE federation_replica_acl SET revoked=true")
+        .execute(&b.pool)
         .await
         .unwrap();
-    ext.consume(&promotion, &candidate, deadline())
+    let refused = local_b
+        .consume_promotion(a_peer, &high, &ext, &promotion, &a_observed, deadline())
+        .await;
+    assert!(
+        refused.is_err(),
+        "B com ACL revogada não pode consumir a autorização"
+    );
+    assert_eq!(
+        ext.observe(&key, deadline()).await.unwrap().phase(),
+        ExternalPhase::Fenced
+    );
+    sqlx::query("UPDATE federation_replica_acl SET revoked=false")
+        .execute(&b.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE FUNCTION hold_restore_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN PERFORM pg_advisory_xact_lock(73104); RETURN NEW; END $$;
+         CREATE CONSTRAINT TRIGGER hold_restore_commit AFTER INSERT ON federation_restore_decision
+           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION hold_restore_commit()",
+    )
+    .execute(&external)
+    .await
+    .unwrap();
+    let mut blocker = external.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(73104)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let commit_deadline = deadline();
+    let consume = local_b.consume_promotion(
+        a_peer,
+        &high,
+        &ext,
+        &promotion,
+        &a_observed,
+        commit_deadline,
+    );
+    let barrier = async {
+        tokio::time::timeout_at(commit_deadline, async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE datname=current_database() AND upper(query)='COMMIT'
+                     AND $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(blocker_pid)
+                .fetch_one(&external)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("CAS deve chegar ao COMMIT bloqueado");
+        let mut change = b.pool.acquire().await.unwrap();
+        let change_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *change)
+            .await
+            .unwrap();
+        let update =
+            sqlx::query("UPDATE federation_replica_acl SET revoked=true").execute(&mut *change);
+        let wait_for_update = tokio::time::timeout_at(commit_deadline, async {
+            loop {
+                let waiting: bool =
+                    sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                        .bind(change_pid)
+                        .fetch_one(&b.pool)
+                        .await
+                        .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        let (updated, waited) = tokio::join!(update, wait_for_update);
+        waited.expect("alteração concorrente deve aguardar o guard de B");
+        assert_eq!(updated.unwrap().rows_affected(), 1);
+    };
+    let (uncertain, ()) = tokio::join!(consume, barrier);
+    assert!(matches!(
+        uncertain,
+        Err(Error::Effect(EffectError::CommitUnknown(_)))
+    ));
+    assert!(matches!(
+        gated.checkpoint(a_peer, deadline()).await,
+        Err(EffectError::RestoreClosed)
+    ));
+    blocker.rollback().await.unwrap();
+    let resolved = ext.resolve_promotion(&key, deadline()).await.unwrap();
+    match resolved.phase() {
+        ExternalPhase::Fenced => assert_eq!(resolved.authorization_sha256(), None),
+        ExternalPhase::PromotionConsumed => {
+            assert_eq!(resolved.authorization_sha256(), Some(promotion.digest()));
+        }
+    }
+    assert!(resolved.opening_origin().is_none());
+    sqlx::query("UPDATE federation_replica_acl SET revoked=false")
+        .execute(&b.pool)
+        .await
+        .unwrap();
+
+    local_b
+        .consume_promotion(a_peer, &high, &ext, &promotion, &a_observed, deadline())
+        .await
+        .unwrap();
+    local_b
+        .consume_promotion(a_peer, &high, &ext, &promotion, &a_observed, deadline())
         .await
         .unwrap();
     assert!(matches!(
@@ -539,6 +653,28 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
             .opening_origin()
             .is_none()
     );
+
+    let mut unavailable = a.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE federation_replica_acl IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *unavailable)
+        .await
+        .unwrap();
+    let attempt = observe_opening_origin(
+        &source,
+        &observed,
+        b_peer,
+        tokio::time::Instant::now() + std::time::Duration::from_millis(250),
+    )
+    .await;
+    assert!(attempt.is_err());
+    let still_consumed = ext.observe(&key, deadline()).await.unwrap();
+    assert_eq!(
+        still_consumed.authorization_sha256(),
+        observed.authorization_sha256()
+    );
+    assert_eq!(still_consumed.origin(), observed.origin());
+    assert!(still_consumed.opening_origin().is_none());
+    unavailable.rollback().await.unwrap();
 
     clock_time.store(111, std::sync::atomic::Ordering::SeqCst);
     let later = observe_opening_origin(&source, &observed, b_peer, deadline())
@@ -605,6 +741,15 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
         .await
         .unwrap();
     drop(local_b);
+    clock_time.store(112, std::sync::atomic::Ordering::SeqCst);
+    let current = ext.observe(&key, deadline()).await.unwrap();
+    let origin = observe_opening_origin(&source, &current, b_peer, deadline())
+        .await
+        .unwrap();
+    let observed = ext
+        .record_opening_origin(&origin, deadline())
+        .await
+        .unwrap();
     let gate = AdmissionGate::new(binding).unwrap();
     let gated = Arc::new(
         b.boot()

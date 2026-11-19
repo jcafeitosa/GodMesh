@@ -5,7 +5,8 @@ use godmesh_federation::{
     },
     snapshot::{SnapshotPolicy, verify_snapshot},
 };
-use tokio::time::Instant;
+use sqlx::Connection;
+use tokio::time::{Instant, timeout_at};
 
 use crate::portable_join::ClusterGuard;
 
@@ -14,8 +15,9 @@ use super::{
         replication::snapshot_read,
         snapshot_harness::{self, CaptureRange, RestoreApplication, Window},
     },
-    Binding, Error, ExternalObservation, ExternalPhase, LocalPhase, LocalRestore,
-    OriginObservation, ReplicaService, SessionPeer, check_key, controls, local, window,
+    Binding, EffectError, Error, ExternalObservation, ExternalPhase, ExternalStore, LocalPhase,
+    LocalRestore, OriginObservation, ReplicaService, SessionPeer, check_key, controls, db, local,
+    replication, window, with_sql_deadline,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -278,6 +280,66 @@ impl LocalRestore {
                 Ok(candidate)
             })
             .await
+    }
+
+    /// Revalida B em READ COMMITTED e conserva os guards M1C → namespace
+    /// até concluir o CAS na fonte. A transação local só observa e termina em
+    /// rollback. Uma resposta incerta exige apuração na fonte antes de repetir.
+    pub async fn consume_promotion(
+        &self,
+        peer: SessionPeer<'_>,
+        evidence: &VerifiedHighWater,
+        external: &ExternalStore,
+        promotion: &VerifiedPromotion,
+        origin: &OriginObservation,
+        deadline: Instant,
+    ) -> Result<ExternalObservation, Error> {
+        let svc = &self.service;
+        let mut lease = db::Lease::acquire(svc.portable.pool(), deadline).await?;
+        let mut tx = timeout_at(
+            deadline,
+            lease.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED"),
+        )
+        .await
+        .map_err(|_| Error::Timeout)??;
+        let candidate = timeout_at(
+            deadline,
+            with_sql_deadline(deadline, async {
+                let mut guard = svc
+                    .portable
+                    .lock_cluster_guard(&mut tx)
+                    .await
+                    .map_err(EffectError::from)?;
+                replication::locked(&mut guard, &svc.config.namespace).await?;
+                let now = (svc.clock)();
+                if !window(promotion.promotion(), now) {
+                    return Err(Error::Incomplete);
+                }
+                local::ensure_allocation(guard.connection(), self.binding()).await?;
+                let row = local::load(guard.connection(), self.binding()).await?;
+                self.prove(
+                    &mut guard,
+                    peer,
+                    evidence,
+                    PrefixCheck::Exact(origin),
+                    now,
+                    &row,
+                )
+                .await
+            }),
+        )
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        // pg_advisory_xact_lock conserva ambos os locks até o fim de tx.
+        // O COMMIT externo usa o mesmo prazo e classifica confirmação incerta.
+        let outcome = match candidate {
+            Ok(candidate) => external.consume(promotion, &candidate, deadline).await,
+            Err(error) => Err(error),
+        };
+        if matches!(timeout_at(deadline, tx.rollback()).await, Ok(Ok(()))) {
+            lease.clean();
+        }
+        outcome
     }
 
     pub async fn open(

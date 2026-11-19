@@ -180,6 +180,15 @@ impl ExternalStore {
         in_tx(&self.0, deadline, async |db| observe(db, key, false).await).await
     }
 
+    /// Aguarda o CAS pendente antes de apurar uma confirmação incerta.
+    pub async fn resolve_promotion(
+        &self,
+        key: &RestoreKey,
+        deadline: Instant,
+    ) -> Result<ExternalObservation, Error> {
+        in_tx(&self.0, deadline, async |db| observe(db, key, true).await).await
+    }
+
     pub async fn publish(
         &self,
         high_water: &VerifiedHighWater,
@@ -299,7 +308,7 @@ impl ExternalStore {
         .await
     }
 
-    pub async fn consume(
+    pub(super) async fn consume(
         &self,
         promotion: &VerifiedPromotion,
         candidate: &PromotionCandidate,
@@ -404,10 +413,10 @@ async fn observe(
         .try_get::<Option<&str>, _>("opening_origin_observation")?
         .map(super::OriginObservation::decode)
         .transpose()?;
-    if let Some(opening) = &opening_origin {
-        if opening.0.key != *key || decision.is_none_or(|d| opening.0.sampled_at < d.consumed_at) {
-            return Err(Error::Incomplete);
-        }
+    if opening_origin.as_ref().is_some_and(|opening| {
+        opening.0.key != *key || decision.is_none_or(|d| opening.0.sampled_at < d.consumed_at)
+    }) {
+        return Err(Error::Incomplete);
     }
     Ok(ExternalObservation {
         binding,
