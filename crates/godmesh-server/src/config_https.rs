@@ -379,7 +379,7 @@ impl HttpsClient {
             }
             let body = timeout(
                 self.limits.body_timeout,
-                read_body(&mut tls, buffered, length),
+                read_body(&mut tls, status, buffered, length),
             )
             .await
             .map_err(|_| HttpsError::Timeout)??;
@@ -477,13 +477,25 @@ fn body_length(status: StatusCode, headers: &HeaderMap) -> Result<usize, HttpsEr
 
 async fn read_body(
     stream: &mut (impl AsyncRead + Unpin),
+    status: StatusCode,
     mut body: Vec<u8>,
     length: usize,
 ) -> Result<Vec<u8>, HttpsError> {
     let mut chunk = [0; 8192];
     while body.len() < length {
         let remaining = (length - body.len()).min(chunk.len());
-        let count = stream.read(&mut chunk[..remaining]).await.map_err(tls_io)?;
+        let count = stream
+            .read(&mut chunk[..remaining])
+            .await
+            .map_err(|error| {
+                // Sem o corpo completo de um 503, o pull não pode decidir retry
+                // pelo catálogo de erros, inclusive se a sessão cair sem close_notify.
+                if status == StatusCode::SERVICE_UNAVAILABLE {
+                    HttpsError::InvalidBody
+                } else {
+                    tls_io(error)
+                }
+            })?;
         if count == 0 {
             return Err(HttpsError::InvalidBody);
         }

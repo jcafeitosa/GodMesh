@@ -453,20 +453,36 @@ async fn get_distingue_interrupcao_de_rede_e_excedente_depois_do_frame() {
     let tls = NodeTls::self_issued(&publisher).unwrap();
     let config =
         Arc::new(transport::http1_server_tls(&tls, vec![caller.public_key_bytes()]).unwrap());
-    for (head, suffix, expected) in [
+    for (head, suffix, close_notify, expected) in [
+        (b"".as_slice(), None, false, HttpsError::Io),
+        (
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\na".as_slice(),
+            None,
+            false,
+            HttpsError::InvalidBody,
+        ),
+        (
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\na".as_slice(),
+            None,
+            true,
+            HttpsError::InvalidBody,
+        ),
         (
             b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\na".as_slice(),
             None,
+            false,
             HttpsError::Io,
         ),
         (
             b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\na".as_slice(),
             Some(b"b"),
+            true,
             HttpsError::InvalidBody,
         ),
         (
             b"HTTP/1.1 304 Not Modified\r\n\r\n".as_slice(),
             Some(b"b"),
+            true,
             HttpsError::InvalidBody,
         ),
     ] {
@@ -483,6 +499,8 @@ async fn get_distingue_interrupcao_de_rede_e_excedente_depois_do_frame() {
             if let Some(suffix) = suffix {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 let _ = stream.write_all(suffix).await;
+            }
+            if close_notify {
                 let _ = stream.shutdown().await;
             }
         });
