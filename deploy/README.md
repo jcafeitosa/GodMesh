@@ -63,12 +63,16 @@ repontada.
 | `GODMESH_NODE_KEY` | **sim** | obrigatória para servir: caminho da identidade Ed25519 do nó. Ausente/vazia → exit 78; arquivo mais aberto que `0600` → exit 78; arquivo ausente é criado `0600`. Persista em volume: identidade nova a cada deploy é outro nó |
 | `GODMESH_FEDERATION_BIND` | **sim** | opcional; **desligada por default**. Ligada, abre o listener QUIC/mTLS em `IP:porta` (UDP) e exige `GODMESH_FEDERATION_CLUSTER` e `GODMESH_FEDERATION_REGION` |
 | `GODMESH_FEDERATION_CLUSTER` / `_REGION` | **sim** | obrigatórias com o listener ligado (sem default silencioso) |
-| `GODMESH_FEDERATION_GENESIS` | **não** | opcional; vazio = **sem bootstrap**. Lista `<node_id>:<chave pública em hex>` separada por vírgula/ponto e vírgula/quebra de linha: os primeiros nós do cluster, autorizados por configuração (ADR-071 emenda §5), que podem aprovar os demais. Entrada malformada, `node_id` não derivado da chave ou nó duplicado → **exit 78**; nada é ignorado em silêncio. Sem genesis e sem nenhum par `authorized` no cluster, aprovar é impossível (`422 no_authorized_approver`) |
-| `GODMESH_FEDERATION_GOVERNANCE` | **não** | `single_approver:<cluster>` declara que esse cluster opera sem votantes. Ausente ou vazia desabilita decisões de ingresso. Modo desconhecido ou valor malformado impede a inicialização do serviço com exit 78. |
+| `GODMESH_FEDERATION_GENESIS` | **sim** | opcional; vazio = **sem bootstrap**. Lista `<node_id>:<chave pública em hex>` separada por vírgula/ponto e vírgula/quebra de linha: os primeiros nós do cluster, autorizados por configuração (ADR-071 emenda §5), que podem aprovar os demais. Entrada malformada, `node_id` não derivado da chave ou nó duplicado → **exit 78**; nada é ignorado em silêncio. Sem genesis e sem nenhum par `authorized` no cluster, aprovar é impossível (`422 no_authorized_approver`) |
+| `GODMESH_FEDERATION_GOVERNANCE` | **sim** | `single_approver:<cluster>` declara que esse cluster opera sem votantes. Ausente ou vazia desabilita decisões de ingresso. Modo desconhecido ou valor malformado impede a inicialização do serviço com exit 78. |
+| `GODMESH_FEDERATION_ADVERTISE_QUIC` | **sim** | endpoint do manifesto portátil, `quic://IPv4:porta` ou `quic://[IPv6]:porta` com IP literal |
+| `GODMESH_FEDERATION_PORTABLE_MAX_DEPTH` | **sim** | profundidade máxima da cadeia portátil |
+| `GODMESH_FEDERATION_PORTABLE_MAX_FRAME_BYTES` | **sim** | limite da cadeia em bytes UTF-8 após decodificar a string JSON do envelope |
+| `GODMESH_FEDERATION_PORTABLE_MAX_VALIDITY_SECONDS` | **sim** | duração máxima da vigência assinada em segundos |
 | `GODMESH_FEDERATION_PEERS_REFRESH_MS` | **sim** | opcional; default `5000`. Intervalo de recarga da allowlist de pares a partir de `federation_peer` |
 | `GODMESH_HOST_METRICS_INTERVAL_MS` | **não** | opcional; default `5000`. Intervalo da coleta de telemetria de host (ADR-073 camada 1, read-only). `0` ou valor não inteiro → exit 78. O scrape **não** lê `/proc`: serve o último snapshot; snapshot mais velho que 3× o intervalo é declarado indisponível |
 | `GODMESH_HOST_PROC_ROOT` | **não** | opcional; default `/`. Raiz de leitura de `/proc`/`/sys`, só para evidência reproduzível (`host-evidence proc-fs`). Precisa ser caminho absoluto; relativo → exit 78. Em contêiner **não** há nada a mudar: o `/proc` montado no contêiner já é o do namespace, e os números de cgroup saem com `source="cgroup"` |
-| `GODMESH_MIGRATIONS_DIR` | **não** | definida no Dockerfile como reserva; o binário atual não aplica migração. **Não** conte com ela |
+| `GODMESH_MIGRATIONS_DIR` | **sim** | diretório de migrações aplicadas antes da abertura dos listeners. Padrão `migrations`; a imagem declara `/migrations` |
 | `RUST_BACKTRACE` | indireto | só afeta mensagem de panic; `0` na imagem |
 
 `EXPOSE 8080` é **metadado**: não publica porta, não abre firewall e não substitui
@@ -88,6 +92,29 @@ Prossiga somente se a contagem for zero. Um resultado positivo bloqueia a
 implantação e requer uma decisão separada para tratar o legado. A guarda da
 0009 aborta a migração de forma transacional se encontrar aprovações legadas.
 A 0010 já aplicada é compatível com esse caminho de atualização.
+
+### Ingresso portátil no cluster
+
+O modo portátil exige governança `single_approver:<cluster>`, pins genesis,
+região, endpoint anunciado e os três limites portáteis como inteiros
+positivos explícitos. A configuração parcial e a divergência entre os clusters
+do listener e da política abortam o boot. Configure também o listener QUIC e
+use um endereço anunciado alcançável pelos pares. O teto global
+`GODMESH_MAX_BODY_BYTES` inclui o envelope HTTP e seus escapes.
+
+Antes de habilitar, inventarie os pares v1 e encaminhe os que precisam
+continuar operando para novo ingresso explícito. Use `/v1/federation/local-manifest`
+e `/v1/federation/genesis-imports` para trocar os manifestos dos genesis
+pinados. A raiz aprova ofertas em `approve-v2` e emite a vigência.
+Cada candidato importa a própria prova. Para os enlaces, as duas pontas precisam
+importar a prova aplicável do par. Provisione escopo de ingest e retenção
+separadamente. As rotas portáteis exigem `federation:admin`.
+
+Renove a vigência pela raiz enquanto ela estiver ativa. Distribua recibos de
+revogação a cada consumidor. Até receber o recibo, um consumidor pode usar a
+vigência ainda válida. O boot exige os pins de que o estado durável depende.
+O contrato e a sequência completa estão na
+[SPEC M1C-B](../docs/08-specs/federacao/m1c-b-ingresso-operacional.md).
 
 ### Build e execução final (18/11/2026)
 

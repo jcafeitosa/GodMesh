@@ -317,7 +317,7 @@ Decisão do usuário: "shadcn fica". Regras para não virar dois sistemas:
 
 **Efeito na implementação:** a rota de aprovação deixa de aceitar apenas o escopo `federation:admin` e passa a exigir **identidade de nó autorizado + assinatura de aprovação**; o escopo humano permanece como autorização secundária para o operador que dispara a operação. A fatia M1 implementa o registro; a verificação por assinatura de nó entra em M1b.
 
-**Estado em 18/11/2026.** A M1B/I foi integrada localmente em `e060b4e` para decisão assinada em cluster explicitamente declarado sem votantes. A evidência inclui ingresso e ingest assinados e transporte QUIC/mTLS entre três instâncias locais. Entrega e consumo do certificado portátil, revogação assinada distribuída e aplicação de quórum seguem pendentes. [Evidência da M1B/I](../09-equipe/evidencias/2026-11-18-integracao-m1b.md#aceite-local-da-v13)
+**Estado em 18/11/2026.** A M1B/I foi integrada localmente em `e060b4e` para decisão assinada em cluster explicitamente declarado sem votantes. A evidência inclui ingresso e ingest assinados e transporte QUIC/mTLS entre três instâncias locais. A M1C-B integrou a verificação e o consumo do certificado portátil e a distribuição explícita de recibos de revogação. O quórum de bundles segue na M3. [Aceite local da M1C-B](../09-equipe/evidencias/2026-11-18-m1c-ingresso-operacional.md#aceite-local-da-v12). [Evidência da M1B/I](../09-equipe/evidencias/2026-11-18-integracao-m1b.md#aceite-local-da-v13)
 
 ## ADR-072 — Adoção da rede-alvo de cinco planos
 
