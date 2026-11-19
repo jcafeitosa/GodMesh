@@ -10,7 +10,7 @@
 //! enlace morto não é medição.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use quinn::Connection;
@@ -88,6 +88,46 @@ impl LinkValidity {
     }
 }
 
+/// Validade viva de um enlace exato, independente do mutex de PeerLinks.
+#[derive(Debug)]
+pub(crate) struct OperationalValidity {
+    link: LinkValidity,
+    heartbeat: Mutex<Option<Instant>>,
+    freshness: Duration,
+    outer: Option<Arc<Self>>,
+}
+
+impl OperationalValidity {
+    pub(crate) fn is_current(&self, now: Instant) -> bool {
+        // Um enlace relay depende do enlace que já existia quando a rota abriu.
+        // Percorra dependências sem consultar registros nem aninhar locks.
+        let mut next = Some(self);
+        while let Some(current) = next {
+            if !current.link.is_current(now)
+                || !current
+                    .heartbeat
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|beat| now.saturating_duration_since(beat) <= current.freshness)
+            {
+                return false;
+            }
+            next = current.outer.as_deref();
+        }
+        true
+    }
+
+    fn beat(&self, now: Instant) {
+        if let Some(beat) = self.heartbeat.lock().unwrap().as_mut() {
+            *beat = now;
+        }
+    }
+
+    fn retire(&self) {
+        *self.heartbeat.lock().unwrap() = None;
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
     state: LinkState,
@@ -97,11 +137,10 @@ struct Entry {
     peer_version: Option<String>,
     /// Instante monotônico do último heartbeat — a única base para expirar.
     last_beat: Instant,
-    validity: Option<LinkValidity>,
+    validity: Option<Arc<OperationalValidity>>,
     legacy_connection: Option<Connection>,
-    // O fechamento do transporte externo invalida a projeção imediatamente,
-    // mesmo antes de o supervisor cancelar a discagem associada.
-    outer: Option<Connection>,
+    // Dependência somente para enlaces legados. Os operacionais carregam-na na validade.
+    outer: Option<Arc<OperationalValidity>>,
 }
 
 impl Entry {
@@ -113,20 +152,30 @@ impl Entry {
                 .legacy_connection
                 .as_ref()
                 .is_none_or(|connection| connection.close_reason().is_none())
-            && outer_is_open(self.outer.as_ref())
+            && outer_is_current(self.outer.as_ref(), now)
     }
 
-    fn is_ready(&self, now: Instant, freshness: Duration) -> bool {
-        self.state == LinkState::Ready
-            && self.is_current(now)
-            && (self.validity.is_none()
-                || now.saturating_duration_since(self.last_beat) <= freshness)
+    fn is_ready(&self, now: Instant) -> bool {
+        self.state == LinkState::Ready && self.is_current(now)
+    }
+
+    fn beat(&mut self, now: Instant) {
+        self.last_beat = now;
+        if let Some(validity) = &self.validity {
+            validity.beat(now);
+        }
+    }
+
+    fn retire(&self) {
+        if let Some(validity) = &self.validity {
+            validity.retire();
+        }
     }
 
     fn belongs_to(&self, connection: &Connection) -> bool {
         self.validity
             .as_ref()
-            .map(|validity| &validity.connection)
+            .map(|validity| &validity.link.connection)
             .or(self.legacy_connection.as_ref())
             .is_some_and(|tracked| tracked.stable_id() == connection.stable_id())
     }
@@ -136,8 +185,8 @@ impl Entry {
     }
 }
 
-fn outer_is_open(outer: Option<&Connection>) -> bool {
-    outer.is_none_or(|connection| connection.close_reason().is_none())
+fn outer_is_current(outer: Option<&Arc<OperationalValidity>>, now: Instant) -> bool {
+    outer.is_none_or(|validity| validity.is_current(now))
 }
 
 #[derive(Debug, Default)]
@@ -183,7 +232,11 @@ impl PeerLinks {
         now: Instant,
     ) {
         let mut guard = self.lock();
-        guard.entry(node_id.to_owned()).or_default().connections = vec![Entry {
+        let connections = &mut guard.entry(node_id.to_owned()).or_default().connections;
+        for entry in connections.iter() {
+            entry.retire();
+        }
+        *connections = vec![Entry {
             state: LinkState::Ready,
             last_seen_at: Some(last_seen_at),
             rtt_ms,
@@ -201,10 +254,10 @@ impl PeerLinks {
         node_id: &str,
         snapshot: &LinkSnapshot,
         connection: &Connection,
-        outer: Option<&Connection>,
+        outer: Option<&Arc<OperationalValidity>>,
     ) -> bool {
         let mut guard = self.lock();
-        if connection.close_reason().is_some() || !outer_is_open(outer) {
+        if connection.close_reason().is_some() || !outer_is_current(outer, Instant::now()) {
             return false;
         }
         let entries = &mut guard.entry(node_id.to_owned()).or_default().connections;
@@ -246,11 +299,11 @@ impl PeerLinks {
         node_id: &str,
         snapshot: &mut LinkSnapshot,
         validity: LinkValidity,
-        outer: Option<&Connection>,
+        outer: Option<&Arc<OperationalValidity>>,
     ) -> bool {
         let mut guard = self.lock();
         let now = Instant::now();
-        if !validity.is_current(now) || !outer_is_open(outer) {
+        if !validity.is_current(now) || !outer_is_current(outer, now) {
             return false;
         }
         let entries = guard.entry(node_id.to_owned()).or_default();
@@ -266,22 +319,36 @@ impl PeerLinks {
             alpn: snapshot.negotiated_alpn.clone(),
             peer_version: snapshot.peer_version.clone(),
             last_beat: now,
-            validity: Some(validity),
+            validity: Some(Arc::new(OperationalValidity {
+                link: validity,
+                heartbeat: Mutex::new(Some(now)),
+                freshness: self.freshness,
+                outer: outer.cloned(),
+            })),
             legacy_connection: None,
-            outer: outer.cloned(),
+            outer: None,
         });
         true
     }
 
     pub(crate) fn operational_is_ready(&self, node_id: &str, connection: &Connection) -> bool {
+        self.operational_validity(node_id, connection).is_some()
+    }
+
+    pub(crate) fn operational_validity(
+        &self,
+        node_id: &str,
+        connection: &Connection,
+    ) -> Option<Arc<OperationalValidity>> {
         let guard = self.lock();
         let now = Instant::now();
-        guard.get(node_id).is_some_and(|entries| {
-            entries
-                .connections
-                .iter()
-                .any(|entry| entry.belongs_to(connection) && entry.is_ready(now, self.freshness))
-        })
+        guard
+            .get(node_id)?
+            .connections
+            .iter()
+            .find(|entry| entry.belongs_to(connection) && entry.is_ready(now))?
+            .validity
+            .clone()
     }
 
     pub(crate) fn beat_operational(
@@ -298,11 +365,11 @@ impl PeerLinks {
         let Some(entry) = entries
             .connections
             .iter_mut()
-            .find(|entry| entry.belongs_to(connection) && entry.is_ready(now, self.freshness))
+            .find(|entry| entry.belongs_to(connection) && entry.is_ready(now))
         else {
             return false;
         };
-        entry.last_beat = now;
+        entry.beat(now);
         entries.observe(Some(seen_at));
         true
     }
@@ -316,6 +383,7 @@ impl PeerLinks {
                 .iter()
                 .position(|entry| entry.belongs_to(connection))
         {
+            entries[index].retire();
             if entries.len() > 1 {
                 entries.remove(index);
             } else {
@@ -339,7 +407,7 @@ impl PeerLinks {
             .and_then(|entries| entries.connections.last_mut())
         {
             entry.last_seen_at = Some(seen_at);
-            entry.last_beat = now;
+            entry.beat(now);
             // Entrada em `unknown`/`rejected` que recebe heartbeat é anomalia de
             // ordem: registra evidência mas **não** promove para `ready`.
         }
@@ -352,6 +420,7 @@ impl PeerLinks {
             .get_mut(node_id)
             .and_then(|entries| entries.connections.last_mut())
         {
+            entry.retire();
             entry.state = LinkState::Unknown;
             entry.rtt_ms = None;
         }
@@ -398,21 +467,19 @@ impl PeerLinks {
                 if entry.state == LinkState::Ready
                     && now.duration_since(entry.last_beat) > self.freshness
                 {
+                    entry.retire();
                     entry.state = LinkState::Unknown;
                     entry.rtt_ms = None;
                     if let Some(validity) = &entry.validity {
                         validity
+                            .link
                             .connection
                             .close(0u32.into(), b"heartbeat expirado");
                     }
                     changed = true;
                 }
             }
-            if changed
-                && !entries
-                    .iter()
-                    .any(|entry| entry.is_ready(now, self.freshness))
-            {
+            if changed && !entries.iter().any(|entry| entry.is_ready(now)) {
                 expired.push(node_id.clone());
             }
         }
@@ -429,10 +496,10 @@ impl PeerLinks {
             .connections
             .iter()
             .rev()
-            .find(|entry| entry.is_ready(now, self.freshness))
+            .find(|entry| entry.is_ready(now))
             .or_else(|| entries.connections.last())?;
-        let invalid = !entry.is_current(now)
-            || (entry.state == LinkState::Ready && !entry.is_ready(now, self.freshness));
+        let invalid =
+            !entry.is_current(now) || (entry.state == LinkState::Ready && !entry.is_ready(now));
         Some(LinkSnapshot {
             state: if invalid {
                 LinkState::Unknown
@@ -533,23 +600,42 @@ mod tests {
         links.close_connection(node_id, &second);
         let (inner, _inner_peer) = connect().await;
         let (outer, _outer_peer) = connect().await;
+        let (outer_deadline, _) = watch::channel(None);
+        let mut outer_snapshot = snapshot.clone();
+        let outer_node = "outer";
+        assert!(links.mark_operational_ready(
+            outer_node,
+            &mut outer_snapshot,
+            LinkValidity {
+                deadline: outer_deadline.subscribe(),
+                ..validity(&outer)
+            },
+            None,
+        ));
+        let outer_validity = links.operational_validity(outer_node, &outer).unwrap();
         assert!(links.mark_operational_ready(
             node_id,
             &mut snapshot,
             validity(&inner),
-            Some(&outer),
+            Some(&outer_validity),
         ));
         assert!(links.operational_is_ready(node_id, &inner));
-        outer.close(0u32.into(), b"outer closed");
+        outer_deadline.send_replace(Some(Instant::now()));
+        assert!(outer.close_reason().is_none());
         assert!(!links.operational_is_ready(node_id, &inner));
         assert!(!links.beat_operational(node_id, &inner, 50));
         assert_eq!(links.snapshot(node_id).unwrap().state, LinkState::Unknown);
-        assert!(!links.mark_legacy_connection_ready(node_id, &snapshot, &inner, Some(&outer)));
+        assert!(!links.mark_legacy_connection_ready(
+            node_id,
+            &snapshot,
+            &inner,
+            Some(&outer_validity)
+        ));
         assert!(!links.mark_operational_ready(
             node_id,
             &mut snapshot,
             validity(&inner),
-            Some(&outer),
+            Some(&outer_validity),
         ));
     }
 

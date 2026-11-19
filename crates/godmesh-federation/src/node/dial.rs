@@ -15,7 +15,7 @@ use super::session::RelayValidity;
 use super::{LinkError, NodeShared, close_with_rejection, establish_pinned};
 use crate::handshake::Rejection;
 use crate::identity::node_id_for;
-use crate::link::{LinkSnapshot, LinkState, PeerLinks};
+use crate::link::{LinkSnapshot, LinkState, OperationalValidity, PeerLinks};
 use crate::relay_fallback::{FallbackError, ReapedDirect};
 use crate::transport;
 
@@ -210,7 +210,7 @@ impl AttemptState {
         }
     }
 
-    pub(super) fn relay_outer(&self) -> Option<Connection> {
+    pub(super) fn relay_outer(&self) -> Option<Arc<OperationalValidity>> {
         #[cfg(feature = "relay-harness")]
         if let Some(route) = self.relay.as_ref().and_then(std::sync::Weak::upgrade) {
             return Some(route.outer().clone());

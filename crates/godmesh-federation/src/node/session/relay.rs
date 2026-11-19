@@ -5,9 +5,9 @@ use super::{
     STREAM_ABORTED, SendStream, SessionError, SessionState, before_deadline, checked_length,
     ensure_deadline, exact_error, read_error, valid_length, write_error,
 };
+use crate::link::OperationalValidity;
 use crate::node::{DialAttempt, DialError, dial::AttemptState};
 use crate::relay_wire::{Control, Open, decode_control, validate_reply};
-use quinn::Connection;
 use std::{
     sync::{Mutex as SyncMutex, MutexGuard},
     time::Duration,
@@ -120,13 +120,13 @@ enum RouteStatus {
 }
 
 pub(in crate::node) struct RelayValidity {
-    outer: Connection,
+    outer: Arc<OperationalValidity>,
     status: watch::Sender<RouteStatus>,
     attempts: SyncMutex<Vec<Arc<AttemptState>>>,
 }
 
 impl RelayValidity {
-    fn new(outer: Connection) -> Self {
+    fn new(outer: Arc<OperationalValidity>) -> Self {
         Self {
             outer,
             status: watch::channel(RouteStatus::Active).0,
@@ -142,13 +142,13 @@ impl RelayValidity {
 
     fn lock_active(&self) -> Option<MutexGuard<'_, Vec<Arc<AttemptState>>>> {
         let mut attempts = self.lock();
-        if self.outer.close_reason().is_some() {
+        if !self.outer.is_current(std::time::Instant::now()) {
             self.cancel_locked(&mut attempts);
         }
         (*self.status.borrow() == RouteStatus::Active).then_some(attempts)
     }
 
-    pub(in crate::node) fn outer(&self) -> &Connection {
+    pub(in crate::node) fn outer(&self) -> &Arc<OperationalValidity> {
         &self.outer
     }
 
@@ -156,7 +156,7 @@ impl RelayValidity {
     pub(in crate::node) fn while_active<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
         let mut attempts = self.lock_active()?;
         let result = publish();
-        if self.outer.close_reason().is_some() {
+        if !self.outer.is_current(std::time::Instant::now()) {
             self.cancel_locked(&mut attempts);
             return None;
         }
@@ -245,9 +245,9 @@ impl RelayOpening {
     ) -> Self {
         let route = Arc::new(RouteStream {
             session: Arc::clone(session),
-            cancellation: RelayCancellation(Arc::new(RelayValidity::new(
-                session.connection().clone(),
-            ))),
+            cancellation: RelayCancellation(Arc::new(RelayValidity::new(Arc::clone(
+                &session.validity,
+            )))),
             slot: Some(slot),
         });
         Self {
