@@ -41,6 +41,9 @@ pub use session::{
     SessionLimits,
 };
 
+#[cfg(feature = "relay-harness")]
+pub use session::{RelayCancellation, RelayOpening, RelayRecv, RelaySend};
+
 #[cfg(feature = "snapshot-harness")]
 pub use session::{SnapshotSessionLimits, StreamOpening};
 
