@@ -137,7 +137,12 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
         .execute(&external)
         .await
         .unwrap();
-    let ext = ExternalStore::new(external).with_clock(Arc::new(|| 110));
+    let clock_time = Arc::new(std::sync::atomic::AtomicI64::new(110));
+    let clock = {
+        let time = clock_time.clone();
+        Arc::new(move || time.load(std::sync::atomic::Ordering::SeqCst))
+    };
+    let ext = ExternalStore::new(external).with_clock(clock.clone());
     let policy = SnapshotPolicy {
         cluster: CLUSTER.into(),
         origin: identity(&a.origin),
@@ -172,7 +177,8 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
         Arc::new(NodeIdentity::generate_in_memory().unwrap()),
         &frames,
     )
-    .await;
+    .await
+    .with_clock(clock.clone());
     let a_peer = peer(&policy.origin);
     let b_peer = peer(&policy.destination);
     let first = Binding {
@@ -488,7 +494,16 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
     drop(local_b);
 
     let observed = ext.observe(&key, deadline()).await.unwrap();
-    let (local_b, gated) = local(&b, binding.clone()).await;
+    assert!(observed.opening_origin().is_none());
+    let gate = AdmissionGate::new(binding.clone()).unwrap();
+    let gated = Arc::new(
+        b.boot()
+            .await
+            .unwrap()
+            .with_clock(clock.clone())
+            .with_restore_gate(gate.clone()),
+    );
+    let local_b = LocalRestore::new(gated.clone(), gate).unwrap();
     local_b.boot_closed(&observed, deadline()).await.unwrap();
     assert!(
         local_b
@@ -497,19 +512,78 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
                 &high,
                 &observed,
                 &promotion,
-                &mismatched,
+                &a_observed,
                 deadline()
             )
             .await
             .is_err()
     );
+    assert!(
+        local_b
+            .opening_candidate(a_peer, &high, &observed, deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        observe_opening_origin(&source, &observed, a_peer, deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        ext.observe(&key, deadline())
+            .await
+            .unwrap()
+            .opening_origin()
+            .is_none()
+    );
+
+    clock_time.store(111, std::sync::atomic::Ordering::SeqCst);
+    let later = observe_opening_origin(&source, &observed, b_peer, deadline())
+        .await
+        .unwrap();
+    // Um controle M3 diferente em B impede a abertura mesmo com evidência pós-CAS válida.
+    let mut divergent = later.clone();
+    divergent.observation.0.m3.version += 1;
+    let different = ext
+        .record_opening_origin(&divergent, deadline())
+        .await
+        .unwrap();
+    assert!(
+        local_b
+            .open(
+                a_peer,
+                &high,
+                &different,
+                &promotion,
+                different.opening_origin().unwrap(),
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        gated.checkpoint(a_peer, deadline()).await,
+        Err(EffectError::RestoreClosed)
+    ));
+    assert_eq!(
+        different.authorization_sha256(),
+        observed.authorization_sha256()
+    );
+
+    let observed = ext.record_opening_origin(&later, deadline()).await.unwrap();
+    assert_eq!(observed.origin(), Some(&a_observed));
+    assert_ne!(observed.opening_origin(), observed.origin());
+    local_b
+        .opening_candidate(a_peer, &high, &observed, deadline())
+        .await
+        .unwrap();
     local_b
         .open(
             a_peer,
             &high,
             &observed,
             &promotion,
-            observed.origin().unwrap(),
+            observed.opening_origin().unwrap(),
             deadline(),
         )
         .await
@@ -536,7 +610,7 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
                 &high,
                 &observed,
                 &promotion,
-                observed.origin().unwrap(),
+                observed.opening_origin().unwrap(),
                 deadline()
             )
             .await,

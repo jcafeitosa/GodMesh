@@ -48,13 +48,38 @@ pub struct ExternalObservation {
     pub(super) binding: super::Binding,
     pub(super) phase: ExternalPhase,
     pub(super) decision: Option<Decision>,
+    opening_origin: Option<super::OriginObservation>,
     pub(super) origin: Option<super::OriginObservation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Decision {
+    pub consumed_at: i64,
     pub authorization: [u8; 32],
     pub reconciliation: [u8; 32],
+}
+
+/// Leitura de A efetuada após observar a decisão externa.
+#[cfg_attr(test, derive(Clone))]
+pub struct OpeningOrigin {
+    binding: super::Binding,
+    decision: Decision,
+    pub(super) observation: super::OriginObservation,
+}
+
+pub async fn observe_opening_origin(
+    service: &super::ReplicaService,
+    consumed: &ExternalObservation,
+    peer: super::SessionPeer<'_>,
+    deadline: Instant,
+) -> Result<OpeningOrigin, Error> {
+    let decision = consumed.decision.ok_or(Error::Incomplete)?;
+    let observation = super::observe_origin(service, &consumed.binding.key, peer, deadline).await?;
+    Ok(OpeningOrigin {
+        binding: consumed.binding.clone(),
+        decision,
+        observation,
+    })
 }
 
 impl ExternalObservation {
@@ -66,6 +91,9 @@ impl ExternalObservation {
     }
     pub fn origin(&self) -> Option<&super::OriginObservation> {
         self.origin.as_ref()
+    }
+    pub fn opening_origin(&self) -> Option<&super::OriginObservation> {
+        self.opening_origin.as_ref()
     }
     pub fn authorization_sha256(&self) -> Option<[u8; 32]> {
         self.decision.map(|d| d.authorization)
@@ -232,6 +260,45 @@ impl ExternalStore {
         .await
     }
 
+    pub async fn record_opening_origin(
+        &self,
+        opening: &OpeningOrigin,
+        deadline: Instant,
+    ) -> Result<ExternalObservation, Error> {
+        let binding = &opening.binding;
+        let origin = &opening.observation;
+        let data = origin.encode()?;
+        in_tx(&self.0, deadline, async |db| {
+            let current = observe(db, &binding.key, true).await?;
+            let now = (self.1)();
+            if current.binding != *binding
+                || current.decision != Some(opening.decision)
+                || origin.0.sampled_at < opening.decision.consumed_at
+                || !(origin.0.sampled_at..origin.0.valid_until).contains(&now)
+                || current
+                    .opening_origin()
+                    .is_some_and(|previous| previous.0.sampled_at > origin.0.sampled_at)
+            {
+                return Err(Error::Conflict);
+            }
+            sql_budget::refresh(db).await?;
+            keyed!(
+                concat!(
+                    "UPDATE federation_restore_decision SET opening_origin_observation=$10 WHERE ",
+                    where_key!(),
+                    " AND generation=$9"
+                ),
+                binding.key
+            )
+            .bind(binding.generation as i64)
+            .bind(data)
+            .execute(&mut *db)
+            .await?;
+            observe(db, &binding.key, true).await
+        })
+        .await
+    }
+
     pub async fn consume(
         &self,
         promotion: &VerifiedPromotion,
@@ -239,13 +306,11 @@ impl ExternalStore {
         deadline: Instant,
     ) -> Result<ExternalObservation, Error> {
         let body = promotion.promotion();
-        let expected = Decision {
-            authorization: promotion.digest(),
-            reconciliation: body.reconciliation_sha256,
-        };
-        if candidate.authorization != Some(expected.authorization)
+        let authorization = promotion.digest();
+        let reconciliation = body.reconciliation_sha256;
+        if candidate.authorization != Some(authorization)
             || !candidate.binding.matches_promotion(body)
-            || candidate.reconciliation.digest()? != expected.reconciliation
+            || candidate.reconciliation.digest()? != reconciliation
         {
             return Err(Error::Conflict);
         }
@@ -253,15 +318,15 @@ impl ExternalStore {
             let observed = observe(db,&body.key,true).await?;
             if observed.binding != candidate.binding || observed.origin.as_ref()!=Some(&candidate.origin) { return Err(Error::Conflict); }
             if observed.phase == ExternalPhase::PromotionConsumed {
-                return if observed.decision == Some(expected) { Ok(observed) } else { Err(Error::Conflict) };
+                return if observed.decision.is_some_and(|d| d.authorization == authorization && d.reconciliation == reconciliation) { Ok(observed) } else { Err(Error::Conflict) };
             }
             let now = (self.1)();
             if !super::window(body,now) || now >= candidate.valid_until { return Err(Error::Incomplete); }
             sql_budget::refresh(db).await?;
-            let query = format!("INSERT INTO federation_restore_decision ({KEY_SQL},generation,authorization_sha256,reconciliation_sha256)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)");
+            let query = format!("INSERT INTO federation_restore_decision ({KEY_SQL},generation,authorization_sha256,reconciliation_sha256,consumed_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)");
             keyed!(sqlx::AssertSqlSafe(query),body.key).bind(body.target_generation as i64)
-                .bind(&expected.authorization[..]).bind(&expected.reconciliation[..]).execute(&mut *db).await?;
+                .bind(&authorization[..]).bind(&reconciliation[..]).bind(now).execute(&mut *db).await?;
             sql_budget::refresh(db).await?;
             let changed = keyed!(concat!(
                 "UPDATE federation_restore_control SET phase='promotion_consumed' WHERE ",where_key!(),
@@ -295,7 +360,7 @@ async fn observe(
         sql_budget::refresh(db).await?;
     }
     let query=format!("SELECT c.generation,c.target_db_id,c.high_water_sha256,c.fence_sha256,c.phase,
-         d.authorization_sha256,d.reconciliation_sha256,c.origin_observation
+         d.authorization_sha256,d.reconciliation_sha256,d.consumed_at,d.opening_origin_observation,c.origin_observation
          FROM federation_restore_control c LEFT JOIN federation_restore_decision d USING ({KEY_SQL},generation)
          WHERE {}",where_key!());
     // USING mescla as colunas comuns da chave no SELECT.
@@ -319,6 +384,7 @@ async fn observe(
         ("promotion_consumed", Some(auth), Some(reconciliation)) => (
             ExternalPhase::PromotionConsumed,
             Some(Decision {
+                consumed_at: row.try_get("consumed_at")?,
                 authorization: auth.try_into().map_err(|_| Error::Incomplete)?,
                 reconciliation: reconciliation.try_into().map_err(|_| Error::Incomplete)?,
             }),
@@ -334,10 +400,20 @@ async fn observe(
     {
         return Err(Error::Incomplete);
     }
+    let opening_origin = row
+        .try_get::<Option<&str>, _>("opening_origin_observation")?
+        .map(super::OriginObservation::decode)
+        .transpose()?;
+    if let Some(opening) = &opening_origin {
+        if opening.0.key != *key || decision.is_none_or(|d| opening.0.sampled_at < d.consumed_at) {
+            return Err(Error::Incomplete);
+        }
+    }
     Ok(ExternalObservation {
         binding,
         phase,
         decision,
         origin,
+        opening_origin,
     })
 }

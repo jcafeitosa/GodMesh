@@ -17,6 +17,8 @@ CREATE TABLE federation_restore_decision (
     authority_epoch bigint NOT NULL CHECK (authority_epoch>0),
     generation bigint NOT NULL CHECK (generation>0),
     authorization_sha256 bytea NOT NULL CHECK (octet_length(authorization_sha256)=32),
+    opening_origin_observation text,
+    consumed_at bigint NOT NULL,
     reconciliation_sha256 bytea NOT NULL CHECK (octet_length(reconciliation_sha256)=32),
     PRIMARY KEY (fixture_id,cluster,local_node,origin_node,tenant_id,stream_id,partition,authority_epoch,generation),
     FOREIGN KEY (fixture_id,cluster,local_node,origin_node,tenant_id,stream_id,partition,authority_epoch)

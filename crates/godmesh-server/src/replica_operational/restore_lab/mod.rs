@@ -8,7 +8,9 @@ mod store;
 pub use controls::{CutObservation, M3Tuple, OriginObservation, observe_cut, observe_origin};
 pub use local::{AdmissionGate, LocalPhase, LocalRestore, allocation_id};
 pub use operations::{BackupArtifact, PromotionCandidate, capture_gap};
-pub use store::{ExternalObservation, ExternalPhase, ExternalStore};
+pub use store::{
+    ExternalObservation, ExternalPhase, ExternalStore, OpeningOrigin, observe_opening_origin,
+};
 
 use godmesh_federation::restore_evidence::{
     RestoreError, RestoreKey, RestorePromotionV1, VerifiedHighWater,

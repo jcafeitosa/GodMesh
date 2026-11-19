@@ -203,6 +203,27 @@ impl LocalRestore {
             .await
     }
 
+    pub async fn opening_candidate(
+        &self,
+        peer: SessionPeer<'_>,
+        evidence: &VerifiedHighWater,
+        observed: &ExternalObservation,
+        deadline: Instant,
+    ) -> Result<PromotionCandidate, Error> {
+        self.check_mark(evidence, observed)?;
+        let origin = observed.opening_origin().ok_or(Error::Incomplete)?;
+        let decision = observed.decision.ok_or(Error::Incomplete)?;
+        let candidate = self
+            .promotion_candidate(peer, evidence, origin, deadline)
+            .await?;
+        if candidate.authorization != Some(decision.authorization)
+            || candidate.reconciliation.digest()? != decision.reconciliation
+        {
+            return Err(Error::Conflict);
+        }
+        Ok(candidate)
+    }
+
     /// Persiste a autorização verificada antes do CAS, permanecendo fechado.
     pub async fn prepare_promotion(
         &self,
@@ -249,7 +270,7 @@ impl LocalRestore {
     ) -> Result<(), Error> {
         self.check_mark(evidence, observed)?;
         let p = promotion.promotion();
-        if observed.origin() != Some(origin) {
+        if observed.opening_origin() != Some(origin) {
             return Err(Error::Conflict);
         }
         let decision = observed.decision.ok_or(Error::Incomplete)?;
