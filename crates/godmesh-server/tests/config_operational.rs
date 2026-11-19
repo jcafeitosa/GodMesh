@@ -1368,14 +1368,135 @@ async fn pull_commit_lento_tem_efeito_desconhecido_e_notifica_apos_confirmacao()
             effect_unknown: true
         })
     );
-    tokio::time::timeout(Duration::from_secs(2), changes.changed())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(snapshot(&s.receiver_db).await, (1, 1));
+    // A tarefa pode confirmar ou o próprio PostgreSQL pode cancelar
+    // a instrução. A trava garante que observamos após o fim do COMMIT.
+    let mut settled = s.receiver_db.begin().await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        s.receiver_portable.lock_cluster_guard(&mut settled),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let durable = snapshot(&s.receiver_db).await;
+    settled.rollback().await.unwrap();
+    match durable {
+        (1, 1) => tokio::time::timeout(Duration::from_secs(2), changes.changed())
+            .await
+            .unwrap()
+            .unwrap(),
+        (0, 0) => assert!(!changes.has_changed().unwrap()),
+        _ => panic!("frame e auditoria devem ser atômicos"),
+    }
     assert_eq!(
         client.seen.lock().unwrap().len(),
         1,
         "efeito desconhecido não entra em retry"
     );
+}
+
+#[tokio::test]
+async fn pull_devolve_conexao_enquanto_lock_externo_ainda_esta_retido() {
+    use sqlx::postgres::PgPoolOptions;
+    let Some(a) = database("pool_a").await else {
+        return;
+    };
+    let b = database("pool_b").await.unwrap();
+    let s = Scenario::new(a, b, "https://127.0.0.1").await;
+    let small = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*s.receiver_db.connect_options()).clone())
+        .await
+        .unwrap();
+    let portal = portable(small.clone(), s.receiver.clone(), &[&s.issuer, &s.receiver]);
+    let mut cfg = s.receiver_settings.clone();
+    cfg.pull_timeout = Duration::from_millis(150);
+    cfg.max_attempts = std::num::NonZeroUsize::MIN;
+    let receiver = plane(portal.clone(), s.receiver.clone(), cfg).await;
+    let (frame, hash) = signed(&s.voters, 1, 1, 1);
+    let reply = data_reply(frame, &hash);
+    for conditional in [true, false] {
+        let mut barrier = s.receiver_db.begin().await.unwrap();
+        if conditional {
+            portal.lock_cluster_guard(&mut barrier).await.unwrap();
+        } else {
+            sqlx::query("LOCK TABLE federation_peer IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+        }
+        for _ in 0..4 {
+            let client = Script::new(peer(&s.issuer), [Ok(reply.clone())]);
+            assert_eq!(
+                receiver.poll_cycle(&client).await,
+                Err(PullError::Storage {
+                    effect_unknown: false
+                })
+            );
+            assert_eq!(client.seen.lock().unwrap().len(), usize::from(!conditional));
+        }
+        let setting: String = tokio::time::timeout(
+            Duration::from_secs(1),
+            sqlx::query_scalar("SHOW statement_timeout").fetch_one(&small),
+        )
+        .await
+        .expect("a única conexão deve voltar ao pool antes da liberação do lock")
+        .unwrap();
+        assert_eq!(setting, "0", "timeout não pode vazar da transação");
+        assert_eq!(snapshot(&s.receiver_db).await, (0, 0));
+        barrier.rollback().await.unwrap();
+    }
+    assert_eq!(
+        receiver
+            .poll_cycle(&Script::new(peer(&s.issuer), [Ok(reply)]))
+            .await
+            .unwrap(),
+        PullResult::Written(WriteOutcome::Accepted)
+    );
+}
+
+#[tokio::test]
+async fn limite_pg_preserva_prazo_preconfigurado_e_escopo_local() {
+    let Some(pool) = database("pg_limit").await else {
+        return;
+    };
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("SET statement_timeout = '2s'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let mut tx = sqlx::Connection::begin(&mut *conn).await.unwrap();
+    let setting = "SELECT setting::integer FROM pg_settings WHERE name = 'statement_timeout'";
+    use godmesh_server::config_operational::limit_statement_time;
+    use tokio::time::Instant;
+    limit_statement_time(&mut tx, Instant::now() + Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>(setting)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        2000
+    );
+    limit_statement_time(&mut tx, Instant::now() + Duration::from_millis(250))
+        .await
+        .unwrap();
+    let reduced: i32 = sqlx::query_scalar(setting)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert!((1..=250).contains(&reduced));
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>(setting)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap(),
+        2000
+    );
+    sqlx::query("RESET statement_timeout")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
 }

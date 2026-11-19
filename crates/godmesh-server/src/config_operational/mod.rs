@@ -10,7 +10,10 @@ use std::sync::Arc;
 
 use godmesh_federation::NodeIdentity;
 use sqlx::{Postgres, Transaction};
-use tokio::sync::{Mutex, watch};
+use tokio::{
+    sync::{Mutex, watch},
+    time::Instant,
+};
 
 use crate::{
     admission::{Admission, AdmissionConfig},
@@ -25,6 +28,30 @@ pub use pull::{
 pub use settings::{ConfigError, ConfigPlaneConfig, Publisher};
 
 pub use crate::config_https::PeerIdentity as Peer;
+
+/// Limita a execução SQL ao tempo restante, em milissegundos, apenas nesta
+/// transação. Conserva um `statement_timeout` vigente menor.
+pub async fn limit_statement_time(
+    tx: &mut Transaction<'_, Postgres>,
+    deadline: Instant,
+) -> Result<(), sqlx::Error> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(sqlx::Error::Protocol("prazo PostgreSQL esgotado".into()));
+    }
+    let remaining_ms = (deadline - now).as_millis().clamp(1, i32::MAX as u128) as i32;
+    // pg_settings.setting usa a unidade nativa (ms) mesmo quando SHOW
+    // formata em segundos. Zero significa ausência de limite.
+    sqlx::query(
+        "SELECT set_config('statement_timeout',
+            LEAST(NULLIF(setting::integer, 0), $1)::text, true)
+         FROM pg_settings WHERE name = 'statement_timeout'",
+    )
+    .bind(remaining_ms)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(())
+}
 
 pub struct ConfigPlane {
     config: ConfigPlaneConfig,

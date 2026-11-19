@@ -11,6 +11,7 @@ use tokio::{
 use super::{
     ConfigPlane, Peer, Publisher,
     api::{PATH, etag, json_media, parse_remote_error, read_etag},
+    limit_statement_time,
 };
 use crate::{
     config_bundle::{Role, WriteError, WriteOutcome},
@@ -202,8 +203,11 @@ impl ConfigPlane {
         unreachable!("o orçamento de tentativas é positivo");
     }
 
-    async fn conditional_hash(&self) -> Result<Option<[u8; 32]>, PullError> {
+    async fn conditional_hash(&self, deadline: Instant) -> Result<Option<[u8; 32]>, PullError> {
         let mut tx = self.begin().await.map_err(storage)?;
+        limit_statement_time(&mut tx, deadline)
+            .await
+            .map_err(storage)?;
         let mut guard = self
             .portable
             .lock_cluster_guard(&mut tx)
@@ -223,7 +227,7 @@ impl ConfigPlane {
         target: &PathAndQuery,
     ) -> Result<PullResult, PullError> {
         let deadline = Instant::now() + self.config.pull_timeout;
-        let expected = timeout_at(deadline, self.conditional_hash())
+        let expected = timeout_at(deadline, self.conditional_hash(deadline))
             .await
             .map_err(|_| no_effect())??;
         let conditional = expected.as_ref().map(etag);
@@ -296,11 +300,18 @@ impl ConfigPlane {
             .await
             .map_err(|_| no_effect())?
             .map_err(storage)?;
-        let written = timeout_at(deadline, self.prepare_download(&mut tx, &response))
-            .await
-            .map_err(|_| no_effect())?;
+        let written = timeout_at(
+            deadline,
+            self.prepare_download(&mut tx, &response, deadline),
+        )
+        .await
+        .map_err(|_| no_effect())?;
         match written {
             Ok(PullResult::Written(outcome)) => {
+                timeout_at(deadline, limit_statement_time(&mut tx, deadline))
+                    .await
+                    .map_err(|_| no_effect())?
+                    .map_err(storage)?;
                 // timeout_at pode consultar o futuro interior no instante
                 // limite. Não inicie COMMIT se o orçamento já acabou.
                 if Instant::now() >= deadline {
@@ -329,7 +340,9 @@ impl ConfigPlane {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         response: &PullResponse,
+        deadline: Instant,
     ) -> Result<PullResult, PullError> {
+        limit_statement_time(tx, deadline).await.map_err(storage)?;
         let mut guard = self
             .portable
             .lock_cluster_guard(tx)
