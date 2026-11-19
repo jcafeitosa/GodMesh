@@ -348,25 +348,15 @@ async fn oferta_confirmacao_vigencia_importacao_e_revogacao() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_aplica_escopo_envelope_quota_e_frame() {
+async fn serve_portable(
+    portable: Arc<PortableJoin>,
+    admission: godmesh_server::admission::AdmissionConfig,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     use godmesh_identity::grant::{FreshnessSource, GrantPredicate, OfflineOp, RevocationState};
-    use godmesh_server::admission::AdmissionConfig;
     use godmesh_server::auth::{GrantRecord, GrantRegistry, Scope, Subject};
     use godmesh_server::federation::DecisionConfig;
     use godmesh_server::http::{HostTelemetry, router_runtime_with_portable};
-    use serde_json::json;
 
-    let Some(pool) = isolated_pool("http").await else {
-        return;
-    };
-    let root = Arc::new(NodeIdentity::generate_in_memory().unwrap());
-    let mut env = configuration(&root);
-    env.insert("GODMESH_FEDERATION_PORTABLE_MAX_FRAME_BYTES", "192".into());
-    let config = PortableJoinConfig::from_env_with(|k| env.get(k).cloned())
-        .unwrap()
-        .unwrap();
-    let portable = Arc::new(PortableJoin::new(config, pool.clone(), root));
     let grant = |token: &str, scope: Scope| {
         (
             token.to_owned(),
@@ -397,13 +387,10 @@ async fn http_aplica_escopo_envelope_quota_e_frame() {
         grant("read-test", Scope::FederationRead),
     ]);
     let router = router_runtime_with_portable(
-        pool,
+        portable.pool().clone(),
         grants,
         None,
-        AdmissionConfig {
-            max_body_bytes: 512,
-            ..AdmissionConfig::default()
-        },
+        admission,
         false,
         HostTelemetry::default(),
         Arc::new(DecisionConfig::default()),
@@ -414,6 +401,32 @@ async fn http_aplica_escopo_envelope_quota_e_frame() {
     let runner = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
+    (addr, runner)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_aplica_escopo_envelope_quota_e_frame() {
+    use godmesh_server::admission::AdmissionConfig;
+    use serde_json::json;
+
+    let Some(pool) = isolated_pool("http").await else {
+        return;
+    };
+    let root = Arc::new(NodeIdentity::generate_in_memory().unwrap());
+    let mut env = configuration(&root);
+    env.insert("GODMESH_FEDERATION_PORTABLE_MAX_FRAME_BYTES", "192".into());
+    let config = PortableJoinConfig::from_env_with(|k| env.get(k).cloned())
+        .unwrap()
+        .unwrap();
+    let portable = Arc::new(PortableJoin::new(config, pool.clone(), root));
+    let (addr, runner) = serve_portable(
+        portable,
+        AdmissionConfig {
+            max_body_bytes: 512,
+            ..AdmissionConfig::default()
+        },
+    )
+    .await;
     tokio::task::spawn_blocking(move || {
         let path = "/v1/federation/local-manifest";
         assert_eq!(common::call(addr, "GET", path, None, None).status, 401);
@@ -847,4 +860,166 @@ async fn delegacao_e_recibo_tardio_bloqueiam_descendentes_e_permitem_cadeia_alte
         .await,
         Err(PortableJoinError::Validity)
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_recupera_confirmacao_apos_timeout_e_recibo_apos_expiracao() {
+    use std::time::Duration;
+
+    use godmesh_federation::join_authority::JoinRevocationV1;
+    use godmesh_federation::join_chain::JoinChainV2;
+    use godmesh_federation::now_unix;
+    use godmesh_server::admission::AdmissionConfig;
+    use serde_json::{Value, json};
+
+    async fn post(addr: std::net::SocketAddr, path: String, body: Value) -> common::HttpResponse {
+        tokio::task::spawn_blocking(move || {
+            common::call(
+                addr,
+                "POST",
+                &path,
+                Some("admin-test"),
+                Some(&body.to_string()),
+            )
+        })
+        .await
+        .unwrap()
+    }
+
+    let Some(a_db) = isolated_pool("http_root").await else {
+        return;
+    };
+    let b_db = isolated_pool("http_receiver").await.unwrap();
+    let root = Arc::new(NodeIdentity::generate_in_memory().unwrap());
+    let member = Arc::new(NodeIdentity::generate_in_memory().unwrap());
+    let env = configuration(&root);
+    let cfg = PortableJoinConfig::from_env_with(|key| env.get(key).cloned())
+        .unwrap()
+        .unwrap();
+    let a = Arc::new(PortableJoin::new(cfg.clone(), a_db.clone(), root.clone()));
+    let b = Arc::new(PortableJoin::new(cfg, b_db, member));
+    let (root_addr, root_server) = serve_portable(
+        a.clone(),
+        AdmissionConfig {
+            request_timeout: Duration::from_millis(250),
+            ..AdmissionConfig::default()
+        },
+    )
+    .await;
+    let (peer_addr, peer_server) = serve_portable(b.clone(), AdmissionConfig::default()).await;
+
+    let get = |addr, path: String| {
+        tokio::task::spawn_blocking(move || common::get(addr, &path, "admin-test"))
+    };
+    let manifest = get(peer_addr, "/v1/federation/local-manifest".into())
+        .await
+        .unwrap()
+        .json()["manifest"]
+        .clone();
+    let reply = post(
+        root_addr,
+        "/v1/federation/join-requests".into(),
+        manifest.clone(),
+    )
+    .await;
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    let request = reply.json();
+    let id = request["join_request_id"].as_str().unwrap();
+    let legacy = post(
+        root_addr,
+        format!("/v1/federation/join-requests/{id}/approve"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(legacy.json()["error"], "federation_governance_disabled");
+    let now = now_unix();
+    let expiry = now + 8;
+    let offer = post(
+        root_addr,
+        "/v1/federation/join-signatures".into(),
+        json!({
+            "join_request_id": id, "manifest": manifest, "can_approve": false,
+            "not_before": now, "expires_at": expiry, "epoch": 1,
+        }),
+    )
+    .await;
+    assert_eq!(offer.status, 200, "{}", offer.body);
+    let offer = offer.json();
+    let approval_path = format!("/v1/federation/join-requests/{id}/approve-v2");
+    let proof_path = format!("/v1/federation/join-requests/{id}/proof");
+
+    let mut lock = a_db.begin().await.unwrap();
+    a.lock_cluster(&mut lock).await.unwrap();
+    let timed_out = post(root_addr, approval_path.clone(), offer.clone()).await;
+    assert_eq!(timed_out.status, 503, "{}", timed_out.body);
+    assert_eq!(timed_out.json()["error"], "request_timeout");
+    assert_eq!(timed_out.json()["effect"], "unknown");
+    lock.rollback().await.unwrap();
+    assert_eq!(
+        get(root_addr, proof_path.clone()).await.unwrap().status,
+        404
+    );
+    let confirmed = post(root_addr, approval_path.clone(), offer.clone()).await;
+    assert_eq!(confirmed.status, 201, "{}", confirmed.body);
+    assert_eq!(confirmed.json(), offer);
+    assert_eq!(get(root_addr, proof_path).await.unwrap().json(), offer);
+
+    let issued = post(
+        root_addr,
+        "/v1/federation/join-validity".into(),
+        offer.clone(),
+    )
+    .await;
+    assert_eq!(issued.status, 200, "{}", issued.body);
+    assert_eq!(issued.json()["validity"]["expires_at"], expiry);
+    let chain: JoinChainV2 = serde_json::from_str(offer["chain_json"].as_str().unwrap()).unwrap();
+    let mut revoke = JoinRevocationV1 {
+        cluster: a.cluster().into(),
+        root_node_id: root.node_id().into(),
+        target_digest: chain.links[0].certificate.digest().unwrap(),
+        revoker_node_id: String::new(),
+        epoch: 1,
+        signature: String::new(),
+    };
+    revoke.sign(&root);
+    let declaration = json!({"target_chain_json": offer["chain_json"], "revocation": revoke});
+    let revoked = post(
+        root_addr,
+        "/v1/federation/join-revocations".into(),
+        declaration.clone(),
+    )
+    .await;
+    assert_eq!(revoked.status, 201, "{}", revoked.body);
+    let receipt = revoked.json();
+    assert_eq!(
+        post(
+            root_addr,
+            "/v1/federation/join-validity".into(),
+            offer.clone()
+        )
+        .await
+        .json()["error"],
+        "join_proof_revoked"
+    );
+
+    tokio::time::sleep(Duration::from_secs((expiry - now_unix()).max(0) as u64)).await;
+    assert!(now_unix() >= expiry);
+    let replay = post(root_addr, approval_path, offer.clone()).await;
+    assert_eq!(replay.status, 200, "{}", replay.body);
+    assert_eq!(replay.json(), offer);
+    let replay = post(
+        root_addr,
+        "/v1/federation/join-revocations".into(),
+        declaration,
+    )
+    .await;
+    assert_eq!(replay.status, 200, "{}", replay.body);
+    assert_eq!(replay.json(), receipt);
+    let late = post(peer_addr, "/v1/federation/join-revocation-imports".into(), json!({
+        "target_chain_json": offer["chain_json"], "revocation": receipt["revocation"], "receipt": receipt["receipt"],
+    })).await;
+    assert_eq!(late.status, 201, "{}", late.body);
+
+    root_server.abort();
+    peer_server.abort();
 }
