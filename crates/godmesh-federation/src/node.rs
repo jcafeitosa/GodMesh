@@ -158,6 +158,8 @@ pub enum LinkAuthorizationError {
     Denied,
     /// A autoridade durável não pôde ser consultada.
     Unavailable,
+    /// A consulta atingiu um limite de prazo da tentativa.
+    Timeout,
 }
 
 /// Autorização que mantém a proteção até o fim da atualização local.
@@ -188,6 +190,19 @@ pub trait LinkAuthorizer: Send + Sync {
         local: &'a LinkIdentity,
         remote: &'a LinkIdentity,
     ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>>;
+
+    /// Autoriza uma stream dentro do prazo absoluto de admissão. O transporte
+    /// limita a espera. Implementações com SQL podem usar o mesmo deadline
+    /// para limitar locks e instruções e devem limpar a transação ao cancelar.
+    /// Retorne [LinkAuthorizationError::Timeout] quando esses limites expirarem.
+    fn authorize_until<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+        _deadline: tokio::time::Instant,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
+        self.authorize(local, remote)
+    }
 
     /// Assina as alterações de confiança. Publique assim que a mudança durável
     /// for confirmada. Qualquer notificação ou o fechamento do canal invalida
@@ -287,6 +302,10 @@ impl FederationNode {
     ) -> Result<Self, TransportError> {
         if limits.max_streams_per_connection.get() > tokio::sync::Semaphore::MAX_PERMITS
             || usize::try_from(limits.max_frame_bytes.get()).is_err()
+            || limits.attempt_timeout.is_zero()
+            || tokio::time::Instant::now()
+                .checked_add(limits.attempt_timeout)
+                .is_none()
         {
             return Err(TransportError::Quic(
                 "limites de sessão inválidos".to_owned(),
@@ -542,6 +561,10 @@ impl OperationalLink {
         .await
         .map_err(|_| Rejection::NotAuthorized)?
         .map_err(|_| Rejection::NotAuthorized)?;
+        self.keep_permit(permit)
+    }
+
+    fn keep_permit(&self, permit: LinkPermit) -> Result<LinkPermit, Rejection> {
         if let Some(expires_at) = permit.expires_at {
             // Uma nova consulta pode encurtar o enlace. Para estendê-lo,
             // reabra a conexão sob a nova vigência.

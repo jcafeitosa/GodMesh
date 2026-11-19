@@ -937,6 +937,10 @@ async fn heartbeat_atrasado_entre_varreduras_nao_renova_evidencia() {
     managed.node.shutdown();
 }
 
+fn attempt_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + Duration::from_secs(4)
+}
+
 struct SessionSink(tokio::sync::mpsc::UnboundedSender<OperationalSession>);
 
 impl OperationalSessionHandler for SessionSink {
@@ -1011,6 +1015,16 @@ fn bind_session_fixture(
     config: FederationConfig,
     handler: Arc<dyn OperationalSessionHandler>,
 ) -> FederationNode {
+    bind_session_fixture_with_timeout(peer, authorizer, config, handler, Duration::from_secs(4))
+}
+
+fn bind_session_fixture_with_timeout(
+    peer: &RawPeer,
+    authorizer: Arc<dyn LinkAuthorizer>,
+    config: FederationConfig,
+    handler: Arc<dyn OperationalSessionHandler>,
+    attempt_timeout: Duration,
+) -> FederationNode {
     let identity = Arc::new(NodeIdentity::generate_in_memory().unwrap());
     peer.registry.insert(PeerRecord::authorized_from_key(
         &identity.public_key_bytes(),
@@ -1025,6 +1039,7 @@ fn bind_session_fixture(
         ([127, 0, 0, 1], 0).into(),
         authorizer,
         SessionLimits {
+            attempt_timeout,
             max_frame_bytes: NonZeroU32::new(4).unwrap(),
             max_streams_per_connection: NonZeroUsize::new(1).unwrap(),
         },
@@ -1109,8 +1124,11 @@ async fn cota_e_framing_sao_por_stream_e_preservam_fin() {
     let (node, mut callbacks) = session_node(&peer, TestAuthorizer::new(Ok(None)));
     let connection = session_handshake(&node, &peer).await;
     let session = next_session(&mut callbacks).await;
-    let mut outgoing = session.open_bi().await.unwrap();
-    assert!(matches!(session.open_bi().await, Err(SessionError::Busy)));
+    let mut outgoing = session.open_bi(attempt_deadline()).await.unwrap();
+    assert!(matches!(
+        session.open_bi(attempt_deadline()).await,
+        Err(SessionError::Busy)
+    ));
     let (mut overflow_send, mut overflow_recv) = connection.open_bi().await.unwrap();
     overflow_send.write_all(b"\0\0\0\x04pull").await.unwrap();
     assert!(matches!(session.accept_bi().await, Err(SessionError::Busy)));
@@ -1128,7 +1146,7 @@ async fn cota_e_framing_sao_por_stream_e_preservam_fin() {
     assert_eq!(outgoing.read_frame().await.unwrap(), b"pong");
     assert_eq!(outgoing.expect_fin().await, Err(SessionError::InvalidFrame));
     assert_eq!(outgoing.expect_fin().await, Err(SessionError::Closed));
-    assert!(session.open_bi().await.is_ok());
+    assert!(session.open_bi(attempt_deadline()).await.is_ok());
     drop(outgoing);
 
     for header in [b"\0\0\0\0".as_slice(), b"\0\0\0\x05", b"\0\0"] {
@@ -1156,8 +1174,11 @@ async fn perda_de_uma_sessao_nao_cancela_sessao_paralela() {
     tokio::time::timeout(Duration::from_secs(2), old.cancelled())
         .await
         .unwrap();
-    assert!(matches!(old.open_bi().await, Err(SessionError::Closed)));
-    let mut active = current.open_bi().await.unwrap();
+    assert!(matches!(
+        old.open_bi(attempt_deadline()).await,
+        Err(SessionError::Closed)
+    ));
+    let mut active = current.open_bi(attempt_deadline()).await.unwrap();
     assert!(second.close_reason().is_none());
 
     let (pending_read, ()) = tokio::join!(active.read_frame(), async {
@@ -1220,7 +1241,7 @@ async fn prazo_e_silencio_cancelam_io_da_sessao() {
             session_node_with_config(&peer, auth, config().with_heartbeat(interval, 4));
         let connection = session_handshake(&node, &peer).await;
         let session = next_session(&mut callbacks).await;
-        let mut stream = session.open_bi().await.unwrap();
+        let mut stream = session.open_bi(attempt_deadline()).await.unwrap();
         stream.write_frame(b"pull").await.unwrap();
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), stream.read_frame())
@@ -1229,7 +1250,10 @@ async fn prazo_e_silencio_cancelam_io_da_sessao() {
             Err(SessionError::Closed),
         );
         session.cancelled().await;
-        assert!(matches!(session.open_bi().await, Err(SessionError::Closed)));
+        assert!(matches!(
+            session.open_bi(attempt_deadline()).await,
+            Err(SessionError::Closed)
+        ));
         assert!(
             tokio::time::timeout(Duration::from_secs(2), connection.closed())
                 .await
@@ -1299,4 +1323,116 @@ async fn limpa_callback_cancelado_sem_interferir_na_conexao_substituta() {
     assert_eq!(next(&mut cancel).await, new_id);
     observer.cleanup.add_permits(1);
     assert_eq!(next(&mut finish).await, new_id);
+}
+
+struct SlowStreamAuthorization {
+    authority: Arc<TestAuthorizer>,
+    deadlines: Mutex<Vec<tokio::time::Instant>>,
+}
+
+impl LinkAuthorizer for SlowStreamAuthorization {
+    fn authorize<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
+        self.authority.authorize(local, remote)
+    }
+
+    fn authorize_until<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+        deadline: tokio::time::Instant,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
+        Box::pin(async move {
+            let attempt = {
+                let mut deadlines = self.deadlines.lock().unwrap();
+                deadlines.push(deadline);
+                deadlines.len()
+            };
+            match attempt {
+                1 => std::future::pending::<()>().await,
+                2 => return Err(LinkAuthorizationError::Timeout),
+                3 => sleep(Duration::from_millis(200)).await,
+                _ => {}
+            }
+            self.authority.authorize(local, remote).await
+        })
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.authority.subscribe()
+    }
+}
+
+#[tokio::test]
+async fn prazo_da_autorizacao_libera_cota_e_preserva_sessao() {
+    let peer = RawPeer::new(config());
+    let authority = Arc::new(SlowStreamAuthorization {
+        authority: TestAuthorizer::new(Ok(None)),
+        deadlines: Mutex::new(Vec::new()),
+    });
+    let (tx, mut callbacks) = tokio::sync::mpsc::unbounded_channel();
+    let node = bind_session_fixture_with_timeout(
+        &peer,
+        authority.clone(),
+        config(),
+        Arc::new(SessionSink(tx)),
+        Duration::from_millis(350),
+    );
+    let connection = session_handshake(&node, &peer).await;
+    let session = next_session(&mut callbacks).await;
+    let (mut send, mut recv) = connection.open_bi().await.unwrap();
+    send.write_all(b"\0\0\0\x04pull").await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), session.accept_bi()).await,
+        Ok(Err(SessionError::Timeout))
+    ));
+    assert!(recv.read_to_end(8).await.is_err());
+    assert!(connection.close_reason().is_none());
+    assert_eq!(
+        node.links().snapshot_or_never_seen(&peer.id).state,
+        LinkState::Ready
+    );
+
+    let (mut send, mut recv) = connection.open_bi().await.unwrap();
+    send.write_all(b"\0\0\0\x04pull").await.unwrap();
+    assert!(matches!(
+        session.accept_bi().await,
+        Err(SessionError::Timeout)
+    ));
+    assert!(recv.read_to_end(8).await.is_err());
+    assert!(connection.close_reason().is_none());
+
+    let (mut send, _recv) = connection.open_bi().await.unwrap();
+    send.write_all(b"\0\0\0\x04pull").await.unwrap();
+    let mut next = session.accept_bi().await.unwrap();
+    assert_eq!(next.deadline(), authority.deadlines.lock().unwrap()[2]);
+    assert_eq!(next.read_frame().await.unwrap(), b"pull");
+    // O peer não termina esta direção. O mesmo deadline vale para o FIN.
+    assert_eq!(
+        tokio::time::timeout_at(
+            next.deadline() + Duration::from_millis(80),
+            next.expect_fin()
+        )
+        .await,
+        Ok(Err(SessionError::Timeout)),
+    );
+    assert!(connection.close_reason().is_none());
+
+    let expired = tokio::time::Instant::now();
+    assert!(matches!(
+        session.open_bi(expired).await,
+        Err(SessionError::Timeout)
+    ));
+    let start = tokio::time::Instant::now();
+    let deadline = start + Duration::from_secs(8);
+    let outgoing = session.open_bi(deadline).await.unwrap();
+    assert_eq!(outgoing.deadline(), deadline);
+    let guard_deadline = authority.deadlines.lock().unwrap()[3];
+    assert!(guard_deadline >= start + Duration::from_secs(5));
+    assert!(guard_deadline <= tokio::time::Instant::now() + Duration::from_secs(5));
+    assert!(guard_deadline < deadline);
+    node.shutdown();
 }

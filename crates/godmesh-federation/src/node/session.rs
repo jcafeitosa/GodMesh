@@ -6,11 +6,17 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use quinn::{Connection, ReadError, ReadExactError, RecvStream, SendStream, VarInt, WriteError};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::time::{Instant, sleep_until, timeout_at};
 
-use super::{LinkIdentity, OperationalLink, close_with_rejection};
+use super::{
+    AUTHORIZATION_TIMEOUT, LinkAuthorizationError, LinkIdentity, OperationalLink,
+    close_with_rejection,
+};
+use crate::handshake::Rejection;
 use crate::link::PeerLinks;
 
 // Faixa de controle de streams, separada dos motivos de fechamento da conexão.
@@ -21,6 +27,8 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 /// Limites locais do dispatcher pós-manifesto.
 #[derive(Debug, Clone, Copy)]
 pub struct SessionLimits {
+    /// Orçamento da tentativa de entrada, contado a partir do aceite da stream.
+    pub attempt_timeout: Duration,
     /// Tamanho máximo do corpo, sem o prefixo de comprimento.
     pub max_frame_bytes: NonZeroU32,
     /// Cota total de streams abertas e aceitas por conexão.
@@ -43,6 +51,8 @@ pub trait OperationalSessionHandler: Send + Sync {
 pub enum SessionError {
     /// Cota local ou remota esgotada.
     Busy,
+    /// Prazo esgotado nesta stream, sem invalidar a conexão.
+    Timeout,
     /// Sessão encerrada ou sem autorização operacional.
     Closed,
     /// Enquadramento incompleto, excedente ou inválido.
@@ -55,6 +65,7 @@ impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Busy => "cota de streams esgotada",
+            Self::Timeout => "prazo da tentativa esgotado",
             Self::Closed => "sessão operacional encerrada",
             Self::InvalidFrame => "frame de sessão inválido",
             Self::Transport => "falha no transporte da stream",
@@ -69,6 +80,7 @@ struct SessionState {
     link: Arc<OperationalLink>,
     links: Arc<PeerLinks>,
     max_frame_bytes: u32,
+    attempt_timeout: Duration,
     slots: Arc<Semaphore>,
     accept: Mutex<()>,
 }
@@ -85,18 +97,29 @@ impl SessionState {
             .ok_or(SessionError::Closed)
     }
 
-    async fn authorize(&self) -> Result<(), SessionError> {
+    async fn authorize(&self, deadline: Instant) -> Result<(), SessionError> {
         self.check_ready()?;
+        let deadline = deadline.min(Instant::now() + AUTHORIZATION_TIMEOUT);
+        ensure_deadline(deadline)?;
         let connection = self.connection();
         let result = tokio::select! {
             biased;
             _ = connection.closed() => return Err(SessionError::Closed),
-            result = self.link.authorize() => result,
+            _ = sleep_until(deadline) => return Err(SessionError::Timeout),
+            result = self.link.authorizer.authorize_until(&self.link.local, &self.link.remote, deadline) => result,
         };
-        let _permit = result.map_err(|rejection| {
-            close_with_rejection(connection, rejection);
-            SessionError::Closed
-        })?;
+        // Um resultado pronto depois do prazo não autoriza nem invalida o enlace.
+        ensure_deadline(deadline)?;
+        if matches!(result, Err(LinkAuthorizationError::Timeout)) {
+            return Err(SessionError::Timeout);
+        }
+        let _permit = result
+            .map_err(|_| Rejection::NotAuthorized)
+            .and_then(|permit| self.link.keep_permit(permit))
+            .map_err(|rejection| {
+                close_with_rejection(connection, rejection);
+                SessionError::Closed
+            })?;
         self.check_ready()
     }
 
@@ -126,6 +149,7 @@ impl OperationalSession {
             link,
             links,
             max_frame_bytes: limits.max_frame_bytes.get(),
+            attempt_timeout: limits.attempt_timeout,
             slots: Arc::new(Semaphore::new(limits.max_streams_per_connection.get())),
             accept: Mutex::new(()),
         });
@@ -158,19 +182,20 @@ impl OperationalSession {
         self.state.connection().closed().await;
     }
 
-    /// Abre uma stream depois de adquirir cota e conferir autorização corrente.
-    pub async fn open_bi(&self) -> Result<OperationalBiStream, SessionError> {
+    /// Abre uma stream usando o prazo iniciado pelo chamador antes do pull.
+    pub async fn open_bi(&self, deadline: Instant) -> Result<OperationalBiStream, SessionError> {
         self.state.check_ready()?;
+        ensure_deadline(deadline)?;
         let slot = self.state.slot()?;
-        self.state.authorize().await?;
-        let (send, recv) = self
-            .state
-            .connection()
-            .open_bi()
+        self.state.authorize(deadline).await?;
+        ensure_deadline(deadline)?;
+        let (send, recv) = timeout_at(deadline, self.state.connection().open_bi())
             .await
+            .map_err(|_| SessionError::Timeout)?
             .map_err(|_| SessionError::Closed)?;
-        let stream = OperationalBiStream::new(&self.state, slot, send, recv);
+        let stream = OperationalBiStream::new(&self.state, slot, send, recv, deadline);
         self.state.check_ready()?;
+        ensure_deadline(deadline)?;
         Ok(stream)
     }
 
@@ -185,6 +210,10 @@ impl OperationalSession {
             .accept_bi()
             .await
             .map_err(|_| SessionError::Closed)?;
+        let Some(deadline) = Instant::now().checked_add(self.state.attempt_timeout) else {
+            abort_stream(&mut send, &mut recv, STREAM_ABORTED);
+            return Err(SessionError::Timeout);
+        };
         let slot = match self.state.slot() {
             Ok(slot) => slot,
             Err(error) => {
@@ -192,8 +221,9 @@ impl OperationalSession {
                 return Err(error);
             }
         };
-        let stream = OperationalBiStream::new(&self.state, slot, send, recv);
-        self.state.authorize().await?;
+        let stream = OperationalBiStream::new(&self.state, slot, send, recv, deadline);
+        self.state.authorize(deadline).await?;
+        ensure_deadline(deadline)?;
         Ok(stream)
     }
 }
@@ -209,6 +239,7 @@ pub struct OperationalBiStream {
     recv: RecvStream,
     sent_fin: bool,
     received_fin: bool,
+    deadline: Instant,
 }
 
 impl OperationalBiStream {
@@ -217,6 +248,7 @@ impl OperationalBiStream {
         slot: OwnedSemaphorePermit,
         send: SendStream,
         recv: RecvStream,
+        deadline: Instant,
     ) -> Self {
         Self {
             state: Arc::clone(state),
@@ -225,14 +257,26 @@ impl OperationalBiStream {
             recv,
             sent_fin: false,
             received_fin: false,
+            deadline,
         }
     }
 
-    fn check_open(&self) -> Result<(), SessionError> {
+    /// Prazo absoluto da tentativa, incluindo admissão e I/O.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    fn timed_out(&mut self) -> SessionError {
+        self.abort();
+        SessionError::Timeout
+    }
+
+    fn check_open(&mut self) -> Result<(), SessionError> {
         if self.slot.is_none() {
             return Err(SessionError::Closed);
         }
-        self.state.check_ready()
+        self.state.check_ready()?;
+        ensure_deadline(self.deadline).map_err(|_| self.timed_out())
     }
 
     fn incoming_error(&mut self, error: SessionError) -> SessionError {
@@ -258,10 +302,11 @@ impl OperationalBiStream {
     pub async fn read_frame(&mut self) -> Result<Vec<u8>, SessionError> {
         self.check_open()?;
         let mut header = [0; 4];
-        self.recv
-            .read_exact(&mut header)
+        before_deadline(self.deadline, self.recv.read_exact(&mut header))
             .await
+            .map_err(|_| self.timed_out())?
             .map_err(|error| self.incoming_error(exact_error(error)))?;
+        self.check_open()?;
         let length = u32::from_be_bytes(header);
         if length == 0 || length > self.state.max_frame_bytes {
             return Err(self.incoming_error(SessionError::InvalidFrame));
@@ -269,9 +314,9 @@ impl OperationalBiStream {
         self.check_open()?;
         let size = usize::try_from(length).map_err(|_| SessionError::InvalidFrame)?;
         let mut body = vec![0; size];
-        self.recv
-            .read_exact(&mut body)
+        before_deadline(self.deadline, self.recv.read_exact(&mut body))
             .await
+            .map_err(|_| self.timed_out())?
             .map_err(|error| self.incoming_error(exact_error(error)))?;
         self.check_open()?;
         Ok(body)
@@ -284,11 +329,15 @@ impl OperationalBiStream {
         if length == 0 || length > self.state.max_frame_bytes {
             return Err(SessionError::InvalidFrame);
         }
-        self.send
-            .write_all(&length.to_be_bytes())
+        before_deadline(self.deadline, self.send.write_all(&length.to_be_bytes()))
             .await
+            .map_err(|_| self.timed_out())?
             .map_err(write_error)?;
-        self.send.write_all(body).await.map_err(write_error)?;
+        self.check_open()?;
+        before_deadline(self.deadline, self.send.write_all(body))
+            .await
+            .map_err(|_| self.timed_out())?
+            .map_err(write_error)?;
         self.check_open()
     }
 
@@ -303,10 +352,9 @@ impl OperationalBiStream {
     /// Exige FIN na direção de recepção, sem aceitar bytes adicionais.
     pub async fn expect_fin(&mut self) -> Result<(), SessionError> {
         self.check_open()?;
-        if self
-            .recv
-            .read(&mut [0])
+        if before_deadline(self.deadline, self.recv.read(&mut [0]))
             .await
+            .map_err(|_| self.timed_out())?
             .map_err(read_error)?
             .is_some()
         {
@@ -321,6 +369,23 @@ impl Drop for OperationalBiStream {
     fn drop(&mut self) {
         self.abort();
     }
+}
+
+async fn before_deadline<T>(
+    deadline: Instant,
+    operation: impl Future<Output = T>,
+) -> Result<T, SessionError> {
+    let result = timeout_at(deadline, operation)
+        .await
+        .map_err(|_| SessionError::Timeout)?;
+    ensure_deadline(deadline)?;
+    Ok(result)
+}
+
+fn ensure_deadline(deadline: Instant) -> Result<(), SessionError> {
+    (Instant::now() < deadline)
+        .then_some(())
+        .ok_or(SessionError::Timeout)
 }
 
 fn abort_stream(send: &mut SendStream, recv: &mut RecvStream, code: u32) {
