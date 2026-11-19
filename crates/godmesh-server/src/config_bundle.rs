@@ -306,6 +306,44 @@ async fn reference(tx: &mut Tx<'_>, hash: Option<&str>) -> Result<Option<Artifac
     }
 }
 
+async fn accepted_and_incompatible(
+    tx: &mut Tx<'_>,
+    state: &State,
+    now: i64,
+) -> Result<bool, WriteError> {
+    crate::sql_budget::refresh(tx).await?;
+    let row = sqlx::query(
+        "SELECT $1::text AS accepted_ref, accepted.hash, accepted.version,
+                accepted.applies_at, accepted.expires_at, accepted.effective_after,
+                accepted.floor, accepted.software, accepted.accepted,
+                accepted.incompatible, accepted.resolution,
+                EXISTS (SELECT 1 FROM federation_config_frame
+                         WHERE incompatible AND NOT accepted
+                           AND version > COALESCE(
+                               (SELECT version FROM federation_config_frame WHERE hash = $1), 0
+                           )
+                           AND GREATEST(applies_at, effective_after) <= $2) AS incompatible_due
+           FROM (SELECT 1) AS singleton
+           LEFT JOIN federation_config_frame AS accepted ON accepted.hash = $1",
+    )
+    .bind(&state.accepted)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    let accepted_ref: Option<String> = row.try_get("accepted_ref")?;
+    let accepted_hash: Option<String> = row.try_get("hash")?;
+    match (accepted_ref, accepted_hash) {
+        (None, None) => {}
+        (Some(_), Some(_)) => {
+            Artifact::from_row(&row)?;
+        }
+        _ => return Err(corrupt()),
+    }
+    let incompatible_due = row.try_get("incompatible_due")?;
+    Ok(incompatible_due)
+}
+
 async fn stored_frame(tx: &mut Tx<'_>, hash: &str) -> Result<Vec<u8>, WriteError> {
     sqlx::query_scalar("SELECT frame FROM federation_config_frame WHERE hash = $1")
         .bind(hash)
@@ -1003,8 +1041,7 @@ impl BundleService {
         if state.recovering {
             return Ok(Fence::Blocked(Block::Recovering));
         }
-        let accepted = reference(tx, state.accepted.as_deref()).await?;
-        if incompatible_due(tx, accepted.map(|record| record.version), now).await? {
+        if accepted_and_incompatible(tx, &state, now).await? {
             return Ok(Fence::Blocked(Block::Incompatible));
         }
         if reference(tx, state.pending.as_deref())
