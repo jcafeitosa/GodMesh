@@ -577,3 +577,58 @@ async fn espera_lock_do_enlace(pool: &sqlx::PgPool, blocker: i32, waiter: i32) {
         }
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn receptor_a2_sem_opt_in_bloqueia_marcador_sem_detalhe() {
+    let Some(f) = ReceiverFixture::new("default_marker").await else {
+        return;
+    };
+    f.reserve().await;
+    let key = f.origin.public_key_hex();
+    let peer = SessionPeer {
+        node_id: f.origin.node_id(),
+        public_key: &key,
+        protocol: 1,
+    };
+    let initial = f.boot().await.unwrap();
+    assert_eq!(
+        initial.checkpoint(peer, deadline()).await.unwrap(),
+        ReceiverState::Ready { after_seq: 0 }
+    );
+    let ns = &f.config.namespace;
+    sqlx::query(
+        "INSERT INTO federation_snapshot_intent_marker
+        (local_node,origin_node,tenant_id,stream_id,partition,authority_epoch)
+        VALUES ($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(f.receiver.node_id())
+    .bind(&ns.origin_node)
+    .bind(&ns.tenant_id)
+    .bind(&ns.stream_id)
+    .bind(ns.partition)
+    .bind(f.config.authority_epoch)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let restarted = f.boot().await.unwrap();
+    assert!(matches!(
+        restarted.checkpoint(peer, deadline()).await,
+        Err(EffectError::SnapshotPending)
+    ));
+    assert!(matches!(
+        restarted
+            .apply_copy(
+                peer,
+                Limits::new(4, 4096, 8192).unwrap(),
+                &[f.frame(1)],
+                deadline()
+            )
+            .await,
+        Err(EffectError::SnapshotPending)
+    ));
+    let prefix: i64 = sqlx::query_scalar("SELECT prefix FROM federation_replica_checkpoint")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(prefix, 0);
+}

@@ -1,7 +1,13 @@
 //! Exclusivo dos ensaios em bancos criados pela fixture. O binário não contém
 //! um ponto de entrada para aplicar snapshots.
+mod intent;
 mod receipt;
+mod reconcile;
+#[cfg(test)]
 mod tests;
+
+pub use intent::AttemptId;
+pub use reconcile::{HarnessHistory, Recovery};
 
 use godmesh_federation::{
     NodeIdentity,
@@ -15,7 +21,7 @@ use super::{
 };
 
 #[derive(Debug)]
-enum SnapshotEffectError {
+pub enum SnapshotEffectError {
     Effect(EffectError),
     Codec(SnapshotError),
     Scope,
@@ -27,6 +33,12 @@ enum SnapshotEffectError {
     ReceiptInconsistent,
     SnapshotConflict,
     CheckpointMismatch,
+    Eligibility,
+    IntentPending,
+    AttemptMismatch,
+    IntentExpired,
+    IntentPolicy,
+    IntentInconsistent,
 }
 
 impl From<EffectError> for SnapshotEffectError {
@@ -59,10 +71,10 @@ impl From<SnapshotError> for SnapshotEffectError {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Window {
-    not_before: i64,
-    expires_at: i64,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub not_before: i64,
+    pub expires_at: i64,
 }
 
 impl Window {
@@ -132,7 +144,7 @@ fn manifest_size(
         .ok_or(SnapshotEffectError::LimitExceeded)
 }
 
-async fn capture(
+pub async fn capture(
     svc: &ReplicaService,
     signer: &NodeIdentity,
     peer: SessionPeer<'_>,
@@ -217,33 +229,61 @@ async fn capture(
 
 /// Só a fixture que criou o banco e conhece seu histórico constrói este tipo.
 /// Sua visibilidade fica dentro do módulo que só existe nos testes.
-struct EligibleReceiver(ReplicaService);
+pub struct EligibleReceiver(std::sync::Arc<ReplicaService>, std::num::NonZeroU64);
 
 #[derive(Debug, PartialEq, Eq)]
-struct PersistedLocal {
-    first: i64,
-    through: i64,
-    replay: bool,
+pub struct PersistedLocal {
+    pub first: i64,
+    pub through: i64,
+    pub replay: bool,
 }
 
 impl EligibleReceiver {
-    async fn apply(
+    pub async fn apply(
+        &self,
+        peer: SessionPeer<'_>,
+        attempt: AttemptId,
+        package: &[u8],
+        policy: &SnapshotPolicy,
+        deadline: Instant,
+    ) -> Result<PersistedLocal, SnapshotEffectError> {
+        self.apply_inner(
+            peer,
+            package,
+            policy,
+            deadline,
+            Some(attempt),
+            snapshot::verify_snapshot,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn apply_b2a(
         &self,
         peer: SessionPeer<'_>,
         package: &[u8],
         policy: &SnapshotPolicy,
         deadline: Instant,
     ) -> Result<PersistedLocal, SnapshotEffectError> {
-        self.apply_with_verifier(peer, package, policy, deadline, snapshot::verify_snapshot)
-            .await
+        self.apply_inner(
+            peer,
+            package,
+            policy,
+            deadline,
+            None,
+            snapshot::verify_snapshot,
+        )
+        .await
     }
 
-    async fn apply_with_verifier<'a>(
+    async fn apply_inner<'a>(
         &self,
         peer: SessionPeer<'_>,
         package: &'a [u8],
         policy: &SnapshotPolicy,
         deadline: Instant,
+        attempt: Option<AttemptId>,
         verify: impl FnOnce(&'a [u8], &SnapshotPolicy) -> Result<VerifiedSnapshot<'a>, SnapshotError>,
     ) -> Result<PersistedLocal, SnapshotEffectError> {
         let svc = &self.0;
@@ -251,21 +291,12 @@ impl EligibleReceiver {
         deadline_check(deadline)?;
         let verified = verify(package, policy)?;
         deadline_check(deadline)?;
-        let manifest = verified.manifest();
-        let base = manifest.base_seq as i64;
-        let cut = manifest.cut_seq as i64;
+        let facts = package_facts(package, &verified)?;
+        let base = facts.receipt.base;
+        let cut = facts.cut;
         let first = base + 1;
         let events = verified.events();
-        let window = Window {
-            not_before: manifest.not_before,
-            expires_at: manifest.expires_at,
-        };
-        let id = receipt::Identity {
-            base,
-            count: i64::from(manifest.event_count),
-            manifest: Sha256::digest(manifest.canonical_bytes()?).into(),
-            package: Sha256::digest(package).into(),
-        };
+        let window = facts.window;
         deadline_check(deadline)?;
         let authority = svc.authority(
             peer,
@@ -274,52 +305,63 @@ impl EligibleReceiver {
         let local = &svc.local_pin().node_id;
         svc.transact_with(deadline, async |guard, now| {
             svc.gates(guard, peer, now).await?;
-            let state = svc.check_receiver(guard, authority, now).await?;
-            let prefix = match state {
-                ReceiverState::Ready { after_seq } => after_seq,
-                ReceiverState::SuspendedHistory { blocked_next_seq } => {
-                    return Err(EffectError::SuspendedHistory { blocked_next_seq }.into());
-                }
+            let state = if attempt.is_some() {
+                svc.receiver_state_in_tx(guard, authority, now).await?
+            } else {
+                svc.check_receiver(guard, authority, now).await?
             };
+            let prefix = ready(state)?;
             window.check(now)?;
             let (class, region, _) = snapshot_read::scope(guard, svc.series()).await?;
             if class != policy.retention_class {
                 return Err(SnapshotEffectError::Scope);
+            }
+            if let Some(id) = attempt {
+                let active =
+                    super::intent_marker::pending(guard.connection(), local, svc.series()).await?;
+                if active != Some(id.get()) {
+                    return Err(SnapshotEffectError::AttemptMismatch);
+                }
+                let detail = intent::load(guard.connection(), local, svc.series(), id)
+                    .await?
+                    .ok_or(SnapshotEffectError::IntentInconsistent)?;
+                if detail.facts != facts {
+                    return Err(SnapshotEffectError::SnapshotConflict);
+                }
+                reconcile::check_detail(
+                    guard.connection(),
+                    local,
+                    svc.series(),
+                    &region,
+                    &detail,
+                    now,
+                )
+                .await?;
+                if now >= detail.expires_at {
+                    return Err(SnapshotEffectError::IntentExpired);
+                }
             }
             let current =
                 receipt::policy(guard.connection(), local, svc.series(), &region, None).await?;
             if let Some(stored) =
                 receipt::load(guard.connection(), local, svc.series(), cut).await?
             {
-                if stored.identity != id {
+                if stored.identity != facts.receipt {
                     return Err(SnapshotEffectError::SnapshotConflict);
                 }
-                if stored.jurisdiction != region {
-                    return Err(SnapshotEffectError::ReceiptInconsistent);
+                if attempt.is_some() {
+                    return Err(SnapshotEffectError::CheckpointMismatch);
                 }
-                let historical = receipt::policy(
+                reconcile::check_receipt(
                     guard.connection(),
                     local,
                     svc.series(),
                     &region,
-                    Some(&stored),
+                    &stored,
+                    window,
+                    now,
                 )
                 .await?;
-                let consistent_expiry = receipt_expiry(
-                    stored.applied_at,
-                    historical.seconds,
-                    window.expires_at,
-                    stored.proof_expires_at,
-                )?;
-                if consistent_expiry != stored.expires_at
-                    || stored.applied_at < window.not_before
-                    || stored.applied_at > now
-                {
-                    return Err(SnapshotEffectError::ReceiptInconsistent);
-                }
-                if now >= stored.expires_at {
-                    return Err(SnapshotEffectError::ReceiptExpired);
-                }
                 if prefix != cut {
                     return Err(SnapshotEffectError::CheckpointMismatch);
                 }
@@ -382,7 +424,7 @@ impl EligibleReceiver {
                 svc.series(),
                 cut,
                 &receipt::Receipt {
-                    identity: id,
+                    identity: facts.receipt,
                     policy_id: current.id,
                     policy_version: current.version,
                     applied_at: now,
@@ -400,6 +442,39 @@ impl EligibleReceiver {
         })
         .await
     }
+}
+
+fn ready(state: ReceiverState) -> Result<i64, SnapshotEffectError> {
+    match state {
+        ReceiverState::Ready { after_seq } => Ok(after_seq),
+        ReceiverState::SuspendedHistory { blocked_next_seq } => {
+            Err(EffectError::SuspendedHistory { blocked_next_seq }.into())
+        }
+    }
+}
+
+fn package_facts(
+    package: &[u8],
+    verified: &VerifiedSnapshot<'_>,
+) -> Result<intent::Facts, SnapshotEffectError> {
+    let manifest = verified.manifest();
+    let mut events = [0; 32];
+    hex::decode_to_slice(&manifest.events_digest, &mut events)
+        .map_err(|_| SnapshotEffectError::IntentInconsistent)?;
+    Ok(intent::Facts {
+        cut: manifest.cut_seq as i64,
+        receipt: receipt::Identity {
+            base: manifest.base_seq as i64,
+            count: i64::from(manifest.event_count),
+            manifest: Sha256::digest(manifest.canonical_bytes()?).into(),
+            package: Sha256::digest(package).into(),
+        },
+        events,
+        window: Window {
+            not_before: manifest.not_before,
+            expires_at: manifest.expires_at,
+        },
+    })
 }
 
 fn receipt_expiry(

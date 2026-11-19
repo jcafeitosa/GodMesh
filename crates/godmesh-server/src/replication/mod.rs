@@ -4,7 +4,7 @@
 //! autenticada na mesma transação, antes de expor qualquer resultado.
 //! O relógio é avaliado uma vez, depois do lock de namespace.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "snapshot-harness"))]
 pub(crate) mod snapshot_read;
 mod store;
 

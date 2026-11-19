@@ -1,11 +1,12 @@
 //! Efeitos M4-A2 após autenticação e correlação na fronteira da sessão.
 //! Cada método abre e termina sua transação antes de entregar o resultado.
 mod db;
+mod intent_marker;
 mod link;
 mod resume;
 mod settings;
-#[cfg(test)]
-mod snapshot_harness;
+#[cfg(any(test, feature = "snapshot-harness"))]
+pub mod snapshot_harness;
 
 pub use link::{authorize_link_in_tx, authorize_link_until};
 pub use settings::{ConfigError, Pin, ReplicaConfig, Role};
@@ -56,6 +57,7 @@ pub enum EffectError {
     Timeout,
     CommitUnknown(Option<sqlx::Error>),
     ResumeInconsistent,
+    SnapshotPending,
     StalePull,
     SuspendedHistory { blocked_next_seq: i64 },
 }
@@ -338,6 +340,21 @@ impl ReplicaService {
     }
 
     async fn check_receiver(
+        &self,
+        guard: &mut ClusterGuard<'_, '_>,
+        authority: CopyAuthority<'_>,
+        now: i64,
+    ) -> Result<ReceiverState, EffectError> {
+        if intent_marker::pending(guard.connection(), &self.local.node_id, self.series())
+            .await?
+            .is_some()
+        {
+            return Err(EffectError::SnapshotPending);
+        }
+        self.receiver_state_in_tx(guard, authority, now).await
+    }
+
+    async fn receiver_state_in_tx(
         &self,
         guard: &mut ClusterGuard<'_, '_>,
         authority: CopyAuthority<'_>,

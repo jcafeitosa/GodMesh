@@ -86,3 +86,66 @@ pub(crate) async fn exact_local_expiry(
     }
     expiry.ok_or(Error::SequenceGap)
 }
+
+pub(crate) async fn range_unused(
+    guard: &mut ClusterGuard<'_, '_>,
+    series: Series<'_>,
+    base: i64,
+    cut: i64,
+) -> Result<bool, Error> {
+    let ns = series.namespace;
+    let db = locked(guard, ns).await?;
+    crate::sql_budget::refresh(db).await?;
+    Ok(sqlx::query_scalar(
+        "SELECT NOT EXISTS (
+           SELECT 1 FROM event_position WHERE (origin_node,tenant_id,stream_id,partition,authority_epoch)=($1,$2,$3,$4,$5)
+             AND seq>$6 AND seq<=$7
+           UNION ALL
+           SELECT 1 FROM federation_replica_proof WHERE (origin_node,tenant_id,stream_id,partition,authority_epoch)=($1,$2,$3,$4,$5)
+             AND seq>$6 AND seq<=$7
+           UNION ALL
+           SELECT 1 FROM federation_replica_disposition WHERE (origin_node,tenant_id,stream_id,partition,authority_epoch)=($1,$2,$3,$4,$5)
+             AND seq>$6 AND seq<=$7
+         )",
+    ).bind(&ns.origin_node).bind(&ns.tenant_id).bind(&ns.stream_id).bind(ns.partition)
+      .bind(series.epoch).bind(base).bind(cut).fetch_one(db).await?)
+}
+
+pub(crate) async fn local_snapshot_proofs(
+    guard: &mut ClusterGuard<'_, '_>,
+    series: Series<'_>,
+    authority: CopyAuthority<'_>,
+    base: i64,
+    cut: i64,
+    now: i64,
+) -> Result<(Vec<Vec<u8>>, i64), Error> {
+    let first = base
+        .checked_add(1)
+        .filter(|n| *n > 0 && *n <= cut)
+        .ok_or(Error::SequenceGap)?;
+    let db = locked(guard, series.namespace).await?;
+    let r = load_series(db, series).await?;
+    if r.primary() {
+        return Err(Error::Authority);
+    }
+    let policy = store::current_policy(db, &r).await?;
+    let mut ttl = i64::MAX;
+    let mut remaining = authority.limits.max_data_bytes;
+    let mut frames = Vec::new();
+    for seq in first..=cut {
+        let proof = usable(db, &r, &policy, seq, now).await?;
+        verify_local_proof(&proof, &r, authority.origin, seq, false)?;
+        if frames.len() >= authority.limits.max_events
+            || proof.frame.len() > authority.limits.max_envelope_bytes
+        {
+            return Err(Error::LimitExceeded);
+        }
+        remaining = remaining
+            .checked_sub(4)
+            .and_then(|n| n.checked_sub(proof.frame.len()))
+            .ok_or(Error::LimitExceeded)?;
+        ttl = ttl.min(proof.expires_at);
+        frames.push(proof.frame);
+    }
+    Ok((frames, ttl))
+}

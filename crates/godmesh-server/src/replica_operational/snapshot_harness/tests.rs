@@ -74,6 +74,19 @@ impl Three {
             .await
             .unwrap();
         }
+        for dest in [&b, &c] {
+            sqlx::query(
+                "INSERT INTO federation_snapshot_intent_policy
+                VALUES ('test_intent',1,$1,$2,$3,$4,0,7,'BR','snapshot_intent',10,true,true)",
+            )
+            .bind(dest.receiver.node_id())
+            .bind(dest.origin.node_id())
+            .bind(tenant)
+            .bind(&dest.config.namespace.stream_id)
+            .execute(&dest.pool)
+            .await
+            .unwrap();
+        }
         let frames: Vec<_> = (1..=3)
             .map(|seq| [b" \t".to_vec(), a.frame(seq), b"\n".to_vec()].concat())
             .collect();
@@ -141,8 +154,8 @@ async fn tres_bancos_commit_atomico_replay_exato_e_base_positiva() {
     let Some(f) = Three::new("snapshot_commit").await else {
         return;
     };
-    let b = EligibleReceiver(f.b.boot().await.unwrap());
-    let c = EligibleReceiver(f.c.boot().await.unwrap());
+    let b = eligible_b2a(f.b.boot().await.unwrap());
+    let c = eligible_b2a(f.c.boot().await.unwrap());
     let policy = f.policy(&f.b);
     let p = f.capture(&policy, 0).await.unwrap();
     let expected = PersistedLocal {
@@ -158,7 +171,9 @@ async fn tres_bancos_commit_atomico_replay_exato_e_base_positiva() {
     // Falha no último INSERT, depois das escritas A1, faz rollback de tudo.
     sqlx::query("ALTER TABLE federation_snapshot_receipt ADD CONSTRAINT fixture_cut_failure CHECK (cut_seq<>3)")
         .execute(&f.b.pool).await.unwrap();
-    let failed = b.apply(peer(&policy.origin), &p, &policy, deadline()).await;
+    let failed = b
+        .apply_b2a(peer(&policy.origin), &p, &policy, deadline())
+        .await;
     assert!(
         matches!(
             failed,
@@ -173,14 +188,14 @@ async fn tres_bancos_commit_atomico_replay_exato_e_base_positiva() {
         .unwrap();
 
     assert_eq!(
-        b.apply(peer(&policy.origin), &p, &policy, deadline())
+        b.apply_b2a(peer(&policy.origin), &p, &policy, deadline())
             .await
             .unwrap(),
         expected
     );
     assert_eq!(effects(&f.b).await, (3, 3, 3, 1));
     assert_eq!(
-        b.apply(peer(&policy.origin), &p, &policy, deadline())
+        b.apply_b2a(peer(&policy.origin), &p, &policy, deadline())
             .await
             .unwrap(),
         PersistedLocal {
@@ -208,7 +223,7 @@ async fn tres_bancos_commit_atomico_replay_exato_e_base_positiva() {
     .unwrap();
     let c_package = f.capture(&c_policy, 1).await.unwrap();
     assert_eq!(
-        c.apply(peer(&c_policy.origin), &c_package, &c_policy, deadline())
+        c.apply_b2a(peer(&c_policy.origin), &c_package, &c_policy, deadline())
             .await
             .unwrap(),
         PersistedLocal {
@@ -309,7 +324,7 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
         return;
     };
     let clock = Arc::new(AtomicI64::new(110));
-    let b = EligibleReceiver(f.b.boot().await.unwrap().with_clock({
+    let b = eligible_b2a(f.b.boot().await.unwrap().with_clock({
         let clock = clock.clone();
         Arc::new(move || clock.load(Ordering::SeqCst))
     }));
@@ -326,7 +341,7 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
     .await
     .unwrap();
     assert!(matches!(
-        b.apply(source, &raw, &policy, deadline()).await,
+        b.apply_b2a(source, &raw, &policy, deadline()).await,
         Err(SnapshotEffectError::CheckpointMismatch)
     ));
     b.0.apply_copy(
@@ -338,7 +353,7 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
     .await
     .unwrap();
     assert!(matches!(
-        b.apply(source, &raw, &policy, deadline()).await,
+        b.apply_b2a(source, &raw, &policy, deadline()).await,
         Err(SnapshotEffectError::ReceiptMissing)
     ));
 
@@ -346,11 +361,11 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
     let c_source = peer(&c_policy.origin);
     let c_raw = f.capture(&c_policy, 0).await.unwrap();
     let c_alt = f.capture(&c_policy, 1).await.unwrap();
-    let c = EligibleReceiver(f.c.boot().await.unwrap().with_clock({
+    let c = eligible_b2a(f.c.boot().await.unwrap().with_clock({
         let clock = clock.clone();
         Arc::new(move || clock.load(Ordering::SeqCst))
     }));
-    c.apply(c_source, &c_raw, &c_policy, deadline())
+    c.apply_b2a(c_source, &c_raw, &c_policy, deadline())
         .await
         .unwrap();
     sqlx::query("UPDATE federation_snapshot_receipt_policy SET active=false")
@@ -358,7 +373,7 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
         .await
         .unwrap();
     assert!(matches!(
-        c.apply(c_source, &c_raw, &c_policy, deadline()).await,
+        c.apply_b2a(c_source, &c_raw, &c_policy, deadline()).await,
         Err(SnapshotEffectError::ReceiptPolicy)
     ));
     sqlx::query("INSERT INTO federation_snapshot_receipt_policy
@@ -367,7 +382,7 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
         .execute(&f.c.pool).await.unwrap();
     clock.store(120, Ordering::SeqCst);
     assert!(
-        c.apply(c_source, &c_raw, &c_policy, deadline())
+        c.apply_b2a(c_source, &c_raw, &c_policy, deadline())
             .await
             .unwrap()
             .replay
@@ -384,7 +399,7 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
         .await
         .unwrap();
     assert!(matches!(
-        c.apply(c_source, &c_raw, &c_policy, deadline()).await,
+        c.apply_b2a(c_source, &c_raw, &c_policy, deadline()).await,
         Err(SnapshotEffectError::ReceiptInconsistent)
     ));
     sqlx::query("UPDATE federation_snapshot_receipt SET expires_at=130")
@@ -398,7 +413,7 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
     .await
     .unwrap();
     assert!(matches!(
-        c.apply(c_source, &c_raw, &c_policy, deadline()).await,
+        c.apply_b2a(c_source, &c_raw, &c_policy, deadline()).await,
         Err(SnapshotEffectError::SnapshotConflict)
     ));
     sqlx::query("UPDATE federation_replica_proof SET frame=$1 WHERE seq=2")
@@ -408,11 +423,11 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
         .unwrap();
     clock.store(130, Ordering::SeqCst);
     assert!(matches!(
-        c.apply(c_source, &c_alt, &c_policy, deadline()).await,
+        c.apply_b2a(c_source, &c_alt, &c_policy, deadline()).await,
         Err(SnapshotEffectError::SnapshotConflict)
     ));
     assert!(matches!(
-        c.apply(c_source, &c_raw, &c_policy, deadline()).await,
+        c.apply_b2a(c_source, &c_raw, &c_policy, deadline()).await,
         Err(SnapshotEffectError::ReceiptExpired)
     ));
     clock.store(125, Ordering::SeqCst);
@@ -426,14 +441,14 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
         Some("23503")
     );
     assert!(
-        c.apply(c_source, &c_raw, &c_policy, deadline())
+        c.apply_b2a(c_source, &c_raw, &c_policy, deadline())
             .await
             .unwrap()
             .replay
     );
     c.0.suspend_history(c_source, 3, deadline()).await.unwrap();
     assert!(matches!(
-        c.apply(c_source, &c_raw, &c_policy, deadline()).await,
+        c.apply_b2a(c_source, &c_raw, &c_policy, deadline()).await,
         Err(SnapshotEffectError::Effect(EffectError::SuspendedHistory {
             blocked_next_seq: 4
         }))
@@ -441,7 +456,7 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
     assert_eq!(effects(&f.c).await, (3, 3, 3, 1));
 
     assert!(matches!(
-        b.apply(source, &alternate, &policy, deadline()).await,
+        b.apply_b2a(source, &alternate, &policy, deadline()).await,
         Err(SnapshotEffectError::ReceiptMissing)
     ));
     assert_eq!(effects(&f.b).await, (3, 3, 3, 0));
@@ -465,7 +480,7 @@ async fn barreiras_de_revogacao_e_prazo_preservam_atomicidade() {
     };
     let policy_b = f.policy(&f.b);
     let raw_b = f.capture(&policy_b, 0).await.unwrap();
-    let b = EligibleReceiver(f.b.boot().await.unwrap());
+    let b = eligible_b2a(f.b.boot().await.unwrap());
     let mut earlier = f.b.pool.begin().await.unwrap();
     let earlier_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *earlier)
@@ -475,7 +490,7 @@ async fn barreiras_de_revogacao_e_prazo_preservam_atomicidade() {
         .execute(&mut *earlier)
         .await
         .unwrap();
-    let attempt = b.apply(peer(&policy_b.origin), &raw_b, &policy_b, deadline());
+    let attempt = b.apply_b2a(peer(&policy_b.origin), &raw_b, &policy_b, deadline());
     tokio::pin!(attempt);
     tokio::select! {
         outcome = &mut attempt => panic!("aplicação não aguardou ACL: {outcome:?}"),
@@ -492,7 +507,7 @@ async fn barreiras_de_revogacao_e_prazo_preservam_atomicidade() {
 
     let policy_c = f.policy(&f.c);
     let raw_c = f.capture(&policy_c, 0).await.unwrap();
-    let c = EligibleReceiver(f.c.boot().await.unwrap());
+    let c = eligible_b2a(f.c.boot().await.unwrap());
     let mut gate = f.c.pool.begin().await.unwrap();
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *gate)
@@ -503,7 +518,7 @@ async fn barreiras_de_revogacao_e_prazo_preservam_atomicidade() {
         .await
         .unwrap();
     let timeout = c
-        .apply(
+        .apply_b2a(
             peer(&policy_c.origin),
             &raw_c,
             &policy_c,
@@ -519,7 +534,7 @@ async fn barreiras_de_revogacao_e_prazo_preservam_atomicidade() {
     );
     assert_eq!(effects(&f.c).await, (0, 0, 0, 0));
 
-    let applying = c.apply(peer(&policy_c.origin), &raw_c, &policy_c, deadline());
+    let applying = c.apply_b2a(peer(&policy_c.origin), &raw_c, &policy_c, deadline());
     tokio::pin!(applying);
     let writer = tokio::select! {
         outcome = &mut applying => panic!("aplicação não aguardou INSERT: {outcome:?}"),
@@ -538,7 +553,7 @@ async fn barreiras_de_revogacao_e_prazo_preservam_atomicidade() {
     revoking.await.unwrap();
     assert_eq!(effects(&f.c).await, (3, 3, 3, 1));
     assert!(matches!(
-        c.apply(peer(&policy_c.origin), &raw_c, &policy_c, deadline())
+        c.apply_b2a(peer(&policy_c.origin), &raw_c, &policy_c, deadline())
             .await,
         Err(SnapshotEffectError::Effect(EffectError::Replication(
             ReplicaError::AclDenied
@@ -571,19 +586,26 @@ async fn verificacao_b1_que_consumiu_o_prazo_nao_abre_transacao() {
     let raw = f.capture(&policy, 0).await.unwrap();
     let sampled = Arc::new(AtomicBool::new(false));
     let clock = sampled.clone();
-    let b = EligibleReceiver(f.b.boot().await.unwrap().with_clock(Arc::new(move || {
+    let b = eligible_b2a(f.b.boot().await.unwrap().with_clock(Arc::new(move || {
         clock.store(true, Ordering::SeqCst);
         110
     })));
     let end = Instant::now() + std::time::Duration::from_millis(30);
     let result = b
-        .apply_with_verifier(peer(&policy.origin), &raw, &policy, end, |bytes, policy| {
-            let verified = snapshot::verify_snapshot(bytes, policy)?;
-            while Instant::now() < end {
-                std::thread::sleep(end.saturating_duration_since(Instant::now()));
-            }
-            Ok(verified)
-        })
+        .apply_inner(
+            peer(&policy.origin),
+            &raw,
+            &policy,
+            end,
+            None,
+            |bytes, policy| {
+                let verified = snapshot::verify_snapshot(bytes, policy)?;
+                while Instant::now() < end {
+                    std::thread::sleep(end.saturating_duration_since(Instant::now()));
+                }
+                Ok(verified)
+            },
+        )
         .await;
     assert!(matches!(
         result,
@@ -594,7 +616,7 @@ async fn verificacao_b1_que_consumiu_o_prazo_nao_abre_transacao() {
     let origin = peer(&policy.origin);
     b.0.suspend_history(origin, 0, deadline()).await.unwrap();
     assert!(matches!(
-        b.apply(origin, &raw, &policy, deadline()).await,
+        b.apply_b2a(origin, &raw, &policy, deadline()).await,
         Err(SnapshotEffectError::Effect(EffectError::SuspendedHistory {
             blocked_next_seq: 1
         }))
@@ -659,4 +681,433 @@ async fn origem_fixa_corte_antes_de_publicacao_posterior() {
     assert_eq!(verified.cut(), (0, 3));
     assert_eq!(verified.events(), f.frames);
     assert_eq!(effects(&f.a).await, (4, 4, 4, 0));
+}
+
+fn eligible_b2a(service: ReplicaService) -> EligibleReceiver {
+    EligibleReceiver(Arc::new(service), std::num::NonZeroU64::MIN)
+}
+
+async fn witness(f: &ReceiverFixture) -> HarnessHistory {
+    HarnessHistory {
+        database: sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        generation: std::num::NonZeroU64::new(1).unwrap(),
+    }
+}
+
+async fn eligible(f: &ReceiverFixture, service: ReplicaService) -> EligibleReceiver {
+    EligibleReceiver::new(Arc::new(service), witness(f).await, deadline())
+        .await
+        .unwrap()
+}
+
+async fn durable_attempt(f: &ReceiverFixture) -> (i64, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM federation_snapshot_intent_marker),
+        (SELECT count(*) FROM federation_snapshot_intent_detail)",
+    )
+    .fetch_one(&f.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn intencao_reconciliacao_e_fence_sobrevivem_reinicio_com_a2_bloqueada() {
+    let Some(f) = Three::new("intent_restart").await else {
+        return;
+    };
+    let policy = f.policy(&f.b);
+    let remote = peer(&policy.origin);
+    let raw = f.capture(&policy, 0).await.unwrap();
+    let mut wrong = witness(&f.b).await;
+    wrong.database.push_str("_unknown");
+    assert!(matches!(
+        EligibleReceiver::new(Arc::new(f.b.boot().await.unwrap()), wrong, deadline()).await,
+        Err(SnapshotEffectError::Eligibility)
+    ));
+    let b = eligible(&f.b, f.b.boot().await.unwrap()).await;
+    assert_eq!(b.generation().get(), 1);
+    assert_eq!(b.checkpoint(remote, deadline()).await.unwrap(), 0);
+    let first = b.intend(remote, &raw, &policy, deadline()).await.unwrap();
+    assert_eq!(durable_attempt(&f.b).await, (1, 1));
+    assert!(matches!(
+        b.intend(remote, &raw, &policy, deadline()).await,
+        Err(SnapshotEffectError::IntentPending)
+    ));
+    drop(b);
+    let a2 = f.b.boot().await.unwrap();
+    assert!(matches!(
+        a2.checkpoint(remote, deadline()).await,
+        Err(EffectError::SnapshotPending)
+    ));
+    assert!(matches!(
+        a2.apply_copy(
+            remote,
+            Limits::new(8, 4096, 16384).unwrap(),
+            &f.frames,
+            deadline()
+        )
+        .await,
+        Err(EffectError::SnapshotPending)
+    ));
+    let b = eligible(&f.b, a2).await;
+    assert_eq!(
+        b.recover(remote, &policy, deadline()).await.unwrap(),
+        Recovery::NoEffect { after_seq: 0 }
+    );
+    assert!(matches!(
+        b.apply(remote, first, &raw, &policy, deadline()).await,
+        Err(SnapshotEffectError::AttemptMismatch)
+    ));
+    let second = b.intend(remote, &raw, &policy, deadline()).await.unwrap();
+    assert!(second.get() > first.get());
+    b.apply(remote, second, &raw, &policy, deadline())
+        .await
+        .unwrap();
+    assert_eq!(durable_attempt(&f.b).await, (1, 1));
+    assert_eq!(effects(&f.b).await, (3, 3, 3, 1));
+    assert!(matches!(
+        b.apply(remote, second, &raw, &policy, deadline()).await,
+        Err(SnapshotEffectError::CheckpointMismatch)
+    ));
+    drop(b);
+
+    let c_policy = f.policy(&f.c);
+    let c_remote = peer(&c_policy.origin);
+    let c = eligible(&f.c, f.c.boot().await.unwrap()).await;
+    c.0.apply_copy(
+        c_remote,
+        Limits::new(8, 4096, 16384).unwrap(),
+        &f.frames[..1],
+        deadline(),
+    )
+    .await
+    .unwrap();
+    let c_raw = f.capture(&c_policy, 1).await.unwrap();
+    let token = c
+        .intend(c_remote, &c_raw, &c_policy, deadline())
+        .await
+        .unwrap();
+    c.apply(c_remote, token, &c_raw, &c_policy, deadline())
+        .await
+        .unwrap();
+    assert_eq!(
+        c.recover(c_remote, &c_policy, deadline()).await.unwrap(),
+        Recovery::Applied { after_seq: 3 }
+    );
+
+    let b = eligible(&f.b, f.b.boot().await.unwrap()).await;
+    assert!(matches!(
+        b.checkpoint(remote, deadline()).await,
+        Err(SnapshotEffectError::Effect(EffectError::SnapshotPending))
+    ));
+    assert_eq!(
+        b.recover(remote, &policy, deadline()).await.unwrap(),
+        Recovery::Applied { after_seq: 3 }
+    );
+    assert_eq!(b.checkpoint(remote, deadline()).await.unwrap(), 3);
+    assert_eq!(durable_attempt(&f.b).await, (0, 0));
+    assert_eq!(effects(&f.a).await, (3, 3, 3, 0));
+}
+
+#[tokio::test]
+async fn ttl_detalhe_reduzido_revogacao_e_falha_leitura_bloqueiam_sem_escrita() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let Some(f) = Three::new("intent_ttl").await else {
+        return;
+    };
+    let policy = f.policy(&f.b);
+    let remote = peer(&policy.origin);
+    let raw = f.capture(&policy, 0).await.unwrap();
+    let clock = Arc::new(AtomicI64::new(110));
+    let b = eligible(
+        &f.b,
+        f.b.boot().await.unwrap().with_clock({
+            let clock = clock.clone();
+            Arc::new(move || clock.load(Ordering::SeqCst))
+        }),
+    )
+    .await;
+    let token = b.intend(remote, &raw, &policy, deadline()).await.unwrap();
+    let delete = sqlx::query("DELETE FROM federation_snapshot_intent_policy")
+        .execute(&f.b.pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        delete.as_database_error().unwrap().code().as_deref(),
+        Some("23503")
+    );
+    sqlx::query("UPDATE federation_snapshot_intent_policy SET active=false")
+        .execute(&f.b.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        b.apply(remote, token, &raw, &policy, deadline()).await,
+        Err(SnapshotEffectError::IntentPolicy)
+    ));
+    sqlx::query("INSERT INTO federation_snapshot_intent_policy
+        SELECT policy_id,2,local_node,origin_node,tenant_id,stream_id,partition,authority_epoch,
+           jurisdiction,purpose,500,true,true FROM federation_snapshot_intent_policy WHERE policy_version=1")
+        .execute(&f.b.pool).await.unwrap();
+    clock.store(120, Ordering::SeqCst);
+    assert!(matches!(
+        b.apply(remote, token, &raw, &policy, deadline()).await,
+        Err(SnapshotEffectError::IntentExpired)
+    ));
+    assert_eq!(effects(&f.b).await, (0, 0, 0, 0));
+    assert_eq!(durable_attempt(&f.b).await, (1, 1));
+    b.reduce_expired(remote, token, deadline()).await.unwrap();
+    assert_eq!(durable_attempt(&f.b).await, (1, 0));
+    assert!(matches!(
+        b.apply(remote, token, &raw, &policy, deadline()).await,
+        Err(SnapshotEffectError::IntentInconsistent)
+    ));
+    assert_eq!(
+        b.recover(remote, &policy, deadline()).await.unwrap(),
+        Recovery::Blocked { attempt: token }
+    );
+    drop(b);
+
+    let a2 = f.b.boot().await.unwrap();
+    assert!(matches!(
+        a2.checkpoint(remote, deadline()).await,
+        Err(EffectError::SnapshotPending)
+    ));
+    sqlx::query("ALTER TABLE federation_snapshot_intent_marker RENAME TO broken_intent_marker")
+        .execute(&f.b.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        a2.checkpoint(remote, deadline()).await,
+        Err(EffectError::Storage(_))
+    ));
+    assert!(matches!(
+        a2.apply_copy(
+            remote,
+            Limits::new(8, 4096, 16384).unwrap(),
+            &f.frames,
+            deadline()
+        )
+        .await,
+        Err(EffectError::Storage(_))
+    ));
+    assert_eq!(effects(&f.b).await, (0, 0, 0, 0));
+}
+
+#[tokio::test]
+async fn corrida_apply_recover_e_revogacao_preserva_intencao() {
+    let Some(f) = Three::new("intent_order").await else {
+        return;
+    };
+    let policy = f.policy(&f.b);
+    let remote = peer(&policy.origin);
+    let raw = f.capture(&policy, 0).await.unwrap();
+    let b = eligible(&f.b, f.b.boot().await.unwrap()).await;
+    let token = b.intend(remote, &raw, &policy, deadline()).await.unwrap();
+
+    let mut blocker = f.b.pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query("LOCK TABLE federation_snapshot_receipt IN SHARE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let timeout = b
+        .apply(
+            remote,
+            token,
+            &raw,
+            &policy,
+            Instant::now() + std::time::Duration::from_millis(120),
+        )
+        .await;
+    assert!(
+        matches!(
+            timeout,
+            Err(SnapshotEffectError::Effect(EffectError::Timeout))
+        ),
+        "{timeout:?}"
+    );
+    assert_eq!(effects(&f.b).await, (0, 0, 0, 0));
+    assert_eq!(durable_attempt(&f.b).await, (1, 1));
+
+    let work = b.apply(remote, token, &raw, &policy, deadline());
+    tokio::pin!(work);
+    let writer = tokio::select! {
+        outcome = &mut work => panic!("apply não aguardou a barreira: {outcome:?}"),
+        pid = wait_on(&f.b.pool,blocker_pid) => pid,
+    };
+    let reconcile = b.recover(remote, &policy, deadline());
+    tokio::pin!(reconcile);
+    tokio::select! {
+        outcome = &mut reconcile => panic!("recover passou à frente: {outcome:?}"),
+        _ = wait_on(&f.b.pool,writer) => {}
+    }
+    blocker.commit().await.unwrap();
+    work.await.unwrap();
+    assert_eq!(reconcile.await.unwrap(), Recovery::Applied { after_seq: 3 });
+    assert_eq!(durable_attempt(&f.b).await, (0, 0));
+
+    let policy_c = f.policy(&f.c);
+    let remote_c = peer(&policy_c.origin);
+    let raw_c = f.capture(&policy_c, 0).await.unwrap();
+    let c = eligible(&f.c, f.c.boot().await.unwrap()).await;
+    let c_token = c
+        .intend(remote_c, &raw_c, &policy_c, deadline())
+        .await
+        .unwrap();
+    let mut gate = f.c.pool.begin().await.unwrap();
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await
+        .unwrap();
+    sqlx::query("LOCK TABLE federation_snapshot_intent_marker IN SHARE MODE")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let resolving_first = c.recover(remote_c, &policy_c, deadline());
+    tokio::pin!(resolving_first);
+    let resolver = tokio::select! {
+        outcome = &mut resolving_first => panic!("recover não aguardou DELETE: {outcome:?}"),
+        pid = wait_on(&f.c.pool,gate_pid) => pid,
+    };
+    let old_executor = c.apply(remote_c, c_token, &raw_c, &policy_c, deadline());
+    tokio::pin!(old_executor);
+    tokio::select! {
+        outcome = &mut old_executor => panic!("executor passou à frente: {outcome:?}"),
+        _ = wait_on(&f.c.pool,resolver) => {}
+    }
+    gate.commit().await.unwrap();
+    assert_eq!(
+        resolving_first.await.unwrap(),
+        Recovery::NoEffect { after_seq: 0 }
+    );
+    assert!(matches!(
+        old_executor.await,
+        Err(SnapshotEffectError::AttemptMismatch)
+    ));
+    assert_eq!(effects(&f.c).await, (0, 0, 0, 0));
+    let c_token = c
+        .intend(remote_c, &raw_c, &policy_c, deadline())
+        .await
+        .unwrap();
+    let mut revoke = f.c.pool.begin().await.unwrap();
+    let revoke_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *revoke)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE federation_replica_acl SET revoked=true WHERE direction='import'")
+        .execute(&mut *revoke)
+        .await
+        .unwrap();
+    let reconciling = c.recover(remote_c, &policy_c, deadline());
+    tokio::pin!(reconciling);
+    tokio::select! {
+        outcome = &mut reconciling => panic!("recover não aguardou revogação: {outcome:?}"),
+        _ = wait_on(&f.c.pool,revoke_pid) => {}
+    }
+    revoke.commit().await.unwrap();
+    assert!(matches!(
+        reconciling.await,
+        Err(SnapshotEffectError::Effect(EffectError::Replication(
+            ReplicaError::AclDenied
+        )))
+    ));
+    assert!(matches!(
+        c.apply(remote_c, c_token, &raw_c, &policy_c, deadline())
+            .await,
+        Err(SnapshotEffectError::Effect(EffectError::Replication(
+            ReplicaError::AclDenied
+        )))
+    ));
+    assert_eq!(effects(&f.c).await, (0, 0, 0, 0));
+    assert_eq!(durable_attempt(&f.c).await, (1, 1));
+}
+
+#[tokio::test]
+async fn recover_recusa_digest_divergente_ou_recibo_expirado() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let Some(f) = Three::new("intent_divergence").await else {
+        return;
+    };
+    let policy = f.policy(&f.b);
+    let remote = peer(&policy.origin);
+    let raw = f.capture(&policy, 0).await.unwrap();
+    let clock = Arc::new(AtomicI64::new(110));
+    let b = eligible(
+        &f.b,
+        f.b.boot().await.unwrap().with_clock({
+            let clock = clock.clone();
+            Arc::new(move || clock.load(Ordering::SeqCst))
+        }),
+    )
+    .await;
+    let token = b.intend(remote, &raw, &policy, deadline()).await.unwrap();
+    b.apply(remote, token, &raw, &policy, deadline())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE federation_replica_proof SET frame=decode('20','hex') || frame WHERE seq=2",
+    )
+    .execute(&f.b.pool)
+    .await
+    .unwrap();
+    let blocked = Recovery::Blocked { attempt: token };
+    assert_eq!(
+        b.recover(remote, &policy, deadline()).await.unwrap(),
+        blocked
+    );
+    sqlx::query("UPDATE federation_replica_proof SET frame=$1 WHERE seq=2")
+        .bind(&f.frames[1])
+        .execute(&f.b.pool)
+        .await
+        .unwrap();
+    clock.store(130, Ordering::SeqCst);
+    assert_eq!(
+        b.recover(remote, &policy, deadline()).await.unwrap(),
+        blocked
+    );
+    assert_eq!(durable_attempt(&f.b).await, (1, 1));
+    assert_eq!(effects(&f.b).await, (3, 3, 3, 1));
+}
+
+#[tokio::test]
+async fn falha_no_detalhe_desfaz_marcador_e_suspensao_recusa_intencao() {
+    let Some(f) = Three::new("intent_atomic").await else {
+        return;
+    };
+    let policy = f.policy(&f.b);
+    let remote = peer(&policy.origin);
+    let raw = f.capture(&policy, 0).await.unwrap();
+    let b = eligible(&f.b, f.b.boot().await.unwrap()).await;
+    sqlx::query(
+        "ALTER TABLE federation_snapshot_intent_detail
+        ADD CONSTRAINT fail_detail CHECK (cut_seq <> 3)",
+    )
+    .execute(&f.b.pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        b.intend(remote, &raw, &policy, deadline()).await,
+        Err(SnapshotEffectError::Effect(EffectError::Storage(_)))
+    ));
+    assert_eq!(durable_attempt(&f.b).await, (0, 0));
+    assert_eq!(effects(&f.b).await, (0, 0, 0, 0));
+    assert_eq!(b.checkpoint(remote, deadline()).await.unwrap(), 0);
+    sqlx::query("ALTER TABLE federation_snapshot_intent_detail DROP CONSTRAINT fail_detail")
+        .execute(&f.b.pool)
+        .await
+        .unwrap();
+    b.0.suspend_history(remote, 0, deadline()).await.unwrap();
+    assert!(matches!(
+        b.intend(remote, &raw, &policy, deadline()).await,
+        Err(SnapshotEffectError::Effect(EffectError::SuspendedHistory {
+            blocked_next_seq: 1
+        }))
+    ));
+    assert_eq!(durable_attempt(&f.b).await, (0, 0));
 }

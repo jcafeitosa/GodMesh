@@ -63,7 +63,7 @@ pub(super) async fn policy(
     })
 }
 
-fn digest(row: &PgRow, name: &str) -> Result<[u8; 32], SnapshotEffectError> {
+pub(super) fn digest(row: &PgRow, name: &str) -> Result<[u8; 32], SnapshotEffectError> {
     let value: &[u8] = row.try_get(name)?;
     value
         .try_into()
