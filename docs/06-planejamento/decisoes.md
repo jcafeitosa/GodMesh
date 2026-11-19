@@ -396,3 +396,11 @@ A prova portátil de ingresso é o certificado v2. A assinatura do aprovador vin
 Em cluster explicitamente declarado sem votantes, um genesis do mesmo cluster ou o emissor autorizado da aprovação pode revogar aquela prova de ingresso por declaração assinada. Uma cadeia com elo revogado deixa de habilitar seus descendentes. Um descendente pode voltar a ser habilitado quando apresentar outra cadeia válida. A prova revogada permanece inválida. A verificação inclui evidência de frescor da revogação, conforme o contrato da fatia.
 
 O quórum dos bundles de confiança segue a ADR-072. A [SPEC M1C](../08-specs/federacao/m1c-cadeia-confianca.md) detalha a emissão, o consumo e o teste em três servidores.
+
+## ADR-077 — Relay QUIC restrito de laboratório
+
+A ADR-072 ordena o relay depois do aceite operacional da replicação M4. O recorte M5 adota quatro processos em loopback, ingressados por M1C, para verificar alternativa de conectividade, autorização e isolamento entre dois destinos. A coordenação aplica a aprovação por fatia da ADR-075 à [SPEC M5 v1.2](../08-specs/federacao/m5-relay-laboratorio-v1.md) revisada de forma independente. O [plano da fatia](../09-equipe/evidencias/2026-11-19-m5-relay-laboratorio.md) vincula a versão e os aceites.
+
+E e R usam um enlace QUIC com mTLS para controle da rota e transporte de datagramas opacos. O QUIC interno preserva o mTLS E↔D, com a identidade pinada de D. R aceita apenas destinos, serviços e endereços fixados no cadastro da fixture. A rota alternativa depende de evidência tipada, local, vigente e de uso único de falha direta. A tentativa anterior precisa estar recolhida e a arbitragem de promoção precisa estar resolvida.
+
+Os guards M1C e M3, a ACL da rota e as cotas vinculam cada envio à instância admitida. O ensaio verifica revogação, saturação, encerramento e recuperação pelo checkpoint do receptor. A ADR autoriza a fixture sintética. Operação em produção, outros perfis, metas de capacidade e rotas reais dependem de decisões próprias.
