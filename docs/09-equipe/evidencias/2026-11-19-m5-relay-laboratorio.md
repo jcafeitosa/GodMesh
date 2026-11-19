@@ -13,3 +13,23 @@ O aceite [M4-B2-C](2026-11-19-m4-b2-c-restore-planejado.md#aceite-em-três-proce
 5. **Aceite integrado.** Executar E/R/D1/D2 com ingressos oficiais, bancos e chaves separados. Comprovar direta recolhida antes de relay, mTLS E↔D, recuperação pelo checkpoint do destino após perda de rota e os negativos de pin, recusa M1C/M3, cotas e autorização por destino. Executar os smokes IPv4/IPv6 aplicáveis e regressões M4, suíte padrão, suíte com as features e Clippy com `-D warnings`. Registrar resultados observados, revisão independente e o SHA exato. A execução direta em quatro processos mede a fixture de loopback. O Programa C mantém seu aceite em três hosts Linux independentes.
 
 Cada subtarefa começa com um teste que reproduz a ausência do comportamento, segue com a implementação mínima e termina com GREEN e revisão. Quinn 0.11.12 e Tokio 1.54.1 são as versões do lockfile. Consulte as referências oficiais vinculadas pela SPEC para o transporte e a detecção de datagramas excedentes. A fixture usa rede local e dados sintéticos.
+
+## Evidência parcial da integração
+
+O candidato `a7dc218fb487b68325238bb75981b15476f0761a` foi ensaiado com build Rust 1.99.1 otimizado, PostgreSQL 16.15 descartável e quatro processos com identidades e bancos separados em loopback macOS arm64. O provisionamento usou o binário padrão de `ff1d700`. Os quatro processos da etapa de relay usaram o executável de teste do candidato com `relay-harness`.
+
+| Rodada | Resultado observado |
+|---|---|
+| Retomada, IPv4-mapped | O bind efetivo abriu IPv4. E recolheu a direta antes de pedir relay e promoveu os dois enlaces internos pinados. Após o reinício, ambos pediram a partir de 2 e confirmaram 3. Os envelopes coincidiram byte a byte. R não persistiu provas nem registrou ACK de cópia. |
+| Piso compartilhado, IPv6 | A configuração efetiva elevou o piso a 2 e ambas as rotas pararam com os checkpoints em 2. |
+| Revogação sem sinal, IPv4-mapped | Outra conexão mudou apenas o estado durável de D1 sob o guard M1C. R recolheu D1 e D2 confirmou 3. A rodada usou poll M3 de 650 ms e rechecagem do enlace M3 de 750 ms. A rechecagem da rota relay conservou o orçamento de 100 ms. |
+| Pressão de fila, IPv4-mapped | D1 usou cadência de Pull de 10 ms e R registrou descarte por fila. D2 confirmou 3. A rodada usou as mesmas cadências M3 da revogação sem sinal. |
+| Retomada, IPv6 | Houve rodada sem a segunda promoção interna. Com as cadências M3 de 650/750 ms, ambos os enlaces foram promovidos novamente, mas apenas um destino chegou a 3. R registrou cancelamento por autoridade. |
+
+Uma rodada adicional de importação da revogação na própria instância de R encerrou os dois canais. A notificação geral de confiança do enlace é distinta do ensaio planejado com sinal suprimido. A cobertura dirigida em PostgreSQL confirma que o FIFO de abertura permite a rechecagem de D2 dentro de 100 ms com o guard livre, e que D2 fecha se o guard comum permanecer retido.
+
+No build diagnóstico derivado do candidato, D1 esgotou o prazo em uma consulta do piso M3. Os tempos acumulados foram 7 ms na aquisição de conexão, 10 ms após `BEGIN`, 38 ms após obter o guard, 78 ms após M1C local e 91 ms após M1C dos pares. O prazo expirou aos 101 ms antes da concessão de autoridade. Esse build só adicionou medições locais e não é o candidato.
+
+A suíte padrão no candidato teve 658 testes aprovados e um ignorado. Na suíte com todas as features, a obtenção de crédito de D1 no teste `autoridade_revalida_token_debito_e_rechecagem_sem_sinal` retornou `RouteUnavailable` após a verificação de separação das filas ter passado. Clippy padrão com `-D warnings` e `git diff --check` passaram. A verificação rustfmt dos arquivos alterados identificou apenas diferenças já presentes em `main.rs` e `lib.rs` da base.
+
+O aceite M5 e o ensaio em três hosts Linux independentes seguem pendentes.
