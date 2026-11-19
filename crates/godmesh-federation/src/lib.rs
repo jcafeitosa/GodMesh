@@ -35,6 +35,7 @@
 
 pub mod event;
 pub mod approval;
+pub mod config_bundle;
 pub mod genesis;
 pub mod handshake;
 pub mod identity;
