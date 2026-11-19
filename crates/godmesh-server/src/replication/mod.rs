@@ -4,6 +4,8 @@
 //! autenticada na mesma transação, antes de expor qualquer resultado.
 //! O relógio é avaliado uma vez, depois do lock de namespace.
 
+#[cfg(test)]
+pub(crate) mod snapshot_read;
 mod store;
 
 use godmesh_federation::{SignedEvent, identity};
@@ -418,12 +420,8 @@ impl Replication {
                     })
                 };
             }
-            let event = verify(&proof.frame, &reservation, authority.origin)
-                .map_err(|_| Error::ProofConflict)?;
-            if sequence(&event)? != seq || event.issued_at != proof.issued_at || !proof.published {
-                return Err(Error::ProofConflict);
-            }
-            match secondary.expiration(event.issued_at, now) {
+            verify_local_proof(&proof, &reservation, authority.origin, seq, true)?;
+            match secondary.expiration(proof.issued_at, now) {
                 Err(Error::RetentionExpired) if !frames.is_empty() => {
                     return Ok(CopyPage {
                         frames,
@@ -656,6 +654,23 @@ fn verify(
     }
     sequence(&event)?;
     Ok(event)
+}
+
+fn verify_local_proof(
+    proof: &store::Proof,
+    r: &Reservation,
+    origin: NodeContext<'_>,
+    seq: i64,
+    published: bool,
+) -> Result<(), Error> {
+    let event = verify(&proof.frame, r, origin).map_err(|_| Error::ProofConflict)?;
+    if sequence(&event)? != seq
+        || event.issued_at != proof.issued_at
+        || proof.published != published
+    {
+        return Err(Error::ProofConflict);
+    }
+    Ok(())
 }
 
 async fn usable(

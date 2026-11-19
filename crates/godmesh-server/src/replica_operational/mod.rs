@@ -4,6 +4,8 @@ mod db;
 mod link;
 mod resume;
 mod settings;
+#[cfg(test)]
+mod snapshot_harness;
 
 pub use link::{authorize_link_in_tx, authorize_link_until};
 pub use settings::{ConfigError, Pin, ReplicaConfig, Role};
@@ -360,32 +362,49 @@ impl ReplicaService {
         deadline: Instant,
         effect: impl AsyncFnOnce(&mut ClusterGuard<'_, '_>, i64) -> Result<T, EffectError>,
     ) -> Result<T, EffectError> {
+        self.transact_with(deadline, effect).await
+    }
+
+    async fn transact_with<T, E: From<EffectError>>(
+        &self,
+        deadline: Instant,
+        effect: impl AsyncFnOnce(&mut ClusterGuard<'_, '_>, i64) -> Result<T, E>,
+    ) -> Result<T, E> {
         let mut lease = db::Lease::acquire(self.portable.pool(), deadline).await?;
         let mut tx = timeout_at(
             deadline,
             lease.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED"),
         )
         .await
-        .map_err(|_| EffectError::Timeout)??;
+        .map_err(|_| EffectError::Timeout)?
+        .map_err(EffectError::from)?;
         let decision = timeout_at(
             deadline,
             with_sql_deadline(deadline, async {
-                let mut guard = self.portable.lock_cluster_guard(&mut tx).await?;
-                replication::locked(&mut guard, &self.config.namespace).await?;
+                let mut guard = self
+                    .portable
+                    .lock_cluster_guard(&mut tx)
+                    .await
+                    .map_err(EffectError::from)?;
+                replication::locked(&mut guard, &self.config.namespace)
+                    .await
+                    .map_err(EffectError::from)?;
                 let now = (self.clock)();
 
                 let prepared = effect(&mut guard, now).await?;
-                sql_budget::refresh(guard.connection()).await?;
+                sql_budget::refresh(guard.connection())
+                    .await
+                    .map_err(EffectError::from)?;
 
                 Ok(prepared)
             }),
         )
         .await
-        .unwrap_or(Err(EffectError::Timeout));
+        .unwrap_or(Err(EffectError::Timeout.into()));
 
         let decision = decision.and_then(|prepared| {
             if Instant::now() >= deadline {
-                Err(EffectError::Timeout)
+                Err(EffectError::Timeout.into())
             } else {
                 Ok(prepared)
             }
