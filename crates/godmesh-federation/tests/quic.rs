@@ -2405,6 +2405,7 @@ async fn relay_token_preserva_frame_e_prazo_de_abertura_nao_expira_encaminhament
     ));
     drop(inbound);
     drop(outbound);
+    cancel.reclaimed().await;
 
     let mut next = session.open_relay(deadline, cap).await.unwrap();
     next.write_control(&request).await.unwrap();
@@ -2532,6 +2533,9 @@ async fn relay_dados_rejeitam_prefixo_excedente_e_respeitam_prazo_proprio() {
             recv.read(&mut [0]).await,
             Err(quinn::ReadError::Reset(_))
         ));
+        drop(outbound);
+        drop(inbound);
+        cancel.reclaimed().await;
     }
 }
 
@@ -2600,35 +2604,60 @@ async fn relay_cancelamento_fecha_as_duas_metades_ociosas_antes_do_recolhimento(
     let token = [42; 16];
     let request = relay_control("open", "d1", token);
     let reply = relay_control("accept", "d1", token);
-    let mut opening = session.open_relay(deadline, cap).await.unwrap();
-    opening.write_control(&request).await.unwrap();
-    let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-    relay_raw_read(&mut recv, &request).await;
-    relay_raw_write(&mut send, &reply).await;
-    assert_eq!(opening.read_control().await.unwrap(), reply);
-    opening.send_token(token).await.unwrap();
-    let mut confirmation = [0; 16];
-    recv.read_exact(&mut confirmation).await.unwrap();
-    assert_eq!(confirmation, token);
-    let (outbound, inbound, cancel) = opening
-        .into_forwarding(NonZeroU32::new(1400).unwrap())
-        .unwrap();
+    for drop_immediately in [false, true] {
+        let mut opening = session.open_relay(deadline, cap).await.unwrap();
+        opening.write_control(&request).await.unwrap();
+        let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+        relay_raw_read(&mut recv, &request).await;
+        relay_raw_write(&mut send, &reply).await;
+        assert_eq!(opening.read_control().await.unwrap(), reply);
+        opening.send_token(token).await.unwrap();
+        let mut confirmation = [0; 16];
+        recv.read_exact(&mut confirmation).await.unwrap();
+        assert_eq!(confirmation, token);
+        let (outbound, inbound, cancel) = opening
+            .into_forwarding(NonZeroU32::new(1400).unwrap())
+            .unwrap();
 
-    cancel.cancel();
-    tokio::time::timeout(Duration::from_millis(500), async {
-        assert!(matches!(
-            recv.read(&mut [0]).await,
-            Err(quinn::ReadError::Reset(_))
-        ));
-        assert!(send.stopped().await.unwrap().is_some());
-    })
-    .await
-    .unwrap();
-    drop(outbound);
-    assert!(matches!(
-        session.open_relay(deadline, cap).await,
-        Err(SessionError::Busy)
-    ));
-    drop(inbound);
+        cancel.cancel();
+        if drop_immediately {
+            drop(outbound);
+            drop(inbound);
+            // Runtime de uma thread. O supervisor ainda não teve oportunidade de executar.
+            assert!(matches!(
+                session.open_relay(deadline, cap).await,
+                Err(SessionError::Busy)
+            ));
+        } else {
+            tokio::time::timeout(Duration::from_millis(500), async {
+                assert!(matches!(
+                    recv.read(&mut [0]).await,
+                    Err(quinn::ReadError::Reset(_))
+                ));
+                assert!(send.stopped().await.unwrap().is_some());
+            })
+            .await
+            .unwrap();
+            drop(outbound);
+            assert!(matches!(
+                session.open_relay(deadline, cap).await,
+                Err(SessionError::Busy)
+            ));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), cancel.reclaimed())
+                    .await
+                    .is_err()
+            );
+            drop(inbound);
+        }
+
+        tokio::time::timeout(Duration::from_millis(500), cancel.reclaimed())
+            .await
+            .unwrap();
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(500), cancel.reclaimed())
+            .await
+            .unwrap();
+    }
     assert!(session.open_relay(deadline, cap).await.is_ok());
 }

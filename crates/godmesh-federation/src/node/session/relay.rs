@@ -67,13 +67,13 @@ enum OpeningPhase {
 
 struct RouteStream {
     session: Arc<SessionState>,
-    cancelled: watch::Sender<bool>,
-    _slot: OwnedSemaphorePermit,
+    cancellation: RelayCancellation,
+    slot: Option<OwnedSemaphorePermit>,
 }
 
 impl RouteStream {
     fn check(&self, deadline: Instant) -> Result<(), SessionError> {
-        if *self.cancelled.borrow() {
+        if *self.cancellation.0.borrow() != RouteStatus::Active {
             return Err(SessionError::Closed);
         }
         ensure_deadline(deadline)?;
@@ -86,10 +86,9 @@ impl RouteStream {
         operation: impl Future<Output = Result<T, SessionError>>,
     ) -> Result<T, SessionError> {
         self.check(deadline)?;
-        let mut cancelled = self.cancelled.subscribe();
         let result = tokio::select! {
             biased;
-            _ = cancelled.wait_for(|value| *value) => Err(SessionError::Closed),
+            _ = self.cancellation.cancelled() => Err(SessionError::Closed),
             _ = self.session.connection().closed() => Err(SessionError::Closed),
             result = before_deadline(deadline, operation) => result?,
         };
@@ -98,23 +97,56 @@ impl RouteStream {
     }
 
     fn cancel(&self) {
-        self.cancelled.send_replace(true);
+        self.cancellation.cancel();
     }
+}
+
+impl Drop for RouteStream {
+    fn drop(&mut self) {
+        drop(self.slot.take());
+        self.cancellation.0.send_replace(RouteStatus::Reclaimed);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RouteStatus {
+    Active,
+    Cancelled,
+    Reclaimed,
 }
 
 /// Sinal de cancelamento da instância, sem reter o crédito QUIC.
 #[derive(Clone)]
-pub struct RelayCancellation(watch::Sender<bool>);
+pub struct RelayCancellation(watch::Sender<RouteStatus>);
 
 impl RelayCancellation {
     /// Acorda as operações pendentes nas duas direções.
     pub fn cancel(&self) {
-        self.0.send_replace(true);
+        self.0.send_if_modified(|status| {
+            if *status != RouteStatus::Active {
+                return false;
+            }
+            *status = RouteStatus::Cancelled;
+            true
+        });
     }
 
     /// Permite que tarefas ociosas também observem o cancelamento da rota.
     pub async fn cancelled(&self) {
-        let _ = self.0.subscribe().wait_for(|value| *value).await;
+        let _ = self
+            .0
+            .subscribe()
+            .wait_for(|status| *status != RouteStatus::Active)
+            .await;
+    }
+
+    /// Aguarda o reset/stop, o descarte das duas metades e a devolução da vaga QUIC.
+    pub async fn reclaimed(&self) {
+        let _ = self
+            .0
+            .subscribe()
+            .wait_for(|status| *status == RouteStatus::Reclaimed)
+            .await;
     }
 }
 
@@ -139,8 +171,8 @@ impl RelayOpening {
     ) -> Self {
         let route = Arc::new(RouteStream {
             session: Arc::clone(session),
-            cancelled: watch::channel(false).0,
-            _slot: slot,
+            cancellation: RelayCancellation(watch::channel(RouteStatus::Active).0),
+            slot: Some(slot),
         });
         Self {
             send: RelaySend {
@@ -328,18 +360,19 @@ impl RelayOpening {
         self.send.route.check(self.deadline)?;
         self.send.cap = max_datagram_bytes;
         self.recv.cap = max_datagram_bytes;
-        let cancellation = RelayCancellation(self.send.route.cancelled.clone());
-        let supervisor = cancellation.clone();
-        let connection = self.send.route.session.connection().clone();
+        let route = Arc::clone(&self.send.route);
+        let cancellation = route.cancellation.clone();
         let send = Arc::clone(&self.send.stream);
         let recv = Arc::clone(&self.recv.stream);
         tokio::spawn(async move {
             tokio::select! {
-                _ = supervisor.cancelled() => {}
-                _ = connection.closed() => supervisor.cancel(),
+                _ = route.cancellation.cancelled() => {}
+                _ = route.session.connection().closed() => route.cancel(),
             }
             let _ = send.lock().await.reset(STREAM_ABORTED.into());
             let _ = recv.lock().await.stop(STREAM_ABORTED.into());
+            // A vaga pertence às duas metades e ao encerramento das direções.
+            drop(route);
         });
         Ok((self.send, self.recv, cancellation))
     }
