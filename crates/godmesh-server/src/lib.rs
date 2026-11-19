@@ -25,4 +25,5 @@ pub mod observability;
 pub mod migrate;
 pub mod portable_join;
 pub mod publisher;
+pub mod replication;
 pub mod runtime;
