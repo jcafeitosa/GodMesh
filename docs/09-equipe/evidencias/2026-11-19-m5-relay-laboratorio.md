@@ -34,4 +34,12 @@ A suíte padrão no candidato teve 658 testes aprovados e um ignorado. Na suíte
 
 O filho `14526a2825512e61fdddec7e1df4cb74cc92f42e` acrescenta três testes da ponte R. O executor relatou três verdes com QUIC real e PostgreSQL 16 descartável. A revisão confirmou zero débito, ausência de UDP observado e liberação da vaga depois de revogação ou expiração entre aceite e token. No positivo, um datagrama chegou intacto e custou um frame e `payload + 4` bytes. A fragmentação ficou no teste dirigido QUIC. A negativa composta não injeta um datagrama de retorno D→E, portanto a cobertura de ausência de frame de retorno é parcial.
 
+### Rodada com a consulta M3 consolidada
+
+O candidato `ae5aa29fc149db6e609564636ac6402541ec2d8e` inclui o reforço das negativas `f8764e6` e a consulta M3 de `96f187b`. A consulta remove uma leitura e um refresh de orçamento no caminho autorizado. O parecer independente confirmou a ordem de erros e os guards existentes. No executável otimizado, os três testes compostos da ponte passaram com PostgreSQL 16.15.
+
+Na revogação sem sinal em IPv4-mapped, com poll M3 de 650 ms e rechecagem do enlace M3 de 750 ms, R registrou D1 bloqueada em até 213,5 ms desde antes da atualização transacional. D2 confirmou 3. A retomada em IPv6 promoveu os dois enlaces depois do reinício, mas só um destino confirmou 3. A rodada IPv4-mapped falhou antes da posição 2. O tempo registrado no build diagnóstico anterior distingue a espera pelo guard da execução interna. Ainda falta medir separadamente crédito e rechecagem sob a mesma carga antes de atribuir as falhas a uma etapa única.
+
+As suítes do workspace desse candidato passaram em PostgreSQL 16.15. A configuração padrão aprovou 658 testes com um ignorado. Com todas as features, 696 passaram e oito ficaram ignorados, incluindo os três compostos executados separadamente. Clippy estrito em ambos os perfis e `git diff --check` passaram. O código permanece no candidato local.
+
 O aceite M5 e o ensaio em três hosts Linux independentes seguem pendentes.
