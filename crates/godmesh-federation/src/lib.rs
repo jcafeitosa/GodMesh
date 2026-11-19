@@ -38,6 +38,7 @@ pub mod approval;
 pub mod genesis;
 pub mod handshake;
 pub mod identity;
+pub mod join_chain;
 pub mod link;
 pub mod manifest;
 pub mod node;
