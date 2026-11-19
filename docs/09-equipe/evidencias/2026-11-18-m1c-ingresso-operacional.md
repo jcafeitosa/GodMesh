@@ -12,3 +12,7 @@ A coordenação aprovou a implementação da [SPEC M1C-B v1.2](../../08-specs/fe
 6. **Aceite.** Rodar TDD dirigido, suíte do workspace, Clippy, invariantes SQL e revisão independente dos diffs. No fio, instalar A, B e C com bancos e identidades próprios, obter os enlaces pela prova v2 e verificar revogação e expiração. Registrar a topologia e os efeitos observados.
 
 Até a implementação e a execução, estes casos são planejados. M3–M5 e a validação em hosts Linux independentes têm aceites próprios.
+
+## Controle inicial do ensaio
+
+No binário de `c71be47`, o ensaio HTTP iniciou os três processos em loopback com bases PostgreSQL e identidades distintas. O primeiro pedido, `GET /v1/federation/local-manifest` em A, retornou `404` em vez de `200`. A execução terminou nessa fronteira, antes de qualquer importação, e desligou os processos descartáveis.
