@@ -1,5 +1,10 @@
 //! Streams de aplicação de uma conexão promovida a operacional.
 
+#[cfg(feature = "relay-harness")]
+mod relay;
+#[cfg(feature = "relay-harness")]
+pub use relay::{RelayCancellation, RelayOpening, RelayRecv, RelaySend};
+
 use std::fmt;
 use std::future::Future;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -231,6 +236,20 @@ impl OperationalSession {
 
     /// Abre uma stream usando o prazo iniciado pelo chamador antes do pull.
     pub async fn open_bi(&self, deadline: Instant) -> Result<OperationalBiStream, SessionError> {
+        self.open_stream(deadline, OperationalBiStream::new).await
+    }
+
+    async fn open_stream<T>(
+        &self,
+        deadline: Instant,
+        wrap: impl FnOnce(
+            &Arc<SessionState>,
+            OwnedSemaphorePermit,
+            SendStream,
+            RecvStream,
+            Instant,
+        ) -> T,
+    ) -> Result<T, SessionError> {
         self.state.check_ready()?;
         ensure_deadline(deadline)?;
         let slot = self.state.slot()?;
@@ -240,7 +259,7 @@ impl OperationalSession {
             .await
             .map_err(|_| SessionError::Timeout)?
             .map_err(|_| SessionError::Closed)?;
-        let stream = OperationalBiStream::new(&self.state, slot, send, recv, deadline);
+        let stream = wrap(&self.state, slot, send, recv, deadline);
         self.state.check_ready()?;
         ensure_deadline(deadline)?;
         Ok(stream)
@@ -249,6 +268,21 @@ impl OperationalSession {
     /// Retira uma stream da fila pós-manifesto e confere autorização antes da
     /// entrega. Em saturação, encerra só a stream com o código de cota.
     pub async fn accept_bi(&self) -> Result<OperationalBiStream, SessionError> {
+        self.accept_stream(self.state.attempt_timeout, OperationalBiStream::new)
+            .await
+    }
+
+    async fn accept_stream<T>(
+        &self,
+        opening_timeout: Duration,
+        wrap: impl FnOnce(
+            &Arc<SessionState>,
+            OwnedSemaphorePermit,
+            SendStream,
+            RecvStream,
+            Instant,
+        ) -> T,
+    ) -> Result<T, SessionError> {
         let _accept = self.state.accept.lock().await;
         self.state.check_ready()?;
         let (mut send, mut recv) = self
@@ -257,7 +291,7 @@ impl OperationalSession {
             .accept_bi()
             .await
             .map_err(|_| SessionError::Closed)?;
-        let Some(deadline) = Instant::now().checked_add(self.state.attempt_timeout) else {
+        let Some(deadline) = Instant::now().checked_add(opening_timeout) else {
             abort_stream(&mut send, &mut recv, STREAM_ABORTED);
             return Err(SessionError::Timeout);
         };
@@ -268,7 +302,7 @@ impl OperationalSession {
                 return Err(error);
             }
         };
-        let stream = OperationalBiStream::new(&self.state, slot, send, recv, deadline);
+        let stream = wrap(&self.state, slot, send, recv, deadline);
         self.state.authorize(deadline).await?;
         ensure_deadline(deadline)?;
         Ok(stream)
