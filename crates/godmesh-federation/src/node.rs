@@ -495,15 +495,43 @@ impl FederationNode {
     /// Inicia uma tentativa pinada com cancelamento serializado à promoção.
     pub fn start_dial(&self, target: DialTarget) -> Result<DialAttempt, DialError> {
         dial::validate_target(&target)?;
-        let connecting = self
-            .endpoint
+        let connecting = self.connect_target(&target)?;
+        Ok(DialAttempt::spawn(
+            self.shared.clone(),
+            target,
+            connecting,
+            Arc::new(AttemptState::new()),
+        ))
+    }
+
+    /// Vincula a discagem pinada à validade desta instância da rota.
+    /// Cancelar a rota fecha também a conexão promovida por esta tentativa.
+    #[cfg(feature = "relay-harness")]
+    pub fn start_relay_dial(
+        &self,
+        target: DialTarget,
+        route: &RelayCancellation,
+    ) -> Result<DialAttempt, DialError> {
+        dial::validate_target(&target)?;
+        route.start_dial(|state| {
+            let connecting = self.connect_target(&target)?;
+            Ok(DialAttempt::spawn(
+                self.shared.clone(),
+                target,
+                connecting,
+                state,
+            ))
+        })
+    }
+
+    fn connect_target(&self, target: &DialTarget) -> Result<quinn::Connecting, DialError> {
+        self.endpoint
             .connect_with(
                 self.client_config.clone(),
                 target.addr,
                 transport::CONNECT_SERVER_NAME,
             )
-            .map_err(|error| DialError::Link(LinkError::Connect(error.to_string())))?;
-        Ok(DialAttempt::spawn(self.shared.clone(), target, connecting))
+            .map_err(|error| DialError::Link(LinkError::Connect(error.to_string())))
     }
 
     /// Fecha o endpoint e aborta as tarefas deste nó.

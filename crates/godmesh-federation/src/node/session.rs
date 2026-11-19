@@ -3,6 +3,8 @@
 #[cfg(feature = "relay-harness")]
 mod relay;
 #[cfg(feature = "relay-harness")]
+pub(super) use relay::RelayValidity;
+#[cfg(feature = "relay-harness")]
 pub use relay::{RelayCancellation, RelayOpening, RelayRecv, RelaySend};
 
 use std::fmt;

@@ -10,6 +10,8 @@ use quinn::{Connecting, Connection};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+#[cfg(feature = "relay-harness")]
+use super::session::RelayValidity;
 use super::{LinkError, NodeShared, close_with_rejection, establish_pinned};
 use crate::handshake::Rejection;
 use crate::identity::node_id_for;
@@ -86,12 +88,12 @@ pub struct DialAttempt {
 }
 
 impl DialAttempt {
-    pub(super) fn spawn(shared: NodeShared, target: DialTarget, connecting: Connecting) -> Self {
-        let state = Arc::new(AttemptState {
-            phase: Mutex::new(Phase::Pending(None)),
-            cancelled: Notify::new(),
-            cancelled_while_connecting: AtomicBool::new(false),
-        });
+    pub(super) fn spawn(
+        shared: NodeShared,
+        target: DialTarget,
+        connecting: Connecting,
+        state: Arc<AttemptState>,
+    ) -> Self {
         let binding = (Arc::new(()), target.clone());
         let guard = TaskGuard(Arc::clone(&state));
         let task = tokio::spawn(async move { guard.run(shared, target, connecting).await });
@@ -170,9 +172,45 @@ pub(super) struct AttemptState {
     phase: Mutex<Phase>,
     cancelled: Notify,
     cancelled_while_connecting: AtomicBool,
+    #[cfg(feature = "relay-harness")]
+    relay: Option<std::sync::Weak<RelayValidity>>,
 }
 
 impl AttemptState {
+    pub(super) fn new() -> Self {
+        Self {
+            phase: Mutex::new(Phase::Pending(None)),
+            cancelled: Notify::new(),
+            cancelled_while_connecting: AtomicBool::new(false),
+            #[cfg(feature = "relay-harness")]
+            relay: None,
+        }
+    }
+
+    #[cfg(feature = "relay-harness")]
+    pub(super) fn for_relay(route: &Arc<RelayValidity>) -> Self {
+        Self {
+            relay: Some(Arc::downgrade(route)),
+            ..Self::new()
+        }
+    }
+
+    #[cfg(feature = "relay-harness")]
+    pub(super) fn invalidate_relay(&self) {
+        if let DialCancellation::AlreadyPromoted(promoted) = self.cancel() {
+            promoted.invalidate();
+        }
+    }
+
+    #[cfg(feature = "relay-harness")]
+    pub(super) fn still_tracked(&self) -> bool {
+        match &*self.lock() {
+            Phase::Pending(_) => true,
+            Phase::Promoted(promoted) => promoted.connection.close_reason().is_none(),
+            _ => false,
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Phase> {
         self.phase
             .lock()
@@ -208,6 +246,27 @@ impl AttemptState {
     }
 
     pub(super) fn promote(
+        &self,
+        shared: &NodeShared,
+        connection: &Connection,
+        node_id: &str,
+        publish: impl FnOnce() -> Result<LinkSnapshot, Rejection>,
+    ) -> Result<LinkSnapshot, Rejection> {
+        #[cfg(feature = "relay-harness")]
+        if let Some(relay) = &self.relay {
+            let Some(result) = relay.upgrade().and_then(|route| {
+                route.while_active(|| self.publish(shared, connection, node_id, publish))
+            }) else {
+                self.cancel();
+                return Err(Rejection::Transport);
+            };
+            return result;
+        }
+
+        self.publish(shared, connection, node_id, publish)
+    }
+
+    fn publish(
         &self,
         shared: &NodeShared,
         connection: &Connection,
@@ -347,11 +406,7 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let state = Arc::new(AttemptState {
-                phase: Mutex::new(Phase::Pending(None)),
-                cancelled: Notify::new(),
-                cancelled_while_connecting: AtomicBool::new(false),
-            });
+            let state = Arc::new(AttemptState::new());
             let ready = Arc::new(tokio::sync::Barrier::new(2));
             let collect = Arc::new(tokio::sync::Barrier::new(2));
             let task = {

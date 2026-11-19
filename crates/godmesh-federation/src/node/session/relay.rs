@@ -5,8 +5,13 @@ use super::{
     STREAM_ABORTED, SendStream, SessionError, SessionState, before_deadline, checked_length,
     ensure_deadline, exact_error, read_error, valid_length, write_error,
 };
+use crate::node::{DialAttempt, DialError, dial::AttemptState};
 use crate::relay_wire::{Control, Open, decode_control, validate_reply};
-use std::time::Duration;
+use quinn::Connection;
+use std::{
+    sync::{Mutex as SyncMutex, MutexGuard},
+    time::Duration,
+};
 use tokio::sync::{Mutex, watch};
 
 impl OperationalSession {
@@ -73,7 +78,7 @@ struct RouteStream {
 
 impl RouteStream {
     fn check(&self, deadline: Instant) -> Result<(), SessionError> {
-        if *self.cancellation.0.borrow() != RouteStatus::Active {
+        if *self.cancellation.0.status.borrow() != RouteStatus::Active {
             return Err(SessionError::Closed);
         }
         ensure_deadline(deadline)?;
@@ -103,8 +108,7 @@ impl RouteStream {
 
 impl Drop for RouteStream {
     fn drop(&mut self) {
-        drop(self.slot.take());
-        self.cancellation.0.send_replace(RouteStatus::Reclaimed);
+        self.cancellation.0.reclaim(self.slot.take());
     }
 }
 
@@ -115,26 +119,86 @@ enum RouteStatus {
     Reclaimed,
 }
 
+pub(in crate::node) struct RelayValidity {
+    outer: Connection,
+    status: watch::Sender<RouteStatus>,
+    attempts: SyncMutex<Vec<Arc<AttemptState>>>,
+}
+
+impl RelayValidity {
+    fn new(outer: Connection) -> Self {
+        Self {
+            outer,
+            status: watch::channel(RouteStatus::Active).0,
+            attempts: SyncMutex::new(Vec::new()),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Vec<Arc<AttemptState>>> {
+        self.attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_active(&self) -> Option<MutexGuard<'_, Vec<Arc<AttemptState>>>> {
+        let mut attempts = self.lock();
+        if self.outer.close_reason().is_some() {
+            self.cancel_locked(&mut attempts);
+        }
+        (*self.status.borrow() == RouteStatus::Active).then_some(attempts)
+    }
+
+    /// A ordem dos locks é sempre rota, tentativa e estado local do enlace.
+    pub(in crate::node) fn while_active<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
+        let _active = self.lock_active()?;
+        Some(publish())
+    }
+
+    fn cancel_locked(&self, attempts: &mut Vec<Arc<AttemptState>>) {
+        if *self.status.borrow() != RouteStatus::Active {
+            return;
+        }
+        for attempt in attempts.drain(..) {
+            attempt.invalidate_relay();
+        }
+        self.status.send_replace(RouteStatus::Cancelled);
+    }
+
+    fn reclaim(&self, slot: Option<OwnedSemaphorePermit>) {
+        let mut attempts = self.lock();
+        self.cancel_locked(&mut attempts);
+        drop(slot);
+        self.status.send_replace(RouteStatus::Reclaimed);
+    }
+}
+
 /// Sinal de cancelamento da instância, sem reter o crédito QUIC.
 #[derive(Clone)]
-pub struct RelayCancellation(watch::Sender<RouteStatus>);
+pub struct RelayCancellation(Arc<RelayValidity>);
 
 impl RelayCancellation {
-    /// Acorda as operações pendentes nas duas direções.
+    pub(in crate::node) fn start_dial(
+        &self,
+        spawn: impl FnOnce(Arc<AttemptState>) -> Result<DialAttempt, DialError>,
+    ) -> Result<DialAttempt, DialError> {
+        let mut attempts = self.0.lock_active().ok_or(DialError::Cancelled)?;
+        attempts.retain(|attempt| attempt.still_tracked());
+        let state = Arc::new(AttemptState::for_relay(&self.0));
+        let attempt = spawn(Arc::clone(&state))?;
+        attempts.push(state);
+        Ok(attempt)
+    }
+
+    /// Acorda as operações pendentes e invalida as discagens desta instância.
     pub fn cancel(&self) {
-        self.0.send_if_modified(|status| {
-            if *status != RouteStatus::Active {
-                return false;
-            }
-            *status = RouteStatus::Cancelled;
-            true
-        });
+        self.0.cancel_locked(&mut self.0.lock());
     }
 
     /// Permite que tarefas ociosas também observem o cancelamento da rota.
     pub async fn cancelled(&self) {
         let _ = self
             .0
+            .status
             .subscribe()
             .wait_for(|status| *status != RouteStatus::Active)
             .await;
@@ -144,6 +208,7 @@ impl RelayCancellation {
     pub async fn reclaimed(&self) {
         let _ = self
             .0
+            .status
             .subscribe()
             .wait_for(|status| *status == RouteStatus::Reclaimed)
             .await;
@@ -171,7 +236,9 @@ impl RelayOpening {
     ) -> Self {
         let route = Arc::new(RouteStream {
             session: Arc::clone(session),
-            cancellation: RelayCancellation(watch::channel(RouteStatus::Active).0),
+            cancellation: RelayCancellation(Arc::new(RelayValidity::new(
+                session.connection().clone(),
+            ))),
             slot: Some(slot),
         });
         Self {

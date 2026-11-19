@@ -2086,6 +2086,123 @@ mod pinned_dial {
         }
     }
 
+    #[cfg(feature = "relay-harness")]
+    #[tokio::test]
+    async fn relay_dial_cancelamento_antes_da_promocao_vence() {
+        for close_outer in [false, true] {
+            let route = RelayDialFixture::new().await;
+            let remote = node(config());
+            let raw = RawPeer::new(config());
+            let gate = Arc::new(PromotionGate {
+                calls: AtomicUsize::new(0),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                reject: false,
+                authority: TestAuthorizer::new(Ok(None)),
+            });
+            let (caller, mut callbacks) = session_node_with_config(&raw, gate.clone(), config());
+            caller
+                .registry()
+                .insert(remote.record_for(TrustState::Authorized));
+            remote.registry.insert(PeerRecord::authorized_from_key(
+                &caller.identity().public_key_bytes(),
+                CLUSTER,
+            ));
+            let destination = target(&remote, remote.addr());
+            let mut attempt = caller
+                .start_relay_dial(destination.clone(), &route.cancellation)
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+                .await
+                .unwrap();
+            if close_outer {
+                route.outer.shutdown();
+                tokio::time::timeout(Duration::from_secs(2), route.session.cancelled())
+                    .await
+                    .unwrap();
+            } else {
+                route.cancellation.cancel();
+            }
+            gate.release.notify_one();
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), attempt.wait()).await,
+                Ok(Err(DialError::Cancelled))
+            ));
+            assert!(matches!(
+                caller.start_relay_dial(destination, &route.cancellation),
+                Err(DialError::Cancelled)
+            ));
+            assert!(callbacks.try_recv().is_err());
+            assert_ne!(
+                caller.links().snapshot_or_never_seen(&remote.id).state,
+                LinkState::Ready
+            );
+            caller.shutdown();
+            remote.node.shutdown();
+            route.outer.shutdown();
+        }
+    }
+
+    #[cfg(feature = "relay-harness")]
+    #[tokio::test]
+    async fn relay_dial_promocao_primeiro_fecha_so_a_instancia_da_rota() {
+        for close_outer in [false, true] {
+            let route = RelayDialFixture::new().await;
+            let remote = node(config());
+            let raw = RawPeer::new(config());
+            let (caller, mut callbacks) =
+                session_node_with_config(&raw, TestAuthorizer::new(Ok(None)), config());
+            caller
+                .registry()
+                .insert(remote.record_for(TrustState::Authorized));
+            remote.registry.insert(PeerRecord::authorized_from_key(
+                &caller.identity().public_key_bytes(),
+                CLUSTER,
+            ));
+            let destination = target(&remote, remote.addr());
+            let mut relay = caller
+                .start_relay_dial(destination.clone(), &route.cancellation)
+                .unwrap();
+            assert_eq!(
+                relay.wait().await.unwrap().snapshot().state,
+                LinkState::Ready
+            );
+            let original = next_session(&mut callbacks).await;
+
+            let mut direct = caller.start_dial(destination).unwrap();
+            let replacement = direct.wait().await.unwrap();
+            let current = next_session(&mut callbacks).await;
+            assert_ne!(original.id(), current.id());
+
+            if close_outer {
+                drop(relay);
+                route.outer.shutdown();
+            } else {
+                route.cancellation.cancel();
+                assert!(matches!(
+                    relay.cancel(),
+                    DialCancellation::AlreadyPromoted(_)
+                ));
+            }
+            tokio::time::timeout(Duration::from_secs(1), original.cancelled())
+                .await
+                .unwrap();
+            assert_eq!(
+                caller.links().snapshot_or_never_seen(&remote.id).state,
+                LinkState::Ready
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), current.cancelled())
+                    .await
+                    .is_err()
+            );
+            replacement.invalidate();
+            caller.shutdown();
+            remote.node.shutdown();
+            route.outer.shutdown();
+        }
+    }
+
     #[tokio::test]
     async fn promocao_vence_e_invalida_somente_a_conexao_original() {
         let (caller, other) = pair().await;
@@ -2914,5 +3031,60 @@ mod relay_fallback {
         assert!(callbacks.try_recv().is_err());
         caller.shutdown();
         remote.node.shutdown();
+    }
+}
+
+#[cfg(feature = "relay-harness")]
+struct RelayDialFixture {
+    outer: FederationNode,
+    session: OperationalSession,
+    _peer: RawPeer,
+    _connection: Connection,
+    _raw_send: quinn::SendStream,
+    _raw_recv: quinn::RecvStream,
+    _send: godmesh_federation::node::RelaySend,
+    _recv: godmesh_federation::node::RelayRecv,
+    cancellation: godmesh_federation::node::RelayCancellation,
+}
+
+#[cfg(feature = "relay-harness")]
+impl RelayDialFixture {
+    async fn new() -> Self {
+        let peer = RawPeer::new(config());
+        let (outer, mut sessions) =
+            session_node_with_config(&peer, TestAuthorizer::new(Ok(None)), config());
+        let connection = session_handshake(&outer, &peer).await;
+        let session = next_session(&mut sessions).await;
+        let cap = NonZeroU32::new(512).unwrap();
+        let mut opening = session
+            .open_relay(tokio::time::Instant::now() + Duration::from_secs(2), cap)
+            .await
+            .unwrap();
+        let token = [42; 16];
+        let open = relay_control("open", "d1", token);
+        let accept = relay_control("accept", "d1", token);
+        opening.write_control(&open).await.unwrap();
+        let (mut raw_send, mut raw_recv) = connection.accept_bi().await.unwrap();
+        relay_raw_read(&mut raw_recv, &open).await;
+        relay_raw_write(&mut raw_send, &accept).await;
+        assert_eq!(opening.read_control().await.unwrap(), accept);
+        opening.send_token(token).await.unwrap();
+        let mut confirmation = [0; 16];
+        raw_recv.read_exact(&mut confirmation).await.unwrap();
+        assert_eq!(confirmation, token);
+        let (send, recv, cancellation) = opening
+            .into_forwarding(NonZeroU32::new(1400).unwrap())
+            .unwrap();
+        Self {
+            outer,
+            session,
+            _peer: peer,
+            _connection: connection,
+            _raw_send: raw_send,
+            _raw_recv: raw_recv,
+            _send: send,
+            _recv: recv,
+            cancellation,
+        }
     }
 }
