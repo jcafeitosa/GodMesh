@@ -125,13 +125,18 @@ fn origin_identity() -> NodeIdentity {
     identity.unwrap()
 }
 
-fn resigned(mut manifest: SnapshotManifest, frames: &[&[u8]]) -> Vec<u8> {
+fn signed_manifest(mut manifest: SnapshotManifest, frames: &[&[u8]]) -> SnapshotManifest {
     manifest.events_digest = hex::encode(events_digest(frames).unwrap());
     manifest.signature = hex::encode(
         SigningKey::from_bytes(&[1; 32])
             .sign(&manifest.canonical_bytes().unwrap())
             .to_bytes(),
     );
+    manifest
+}
+
+fn resigned(manifest: SnapshotManifest, frames: &[&[u8]]) -> Vec<u8> {
+    let manifest = signed_manifest(manifest, frames);
     pack(&serde_json::to_vec(&manifest).unwrap(), frames)
 }
 
@@ -194,7 +199,7 @@ fn p_independent_vector_and_encoder_match_literally() {
     manifest.sign(&origin_identity()).unwrap();
     assert_eq!(manifest.signature, fixture["manifest_signature"]);
     assert_eq!(
-        encode_package(&manifest, &frames, &policy().limits).unwrap(),
+        encode_package(&manifest, &frames, &policy()).unwrap(),
         package
     );
 }
@@ -505,5 +510,47 @@ fn b_exact_limits_large_count_without_frames_and_historical_windows() {
     assert_eq!(
         verify(&packet).unwrap().cut(),
         (i64::MAX as u64 - 1, i64::MAX as u64)
+    );
+}
+
+#[test]
+fn n_encoder_requires_authenticated_manifest_and_proofs() {
+    let events = original_events();
+    let mut cases = vec![(b"{".to_vec(), InvalidEvent(1))];
+    for (field, value, error) in [
+        ("tenant_id", json!("outro-tenant"), EventScopeMismatch(1)),
+        (
+            "signature",
+            json!("0".repeat(128)),
+            EventSignatureInvalid(1),
+        ),
+    ] {
+        let mut changed: Value = serde_json::from_slice(&events[1]).unwrap();
+        changed[field] = value;
+        cases.push((serde_json::to_vec(&changed).unwrap(), error));
+    }
+    let mut wrong_position: Value = serde_json::from_slice(&events[1]).unwrap();
+    wrong_position["position"]["seq"] = json!(1);
+    cases.push((
+        serde_json::to_vec(&wrong_position).unwrap(),
+        SequenceMismatch(1),
+    ));
+
+    let policy = roomy();
+    for (event, error) in cases {
+        let frames = [events[0].as_slice(), event.as_slice()];
+        let manifest = signed_manifest(baseline(), &frames);
+        assert_eq!(
+            encode_package(&manifest, &frames, &policy).err(),
+            Some(error)
+        );
+    }
+
+    let frames = events.each_ref().map(Vec::as_slice);
+    let mut manifest = signed_manifest(baseline(), &frames);
+    manifest.signature = "0".repeat(128);
+    assert_eq!(
+        encode_package(&manifest, &frames, &policy).err(),
+        Some(ManifestSignatureInvalid)
     );
 }

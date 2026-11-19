@@ -429,21 +429,28 @@ pub fn events_digest(events: &[&[u8]]) -> Result<[u8; 32], SnapshotError> {
 /// Emite o manifesto e as provas originais com os respectivos prefixos u32 BE.
 ///
 /// # Errors
-/// Recusa manifesto inválido, digest divergente, quantidade ou framing inválidos
-/// e excesso dos limites de emissão.
+/// Recusa política, manifesto ou provas inválidos e excesso dos limites.
+/// Confere as assinaturas e o escopo antes de alocar o pacote de saída.
 pub fn encode_package(
     manifest: &SnapshotManifest,
     events: &[&[u8]],
-    limits: &SnapshotLimits,
+    policy: &SnapshotPolicy,
 ) -> Result<Vec<u8>, SnapshotError> {
     use SnapshotError::*;
 
+    if !valid_policy(policy) {
+        return Err(InvalidPolicy);
+    }
+    let limits = &policy.limits;
     let json = serde_json::to_vec(manifest).map_err(|_| MalformedManifest)?;
     let manifest_size = u32::try_from(json.len()).map_err(|_| ManifestTooLarge)?;
     if manifest_size > limits.max_manifest_bytes.get() {
         return Err(ManifestTooLarge);
     }
-    parse_manifest(&json, limits.max_events)?;
+    let manifest = parse_manifest(&json, limits.max_events)?;
+    if !matches_policy(&manifest, policy) {
+        return Err(ScopeMismatch);
+    }
     if u32::try_from(events.len()).map_err(|_| TooManyEvents)? != manifest.event_count {
         return Err(InvalidCut);
     }
@@ -460,9 +467,7 @@ pub fn encode_package(
     if total > limits.max_package_bytes.get() {
         return Err(PackageTooLarge);
     }
-    if events_digest(events)? != decode_digest(&manifest.events_digest)? {
-        return Err(EventsDigestMismatch);
-    }
+    authenticate_snapshot(&manifest, events, policy)?;
     let mut package = Vec::with_capacity(total);
     package.extend_from_slice(&manifest_size.to_be_bytes());
     package.extend_from_slice(&json);
@@ -558,6 +563,25 @@ fn verify_events(
     Ok(())
 }
 
+fn authenticate_snapshot(
+    manifest: &SnapshotManifest,
+    events: &[&[u8]],
+    policy: &SnapshotPolicy,
+) -> Result<(), SnapshotError> {
+    use SnapshotError::*;
+
+    identity::verify_signature(
+        &policy.origin.public_key,
+        &manifest.canonical_bytes()?,
+        &manifest.signature,
+    )
+    .map_err(|_| ManifestSignatureInvalid)?;
+    if events_digest(events)? != decode_digest(&manifest.events_digest)? {
+        return Err(EventsDigestMismatch);
+    }
+    verify_events(manifest, events, policy)
+}
+
 /// Autentica o pacote e devolve fatias dos envelopes originais, na ordem do corte.
 ///
 /// # Errors
@@ -599,15 +623,6 @@ pub fn verify_snapshot<'a>(
         return Err(MalformedPackage);
     }
 
-    identity::verify_signature(
-        &policy.origin.public_key,
-        &manifest.canonical_bytes()?,
-        &manifest.signature,
-    )
-    .map_err(|_| ManifestSignatureInvalid)?;
-    if events_digest(&events)? != decode_digest(&manifest.events_digest)? {
-        return Err(EventsDigestMismatch);
-    }
-    verify_events(&manifest, &events, policy)?;
+    authenticate_snapshot(&manifest, &events, policy)?;
     Ok(VerifiedSnapshot { manifest, events })
 }
