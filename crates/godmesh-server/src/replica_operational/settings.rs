@@ -223,6 +223,12 @@ impl ReplicaConfig {
             acl_recheck_interval: duration(&fields, "ACL_RECHECK_INTERVAL_MS")?,
             pull_interval,
         };
+        if config.max_streams_per_connection.get() > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(ConfigError {
+                field: "MAX_STREAMS_PER_CONNECTION",
+                reason: "excede o teto do semáforo",
+            });
+        }
         let frame = usize::try_from(config.max_frame_bytes.get())
             .map_err(|_| invalid("MAX_FRAME_BYTES"))?;
         if config.max_envelope_bytes.get() > frame {

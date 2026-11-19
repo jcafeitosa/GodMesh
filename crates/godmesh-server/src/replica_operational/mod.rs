@@ -6,7 +6,7 @@ mod settings;
 
 pub use settings::{ConfigError, Pin, ReplicaConfig, Role};
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, sync::Arc, time::Duration};
 
 use godmesh_federation::NodeIdentity;
 use sqlx::Connection;
@@ -20,6 +20,12 @@ use crate::{
     },
     sql_budget,
 };
+
+/// Aplica o deadline às consultas que revalidam o orçamento SQL na transação.
+/// O chamador controla o prazo externo e a limpeza da transação.
+pub async fn with_sql_deadline<F: Future>(deadline: Instant, future: F) -> F::Output {
+    sql_budget::DEADLINE.scope(deadline, future).await
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct SessionPeer<'a> {
@@ -361,7 +367,7 @@ impl ReplicaService {
         .map_err(|_| EffectError::Timeout)??;
         let decision = timeout_at(
             deadline,
-            sql_budget::DEADLINE.scope(deadline, async {
+            with_sql_deadline(deadline, async {
                 let mut guard = self.portable.lock_cluster_guard(&mut tx).await?;
                 replication::locked(&mut guard, &self.config.namespace).await?;
                 let now = (self.clock)();

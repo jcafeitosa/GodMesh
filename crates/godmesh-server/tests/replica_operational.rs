@@ -819,3 +819,27 @@ async fn origem_prepara_pagina_sob_piso_e_acl_com_bytes_originais() {
         Err(EffectError::Replication(ReplicaError::AclDenied))
     ));
 }
+
+#[test]
+fn cota_de_streams_respeita_o_limite_do_semaforo() {
+    use tokio::sync::Semaphore;
+
+    let mut vars = env("receiver");
+    let (_, value) = vars
+        .iter_mut()
+        .find(|(name, _)| name == "GODMESH_FEDERATION_M4_MAX_STREAMS_PER_CONNECTION")
+        .unwrap();
+    *value = Semaphore::MAX_PERMITS.to_string();
+    let at_limit = ReplicaConfig::from_env_with(vars.clone()).unwrap().unwrap();
+    assert_eq!(
+        at_limit.max_streams_per_connection.get(),
+        Semaphore::MAX_PERMITS
+    );
+    let (_, value) = vars
+        .iter_mut()
+        .find(|(name, _)| name == "GODMESH_FEDERATION_M4_MAX_STREAMS_PER_CONNECTION")
+        .unwrap();
+    *value = (Semaphore::MAX_PERMITS + 1).to_string();
+    let error = ReplicaConfig::from_env_with(vars).unwrap_err();
+    assert_eq!(error.field, "MAX_STREAMS_PER_CONNECTION");
+}
