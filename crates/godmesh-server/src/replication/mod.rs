@@ -84,6 +84,14 @@ impl Limits {
         })
     }
 
+    pub(crate) fn component_min(self, other: Self) -> Self {
+        Self {
+            max_events: self.max_events.min(other.max_events),
+            max_envelope_bytes: self.max_envelope_bytes.min(other.max_envelope_bytes),
+            max_data_bytes: self.max_data_bytes.min(other.max_data_bytes),
+        }
+    }
+
     fn check_batch(self, frames: &[Vec<u8>]) -> Result<(), Error> {
         if frames.is_empty() {
             return Err(Error::InvalidProof);
@@ -118,6 +126,7 @@ pub enum Error {
     ProofConflict,
     SequenceGap,
     HistoryUnavailable,
+    CheckpointMissing,
     LimitExceeded,
     HoldActive,
     HoldUnknown,
@@ -190,6 +199,66 @@ pub struct Series<'a> {
 pub struct Replication;
 
 impl Replication {
+    /// Confere somente a reserva estática para o preflight. Política corrente
+    /// e ACL são decisões de cada efeito.
+    pub async fn verify_reservation_in_tx(
+        guard: &mut ClusterGuard<'_, '_>,
+        series: Series<'_>,
+        local: NodeContext<'_>,
+        primary: bool,
+    ) -> Result<(), Error> {
+        let conn = locked(guard, series.namespace).await?;
+        let reservation = load_series(conn, series).await?;
+        reservation.validate()?;
+        local.check(&reservation.local_node)?;
+        if reservation.primary() != primary {
+            return Err(Error::Authority);
+        }
+        Ok(())
+    }
+
+    /// Leitura estrita do cursor no destino. A ausência indica estado
+    /// inconsistente e jamais é convertida em prefixo inicial.
+    pub async fn receiver_checkpoint_in_tx(
+        guard: &mut ClusterGuard<'_, '_>,
+        series: Series<'_>,
+        local: NodeContext<'_>,
+    ) -> Result<i64, Error> {
+        let conn = locked(guard, series.namespace).await?;
+        let reservation = load_series(conn, series).await?;
+        local.check(&reservation.local_node)?;
+        if reservation.primary() {
+            return Err(Error::Authority);
+        }
+        store::checkpoint(conn, &reservation)
+            .await?
+            .ok_or(Error::CheckpointMissing)
+    }
+
+    /// Revalida a autorização e residência sem selecionar nem aplicar lote.
+    pub(crate) async fn recheck_copy_in_tx(
+        guard: &mut ClusterGuard<'_, '_>,
+        series: Series<'_>,
+        authority: CopyAuthority<'_>,
+        primary: bool,
+        now: i64,
+    ) -> Result<(), Error> {
+        let conn = locked(guard, series.namespace).await?;
+        let reservation = load_series(conn, series).await?;
+        authority.origin.check(&reservation.namespace.origin_node)?;
+        authority.destination.check(if primary {
+            authority.destination.node_id
+        } else {
+            &reservation.local_node
+        })?;
+        if reservation.primary() != primary {
+            return Err(Error::Authority);
+        }
+        store::current_policy(conn, &reservation).await?;
+        store::copy_policy(conn, &reservation, Some(authority.destination.node_id), now).await?;
+        Ok(())
+    }
+
     pub async fn reserve_namespace_in_tx(
         guard: &mut ClusterGuard<'_, '_>,
         request: &Reservation,
@@ -500,7 +569,7 @@ impl Reservation {
     }
 }
 
-async fn locked<'a>(
+pub(crate) async fn locked<'a>(
     guard: &'a mut ClusterGuard<'_, '_>,
     ns: &Namespace,
 ) -> Result<&'a mut PgConnection, Error> {
@@ -515,6 +584,7 @@ async fn locked<'a>(
         return Err(Error::InvalidReservation);
     }
     let connection = guard.connection();
+    crate::sql_budget::refresh(connection).await?;
     lock_event_namespace(
         connection,
         &ns.origin_node,

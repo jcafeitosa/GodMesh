@@ -198,6 +198,7 @@ struct State {
 
 impl State {
     async fn load(tx: &mut Tx<'_>) -> Result<Self, WriteError> {
+        crate::sql_budget::refresh(tx).await?;
         let row = sqlx::query(
             "SELECT accepted, incompatible, pending, effective, published, conflict, recovering
                FROM federation_config_state WHERE singleton",
@@ -285,6 +286,7 @@ impl Artifact {
 }
 
 async fn load_artifact(tx: &mut Tx<'_>, hash: &str) -> Result<Option<Artifact>, WriteError> {
+    crate::sql_budget::refresh(tx).await?;
     sqlx::query(
         "SELECT hash, version, applies_at, expires_at, effective_after, floor, software,
                 accepted, incompatible, resolution FROM federation_config_frame WHERE hash = $1",
@@ -313,6 +315,7 @@ async fn stored_frame(tx: &mut Tx<'_>, hash: &str) -> Result<Vec<u8>, WriteError
 }
 
 async fn stored_policy(tx: &mut Tx<'_>) -> Result<Option<StoredPolicy>, WriteError> {
+    crate::sql_budget::refresh(tx).await?;
     Ok(sqlx::query_as(
         "SELECT profile, cluster, namespace, scope_id, epoch, role, voters
            FROM federation_config_policy WHERE singleton",
@@ -1054,6 +1057,7 @@ async fn next_transition(
     state: &State,
     now: i64,
 ) -> Result<Option<i64>, WriteError> {
+    crate::sql_budget::refresh(tx).await?;
     // O tempo exigível de uma evidência superior anterior pode vencer antes
     // do tempo da última evidência. Todos os marcos relevantes entram no mínimo.
     Ok(sqlx::query_scalar(
@@ -1081,6 +1085,7 @@ async fn incompatible_due(
     accepted: Option<i64>,
     now: i64,
 ) -> Result<bool, WriteError> {
+    crate::sql_budget::refresh(tx).await?;
     // Uma evidência mais nova incompatível não cancela exigências anteriores
     // da mesma série. Somente aceitação igual ou superior pode superá-las.
     Ok(sqlx::query_scalar(

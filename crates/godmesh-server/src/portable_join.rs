@@ -263,6 +263,10 @@ impl PortableJoin {
         &self.pool
     }
 
+    pub(crate) fn identity(&self) -> &NodeIdentity {
+        &self.identity
+    }
+
     pub fn trust_changes(&self) -> watch::Receiver<u64> {
         self.trust_changes.subscribe()
     }
@@ -312,6 +316,7 @@ impl PortableJoin {
         &self,
         tx: &mut Transaction<'_, Postgres>,
     ) -> Result<(), PortableJoinError> {
+        crate::sql_budget::refresh(tx).await?;
         let read_committed: bool = sqlx::query_scalar(
             "SELECT current_setting('transaction_isolation') = 'read committed'
                FROM pg_advisory_xact_lock(hashtextextended($1, 0))",
@@ -423,6 +428,7 @@ impl PortableJoin {
         if proof.peer_node_id.as_deref() != Some(node_id) {
             return Err(PortableJoinError::Issuer);
         }
+        crate::sql_budget::refresh(tx).await?;
         let peer: Option<(String, String, String)> = sqlx::query_as(
             "SELECT trust_state, public_key, cluster FROM federation_peer WHERE node_id = $1 FOR SHARE",
         ).bind(node_id).fetch_optional(&mut **tx).await?;
@@ -742,6 +748,7 @@ impl PortableJoin {
         tx: &mut Transaction<'_, Postgres>,
         id: &str,
     ) -> Result<Option<Imported>, PortableJoinError> {
+        crate::sql_budget::refresh(tx).await?;
         let record: Option<ImportRow> = sqlx::query_as(
             "SELECT origin, public_key, peer_node_id, chain_json, digests, validity::text, issued_at
              FROM federation_portable_imports WHERE cluster = $1 AND node_id = $2",
@@ -814,6 +821,7 @@ impl PortableJoin {
         tx: &mut Transaction<'_, Postgres>,
         frame: &FramedChain,
     ) -> Result<(), PortableJoinError> {
+        crate::sql_budget::refresh(tx).await?;
         let blocked: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM federation_portable_revocations
               WHERE cluster = $1 AND root_node_id = $2 AND target_digest = ANY($3))",

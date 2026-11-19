@@ -22,6 +22,7 @@ pub(super) async fn reservation(
     db: &mut PgConnection,
     ns: &Namespace,
 ) -> Result<Option<Reservation>, Error> {
+    crate::sql_budget::refresh(db).await?;
     let row = namespace!(
         "SELECT * FROM federation_replica_namespace
          WHERE (origin_node, tenant_id, stream_id, partition)=($1,$2,$3,$4)",
@@ -52,6 +53,7 @@ pub(super) async fn insert_reservation(
     db: &mut PgConnection,
     r: &Reservation,
 ) -> Result<(), Error> {
+    crate::sql_budget::refresh(db).await?;
     series!(
         "INSERT INTO federation_replica_namespace
          (origin_node,tenant_id,stream_id,partition,authority_epoch,local_node,profile,
@@ -73,6 +75,7 @@ pub(super) async fn insert_reservation(
 }
 
 pub(super) async fn legacy_history(db: &mut PgConnection, ns: &Namespace) -> Result<bool, Error> {
+    crate::sql_budget::refresh(db).await?;
     let row = namespace!(
         "SELECT EXISTS (
            SELECT 1 FROM event_position WHERE (origin_node,tenant_id,stream_id,partition)=($1,$2,$3,$4)
@@ -90,6 +93,7 @@ pub(super) async fn origin_scope(
     r: &Reservation,
     key: &str,
 ) -> Result<(), Error> {
+    crate::sql_budget::refresh(db).await?;
     sqlx::query(
         "SELECT 1 FROM federation_peer p JOIN federation_peer_scope s USING(node_id)
          WHERE p.node_id=$1 AND p.public_key=$2 AND p.trust_state='authorized'
@@ -142,6 +146,7 @@ pub(super) async fn historical_policy(
     if key != &r.policy {
         return Err(Error::ProofConflict);
     }
+    crate::sql_budget::refresh(db).await?;
     let row = sqlx::query(
         "SELECT policy_id,policy_version,duration_seconds,allow_discard,active
          FROM federation_replica_policy WHERE (policy_id,policy_version) = ($1,$2)
@@ -158,6 +163,7 @@ pub(super) async fn current_policy(
     db: &mut PgConnection,
     r: &Reservation,
 ) -> Result<Policy, Error> {
+    crate::sql_budget::refresh(db).await?;
     sqlx::query(
         "SELECT 1 FROM tenant_region t JOIN retention_class c USING(jurisdiction)
          WHERE (t.tenant_id,t.jurisdiction,c.class)=($1,$2,$3) FOR SHARE OF t,c",
@@ -181,6 +187,7 @@ pub(super) async fn copy_policy(
     dest: Option<&str>,
     now: i64,
 ) -> Result<Policy, Error> {
+    crate::sql_budget::refresh(db).await?;
     let row = series!(
         "SELECT p.policy_id,p.policy_version,p.duration_seconds,p.allow_discard,p.active
          FROM federation_replica_acl a JOIN federation_replica_policy p USING(policy_id,policy_version)
@@ -199,15 +206,20 @@ pub(super) async fn copy_policy(
     Policy::decode(row)
 }
 
-pub(super) async fn prefix(db: &mut PgConnection, r: &Reservation) -> Result<i64, Error> {
+pub(super) async fn checkpoint(
+    db: &mut PgConnection,
+    r: &Reservation,
+) -> Result<Option<i64>, Error> {
+    crate::sql_budget::refresh(db).await?;
     let row = series!(
         "SELECT prefix FROM federation_replica_checkpoint
          WHERE (origin_node,tenant_id,stream_id,partition,authority_epoch,local_node)=($1,$2,$3,$4,$5,$6)", r
     ).bind(&r.local_node).fetch_optional(db).await?;
-    Ok(row
-        .map(|row| row.try_get("prefix"))
-        .transpose()?
-        .unwrap_or(0))
+    Ok(row.map(|row| row.try_get("prefix")).transpose()?)
+}
+
+pub(super) async fn prefix(db: &mut PgConnection, r: &Reservation) -> Result<i64, Error> {
+    Ok(checkpoint(db, r).await?.unwrap_or(0))
 }
 
 pub(super) async fn advance(
@@ -215,6 +227,7 @@ pub(super) async fn advance(
     r: &Reservation,
     prefix: i64,
 ) -> Result<(), Error> {
+    crate::sql_budget::refresh(db).await?;
     series!(
         "INSERT INTO federation_replica_checkpoint (origin_node,tenant_id,stream_id,partition,authority_epoch,local_node,prefix)
          VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -252,6 +265,7 @@ impl Proof {
 }
 
 pub(super) async fn slot(db: &mut PgConnection, r: &Reservation, seq: i64) -> Result<Slot, Error> {
+    crate::sql_budget::refresh(db).await?;
     let removed = series!(
         "SELECT 1 FROM federation_replica_disposition
          WHERE (origin_node,tenant_id,stream_id,partition,authority_epoch,seq)=($1,$2,$3,$4,$5,$6)",
@@ -264,6 +278,7 @@ pub(super) async fn slot(db: &mut PgConnection, r: &Reservation, seq: i64) -> Re
         return Ok(Slot::Discarded);
     }
 
+    crate::sql_budget::refresh(db).await?;
     let row = series!(
         "SELECT e.retention_class,e.jurisdiction,p.frame,p.issued_at,p.expires_at,
                 p.policy_id,p.policy_version,p.published,p.discard_allowed
@@ -304,10 +319,12 @@ pub(super) async fn insert_proof(
     expires: i64,
     frame: &[u8],
 ) -> Result<(), Error> {
+    crate::sql_budget::refresh(db).await?;
     series!(
         "INSERT INTO event_position (origin_node,tenant_id,stream_id,partition,authority_epoch,seq,retention_class,jurisdiction)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", r
     ).bind(seq).bind(&r.retention_class).bind(&r.jurisdiction).execute(&mut *db).await?;
+    crate::sql_budget::refresh(db).await?;
     series!(
         "INSERT INTO federation_replica_proof
          (origin_node,tenant_id,stream_id,partition,authority_epoch,seq,frame,issued_at,expires_at,
@@ -333,6 +350,7 @@ pub(super) async fn hold(
     r: &Reservation,
     seq: i64,
 ) -> Result<Option<bool>, Error> {
+    crate::sql_budget::refresh(db).await?;
     let row = series!(
         "SELECT active FROM federation_replica_hold
          WHERE (origin_node,tenant_id,stream_id,partition,authority_epoch,seq)=($1,$2,$3,$4,$5,$6)
@@ -351,6 +369,7 @@ pub(super) async fn remove(
     seq: i64,
     now: i64,
 ) -> Result<(), Error> {
+    crate::sql_budget::refresh(db).await?;
     series!(
         "DELETE FROM federation_replica_proof
          WHERE (origin_node,tenant_id,stream_id,partition,authority_epoch,seq)=($1,$2,$3,$4,$5,$6)",
@@ -359,6 +378,7 @@ pub(super) async fn remove(
     .bind(seq)
     .execute(&mut *db)
     .await?;
+    crate::sql_budget::refresh(db).await?;
     series!(
         "DELETE FROM event_position
          WHERE (origin_node,tenant_id,stream_id,partition,authority_epoch,seq)=($1,$2,$3,$4,$5,$6)",
@@ -367,6 +387,7 @@ pub(super) async fn remove(
     .bind(seq)
     .execute(&mut *db)
     .await?;
+    crate::sql_budget::refresh(db).await?;
     series!(
         "DELETE FROM federation_replica_hold
          WHERE (origin_node,tenant_id,stream_id,partition,authority_epoch,seq)=($1,$2,$3,$4,$5,$6)",
@@ -375,6 +396,7 @@ pub(super) async fn remove(
     .bind(seq)
     .execute(&mut *db)
     .await?;
+    crate::sql_budget::refresh(db).await?;
     series!(
         "INSERT INTO federation_replica_disposition (origin_node,tenant_id,stream_id,partition,authority_epoch,seq,removed_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7)", r
