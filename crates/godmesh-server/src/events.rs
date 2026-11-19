@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::api::ApiError;
+use crate::config_bundle::{BundleService, Failure, Fence, WriteError};
 use crate::portable_join::{PortableJoin, PortableJoinError};
 use crate::auth::VerifiedGrant;
 
@@ -214,6 +215,24 @@ pub async fn create_event_with_portable(
     now: i64,
     portable: Option<&PortableJoin>,
 ) -> Result<EventOutcome, ApiError> {
+    create_event_with_fence(pool, grant, event, window, now, portable, None).await
+}
+
+/// Aplica a configuração operacional do cluster à escrita HTTP nível 1.
+pub async fn create_event_with_fence(
+    pool: &PgPool,
+    grant: &VerifiedGrant,
+    event: SignedEvent,
+    window: &EventWindow,
+    now: i64,
+    portable: Option<&PortableJoin>,
+    config: Option<&BundleService>,
+) -> Result<EventOutcome, ApiError> {
+    if config.is_some() && portable.is_none() {
+        return Err(ApiError::ConfigFenceBlocked(
+            "a política M3 exige autoridade portátil".to_owned(),
+        ));
+    }
     grant.validate().map_err(ApiError::InvalidCredential)?;
 
     match grant.predicate.evaluate() {
@@ -291,14 +310,31 @@ pub async fn create_event_with_portable(
     }
 
     if let Some(service) = portable.filter(|service| service.cluster() == cluster) {
+        // begin_event_write já tomou este lock antes de qualquer lock do
+        // namespace. O guard pertence à mesma transação até a escrita.
+        let mut guard = service
+            .lock_cluster_guard(&mut tx)
+            .await
+            .map_err(portable_event_error)?;
+        let authorization_time = godmesh_federation::now_unix();
         service
-            .authorize_local(&mut tx)
+            .authorize_local_at(&mut guard, authorization_time)
             .await
             .map_err(portable_event_error)?;
         service
-            .authorize_peer(&mut tx, &event.node_id, &public_key)
+            .authorize_peer_at(&mut guard, &event.node_id, &public_key, authorization_time)
             .await
             .map_err(portable_event_error)?;
+        if let Some(config) = config
+            && let Fence::Blocked(reason) = config
+                .classify_fence_in_tx(&mut guard, 1, authorization_time)
+                .await
+                .map_err(config_event_error)?
+        {
+            return Err(ApiError::ConfigFenceBlocked(format!(
+                "configuração operacional indisponível para nível 1: {reason:?}"
+            )));
+        }
     }
 
     // Tenancy: o tenant assinado no envelope é conferido contra o grant.
@@ -617,6 +653,13 @@ fn record_from_row(
 
 fn storage_invalid(detail: &str) -> ApiError {
     ApiError::Storage(sqlx::Error::Protocol(detail.to_owned()))
+}
+
+fn config_event_error(error: WriteError) -> ApiError {
+    match error {
+        WriteError::Transient(Failure::Storage(error)) => ApiError::Storage(error),
+        _ => storage_invalid("não foi possível verificar a configuração M3 confirmada"),
+    }
 }
 
 /// Filtro de leitura em forma estável: entra no token e precisa ser idêntico na

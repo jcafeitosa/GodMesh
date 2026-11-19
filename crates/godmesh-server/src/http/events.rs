@@ -1,5 +1,7 @@
 //! Rotas de evento: aceitação de posição e leitura da stream do tenant.
 
+use std::sync::Arc;
+
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
@@ -9,7 +11,8 @@ use super::contract::{Access, ParamSpec, Registry, RouteDoc, Schema};
 use super::{created_status, AppState, ApiErrorResponse};
 use crate::api::ApiError;
 use crate::auth::{Scope, VerifiedGrant};
-use crate::events::{create_event_with_portable, list_events, EventAck, EventPage, EventQuery};
+use crate::config_bundle::BundleService;
+use crate::events::{create_event_with_fence, list_events, EventAck, EventPage, EventQuery};
 use godmesh_federation::SignedEvent;
 use godmesh_federation::now_unix;
 
@@ -29,6 +32,7 @@ pub(super) fn register(reg: &mut Registry) {
                 "grant_denied",
                 "event_signature_invalid",
                 "event_node_unauthorized",
+                "config_fence_blocked",
                 "event_scope_denied",
                 "event_epoch_stale",
                 "event_not_fresh",
@@ -71,6 +75,7 @@ pub(super) fn register(reg: &mut Registry) {
 pub(super) async fn post_event(
     State(state): State<AppState>,
     Extension(grant): Extension<VerifiedGrant>,
+    config: Option<Extension<Arc<BundleService>>>,
     payload: Result<Json<SignedEvent>, JsonRejection>,
 ) -> Result<(StatusCode, Json<EventAck>), ApiErrorResponse> {
     let Json(event) = payload.map_err(|rejection| {
@@ -79,13 +84,14 @@ pub(super) async fn post_event(
     // 201 na posição nova, 200 na repetição idempotente da mesma posição. O ACK
     // nunca passa de `persisted_local` (ADR-058). A janela de frescor usa o
     // relógio do processo; o caso de uso aceita `now` injetável para teste.
-    match create_event_with_portable(
+    match create_event_with_fence(
         &state.pool,
         &grant,
         event,
         &state.event_window,
         now_unix(),
         state.portable.as_deref(),
+        config.as_ref().map(|Extension(service)| service.as_ref()),
     )
     .await
     {

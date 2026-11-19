@@ -377,6 +377,13 @@ async fn p_publica_vetor_m3a_recebe_ativa_e_le_sem_reescrita() {
         receiver.accept(&b.portable, &served, || 100).await.unwrap(),
         WriteOutcome::Accepted
     );
+    let mut tx = b.tx().await;
+    let mut guard = b.portable.lock_cluster_guard(&mut tx).await.unwrap();
+    assert_eq!(
+        receiver.accepted_hash_in_tx(&mut guard).await.unwrap(),
+        Some(hash)
+    );
+    tx.commit().await.unwrap();
     assert_eq!(
         receiver.activate_due(&b.portable, || 119).await.unwrap(),
         Activation::NoChange
@@ -395,7 +402,8 @@ async fn p_publica_vetor_m3a_recebe_ativa_e_le_sem_reescrita() {
             version,
             hash,
             floor: 2,
-            expires_at: 200
+            expires_at: 200,
+            recheck_at: 200
         }
     );
     let before = b.snapshot().await;
@@ -1513,4 +1521,128 @@ async fn f_lock_de_sessao_liberado_nao_remove_o_lock_do_guard() {
         Err(godmesh_server::portable_join::PortableJoinError::Configuration(_))
     ));
     snapshot.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn prazo_de_autorizacao_termina_no_primeiro_piso_exigivel() {
+    let Some(fx) = Fixture::new("prazo_autoridade").await else {
+        return;
+    };
+    let service = fx.enabled(fx.policy(Role::Publisher, software(1))).await;
+    let active = fx.signed(1, 1, 10, 90, software(1));
+    let pending = fx.signed(2, 2, 60, 100, software(1));
+    let incompatible = fx.signed(3, 3, 50, 110, software(2));
+    assert_eq!(
+        fx.publish(&service, &active, 10).await.unwrap(),
+        WriteOutcome::Accepted
+    );
+    assert_eq!(
+        service.activate_due(&fx.portable, || 10).await.unwrap(),
+        Activation::Activated
+    );
+    for (frame, outcome, deadline) in [
+        (pending, WriteOutcome::Accepted, 60),
+        (incompatible, WriteOutcome::IncompatibleRecorded, 50),
+    ] {
+        assert_eq!(fx.publish(&service, &frame, 20).await.unwrap(), outcome);
+        assert!(matches!(
+            fx.fence(&service, 1, 20).await,
+            Fence::Allowed { expires_at: 90, recheck_at, .. } if recheck_at == deadline
+        ));
+        let mut tx = fx.tx().await;
+        let mut guard = fx.portable.lock_cluster_guard(&mut tx).await.unwrap();
+        assert_eq!(
+            service.next_transition_in_tx(&mut guard, 20).await.unwrap(),
+            Some(deadline)
+        );
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(
+        fx.fence(&service, 1, 50).await,
+        Fence::Blocked(Block::Incompatible)
+    );
+}
+
+#[tokio::test]
+async fn ingest_nivel_um_respeita_piso_e_retorna_sem_duplicar() {
+    use godmesh_federation::now_unix;
+    use godmesh_identity::grant::{FreshnessSource, GrantPredicate, OfflineOp, RevocationState};
+    use godmesh_server::api::ApiError;
+    use godmesh_server::auth::{Scope, Subject, VerifiedGrant};
+    use godmesh_server::events::{EventWindow, create_event_with_fence};
+
+    let Some(fx) = Fixture::new("ingest_config").await else {
+        return;
+    };
+    let member = import_member(&fx).await;
+    let service = fx.enabled(fx.policy(Role::Publisher, software(1))).await;
+    let tenant = "tenant-config-fence";
+    let stream = "stream-config-fence";
+    let grant = VerifiedGrant {
+        subject: Subject {
+            tenant_id: tenant.into(),
+            principal: "operador-config-fence".into(),
+        },
+        predicate: GrantPredicate {
+            operation: OfflineOp::RecordLocalObservation,
+            epoch_comparable: true,
+            revocation: RevocationState::Absent,
+            freshness: FreshnessSource::F3VerifiedOnline,
+            retention_class_known: true,
+            action_enumerated: true,
+        },
+        token_id: "test-config-fence".into(),
+        scopes: vec![Scope::EventWrite],
+        authority_epoch: 1,
+    };
+    sqlx::query("INSERT INTO tenant_region (tenant_id, jurisdiction) VALUES ($1, 'BR')")
+        .bind(tenant)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    common::conceder_escopo(&fx.pool, member.identity.node_id(), tenant, stream).await;
+    let window = EventWindow::default();
+    let now = now_unix();
+    let raw = common::envelope_assinado(&member.identity, tenant, stream, 1, 1, 1, "mensagem");
+    let event = serde_json::from_str::<godmesh_federation::SignedEvent>(&raw).unwrap();
+    let submit = || {
+        create_event_with_fence(
+            &fx.pool,
+            &grant,
+            event.clone(),
+            &window,
+            now,
+            Some(&fx.portable),
+            Some(&service),
+        )
+    };
+
+    assert!(matches!(
+        submit().await,
+        Err(ApiError::ConfigFenceBlocked(_))
+    ));
+    for (version, floor) in [(1, 1), (2, 2), (3, 1)] {
+        let frame = fx.signed(version, floor, now, now + 30, software(1));
+        assert_eq!(
+            fx.publish(&service, &frame, now).await.unwrap(),
+            WriteOutcome::Accepted
+        );
+        assert_eq!(
+            service.activate_due(&fx.portable, || now).await.unwrap(),
+            Activation::Activated
+        );
+        let result = submit().await;
+        if floor == 2 {
+            assert!(matches!(result, Err(ApiError::ConfigFenceBlocked(_))));
+        } else {
+            assert_eq!(result.unwrap().created, version == 1);
+        }
+    }
+    let positions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM event_position WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(positions, 1);
 }

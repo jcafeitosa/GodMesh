@@ -173,6 +173,8 @@ pub enum ApiError {
     /// O nó assinante não está registrado ou não está `authorized` em
     /// `federation_peer` (S-sec-2, 422). Nenhum INSERT acontece.
     EventNodeUnauthorized(String),
+    /// A configuração efetiva do cluster não autoriza o nível do ingest.
+    ConfigFenceBlocked(String),
     /// Origem ≠ assinante, tenant do envelope ≠ tenant do grant, ou escopo
     /// `(node, tenant, stream)` não concedido em `federation_peer_scope`
     /// (S-sec-2, 422). Ausência de linha é negativa: falha fechada.

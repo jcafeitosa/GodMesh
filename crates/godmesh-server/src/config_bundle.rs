@@ -170,6 +170,7 @@ pub enum Fence {
         hash: Hash,
         floor: u64,
         expires_at: i64,
+        recheck_at: i64,
     },
     Blocked(Block),
 }
@@ -938,6 +939,32 @@ impl BundleService {
         })
     }
 
+    /// Prazo mais próximo que pode alterar a decisão local de autorização.
+    pub async fn next_transition_in_tx(
+        &self,
+        guard: &mut ClusterGuard<'_, '_>,
+        now: i64,
+    ) -> Result<Option<i64>, WriteError> {
+        self.check_context(guard, None).await?;
+        let tx = guard.transaction();
+        let state = State::load(tx).await?;
+        next_transition(tx, &state, now).await
+    }
+
+    /// Hash do último frame aceito no receptor, para a leitura condicional.
+    pub async fn accepted_hash_in_tx(
+        &self,
+        guard: &mut ClusterGuard<'_, '_>,
+    ) -> Result<Option<[u8; 32]>, WriteError> {
+        self.check_context(guard, Some(Role::Receiver)).await?;
+        let tx = guard.transaction();
+        let state = State::load(tx).await?;
+        reference(tx, state.accepted.as_deref())
+            .await?
+            .map(|artifact| artifact.digest())
+            .transpose()
+    }
+
     /// Classificação no mesmo lock e transação que protegem o efeito.
     ///
     /// ```compile_fail
@@ -989,6 +1016,9 @@ impl BundleService {
             hash: effective.digest()?,
             floor: effective.floor as u64,
             expires_at: effective.expires_at,
+            recheck_at: next_transition(tx, &state, now)
+                .await?
+                .unwrap_or(effective.expires_at),
         })
     }
 }
@@ -1006,6 +1036,33 @@ fn require_eligible(status: BundleStatus) -> Result<(), WriteError> {
         BundleStatus::IncompatibleSoftware => Err(Rejection::Incompatible.into()),
         BundleStatus::Pending | BundleStatus::Eligible => Ok(()),
     }
+}
+
+async fn next_transition(
+    tx: &mut Tx<'_>,
+    state: &State,
+    now: i64,
+) -> Result<Option<i64>, WriteError> {
+    // O tempo exigível de uma evidência superior anterior pode vencer antes
+    // do tempo da última evidência. Todos os marcos relevantes entram no mínimo.
+    Ok(sqlx::query_scalar(
+        "SELECT min(at) FROM (
+            SELECT expires_at AS at FROM federation_config_frame WHERE hash = $1
+            UNION ALL
+            SELECT GREATEST(applies_at, effective_after) FROM federation_config_frame
+             WHERE hash = $2 OR (
+                 incompatible AND NOT accepted AND version > COALESCE(
+                     (SELECT version FROM federation_config_frame WHERE hash = $3), 0
+                 )
+             )
+        ) AS transitions WHERE at > $4",
+    )
+    .bind(&state.effective)
+    .bind(&state.pending)
+    .bind(&state.accepted)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 async fn incompatible_due(
