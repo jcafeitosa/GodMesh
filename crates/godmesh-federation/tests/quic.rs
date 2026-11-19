@@ -2183,10 +2183,6 @@ mod pinned_dial {
             })
             .await
         );
-        assert!(matches!(
-            caller.start_relay_dial(destination, &route.cancellation),
-            Err(DialError::Cancelled)
-        ));
         gate.release.notify_one();
         assert!(matches!(attempt.wait().await, Err(DialError::Cancelled)));
         assert!(callbacks.try_recv().is_err());
@@ -2194,6 +2190,10 @@ mod pinned_dial {
             caller.links().snapshot_or_never_seen(&remote.id).state,
             LinkState::Ready
         );
+        assert!(matches!(
+            caller.start_relay_dial(destination, &route.cancellation),
+            Err(DialError::Cancelled)
+        ));
         caller.shutdown();
         remote.node.shutdown();
         route.outer.shutdown();
