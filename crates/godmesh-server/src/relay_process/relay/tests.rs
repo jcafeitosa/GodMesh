@@ -392,6 +392,11 @@ async fn open_until_accept(c: &Composition) -> (RelayOpening, [u8; 16]) {
     (opening, token)
 }
 
+/// Reset ou fechamento do R. `Timeout` (silêncio até o prazo) não conta.
+fn interrupted(error: SessionError) -> bool {
+    matches!(error, SessionError::Transport | SessionError::Closed)
+}
+
 async fn assert_no_udp(dst: &UdpSocket) {
     let mut buffer = [0; 2048];
     assert!(
@@ -455,12 +460,27 @@ async fn token_apos_falha_nao_produz_efeito(fault: Fault, label: &str) {
             c.admission.open(ROUTE_ID, &pin(&c.e), Instant::now()).await,
             Err(AdmissionError::AuthorityBlocked)
         ));
-        // Token e primeiro frame chegam depois da falha. Os erros de E são aceitos.
-        let _ = opening.send_token(token).await;
-        if let Ok((mut send, mut recv, _)) = opening.into_forwarding(DATAGRAM_LIMIT) {
-            let _ = send.write_datagram(b"frame", Instant::now() + SEND_DEADLINE).await;
-            // R não emite nenhum frame de dados de volta para E.
-            assert!(recv.read_datagram(Instant::now() + WAIT).await.is_err());
+        // E envia o token antes do prazo: R precisa processá-lo e interromper a stream.
+        assert!(Instant::now() < opening.deadline());
+        opening
+            .send_token(token)
+            .await
+            .expect("token enviado antes do prazo");
+        match opening.into_forwarding(DATAGRAM_LIMIT) {
+            Ok((mut send, mut recv, _)) => {
+                // Silêncio até o prazo (Timeout) reprova: a interrupção vem por reset/fechamento.
+                let interruption = recv.read_datagram(Instant::now() + WAIT).await.unwrap_err();
+                assert!(
+                    interrupted(interruption),
+                    "R deve interromper por reset/fechamento: {interruption:?}"
+                );
+                // Escrita só é tolerada depois que E já observou a interrupção de R.
+                let _ = send.write_datagram(b"frame", Instant::now() + SEND_DEADLINE).await;
+            }
+            Err(interruption) => assert!(
+                interrupted(interruption),
+                "R deve interromper por reset/fechamento: {interruption:?}"
+            ),
         }
         assert_no_udp(&c.dst).await;
         let origin = c.fixture.origin.node_id();
