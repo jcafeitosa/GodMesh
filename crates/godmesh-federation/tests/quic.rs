@@ -20,7 +20,9 @@
 //! | `revogado_nao_reconecta` | nó `revoked` recusado com `0x474D0007` a cada tentativa |
 
 use std::net::SocketAddr;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use std::{future::Future, pin::Pin, sync::Mutex};
 
@@ -29,7 +31,8 @@ use godmesh_federation::identity::{PUBLIC_KEY_LEN, node_id_for};
 use godmesh_federation::link::{LinkSnapshot, LinkState, PeerLinks};
 use godmesh_federation::node::{
     FederationConfig, FederationNode, LinkAuthorizationError, LinkAuthorizer, LinkIdentity,
-    LinkPermit,
+    LinkPermit, OperationalSession, OperationalSessionHandler, SessionError, SessionId,
+    SessionLimits,
 };
 use godmesh_federation::peer::{PeerRecord, PeerRegistry, TrustState};
 use godmesh_federation::{NodeIdentity, SignedManifest, now_unix, transport};
@@ -932,4 +935,368 @@ async fn heartbeat_atrasado_entre_varreduras_nao_renova_evidencia() {
         last_seen
     );
     managed.node.shutdown();
+}
+
+struct SessionSink(tokio::sync::mpsc::UnboundedSender<OperationalSession>);
+
+impl OperationalSessionHandler for SessionSink {
+    fn run(&self, session: OperationalSession) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            self.0.send(session).ok();
+        })
+    }
+}
+
+struct PromotionGate {
+    calls: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    reject: bool,
+    authority: Arc<TestAuthorizer>,
+}
+
+impl LinkAuthorizer for PromotionGate {
+    fn authorize<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
+        Box::pin(async move {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 1 {
+                self.entered.notify_one();
+                self.release.notified().await;
+                if self.reject {
+                    return Err(LinkAuthorizationError::Denied);
+                }
+            }
+            self.authority.authorize(local, remote).await
+        })
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.authority.subscribe()
+    }
+}
+
+fn session_node(
+    peer: &RawPeer,
+    authorizer: Arc<dyn LinkAuthorizer>,
+) -> (
+    FederationNode,
+    tokio::sync::mpsc::UnboundedReceiver<OperationalSession>,
+) {
+    session_node_with_config(
+        peer,
+        authorizer,
+        config().with_heartbeat(Duration::from_secs(30), 3),
+    )
+}
+
+fn session_node_with_config(
+    peer: &RawPeer,
+    authorizer: Arc<dyn LinkAuthorizer>,
+    config: FederationConfig,
+) -> (
+    FederationNode,
+    tokio::sync::mpsc::UnboundedReceiver<OperationalSession>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let node = bind_session_fixture(peer, authorizer, config, Arc::new(SessionSink(tx)));
+    (node, rx)
+}
+
+fn bind_session_fixture(
+    peer: &RawPeer,
+    authorizer: Arc<dyn LinkAuthorizer>,
+    config: FederationConfig,
+    handler: Arc<dyn OperationalSessionHandler>,
+) -> FederationNode {
+    let identity = Arc::new(NodeIdentity::generate_in_memory().unwrap());
+    peer.registry.insert(PeerRecord::authorized_from_key(
+        &identity.public_key_bytes(),
+        CLUSTER,
+    ));
+    let registry = Arc::new(PeerRegistry::new());
+    registry.insert(peer.record(TrustState::Authorized));
+    FederationNode::bind_with_session_handler(
+        identity,
+        config,
+        registry,
+        ([127, 0, 0, 1], 0).into(),
+        authorizer,
+        SessionLimits {
+            max_frame_bytes: NonZeroU32::new(4).unwrap(),
+            max_streams_per_connection: NonZeroUsize::new(1).unwrap(),
+        },
+        handler,
+    )
+    .unwrap()
+}
+
+async fn session_handshake(node: &FederationNode, peer: &RawPeer) -> Connection {
+    let connection = peer.connect(node.local_addr().unwrap()).await;
+    handshake::initiate(&connection, &peer.identity, &peer.config, &peer.registry)
+        .await
+        .unwrap();
+    connection
+}
+
+async fn next_session(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<OperationalSession>,
+) -> OperationalSession {
+    tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn stream_enfileirada_so_chega_ao_callback_apos_promocao() {
+    for reject in [false, true] {
+        let peer = RawPeer::new(config());
+        let gate = Arc::new(PromotionGate {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            reject,
+            authority: TestAuthorizer::new(Ok(None)),
+        });
+        let (node, mut callbacks) = session_node(&peer, gate.clone());
+        let connection = session_handshake(&node, &peer).await;
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        send.write_all(b"\0\0\0\x04pull").await.unwrap();
+        send.finish().unwrap();
+        assert!(callbacks.try_recv().is_err());
+        assert_ne!(
+            node.links().snapshot_or_never_seen(&peer.id).state,
+            LinkState::Ready
+        );
+
+        gate.release.notify_one();
+        if reject {
+            assert_eq!(
+                close_code(&connection).await,
+                Rejection::NotAuthorized.code()
+            );
+            assert!(callbacks.try_recv().is_err());
+        } else {
+            let session = next_session(&mut callbacks).await;
+            assert_eq!(session.remote().public_key, peer.key);
+            assert_eq!(session.local().node_id, node.identity().node_id());
+            assert_eq!(session.negotiated_alpn(), "godmesh/1");
+            let mut stream = session.accept_bi().await.unwrap();
+            assert_eq!(stream.read_frame().await.unwrap(), b"pull");
+            stream.expect_fin().await.unwrap();
+            stream.write_frame(b"done").await.unwrap();
+            stream.finish_send().unwrap();
+            drop(stream);
+            assert_eq!(recv.read_to_end(8).await.unwrap(), b"\0\0\0\x04done");
+            assert_eq!(
+                node.links().snapshot_or_never_seen(&peer.id).state,
+                LinkState::Ready
+            );
+        }
+        node.shutdown();
+    }
+}
+
+#[tokio::test]
+async fn cota_e_framing_sao_por_stream_e_preservam_fin() {
+    let peer = RawPeer::new(config());
+    let (node, mut callbacks) = session_node(&peer, TestAuthorizer::new(Ok(None)));
+    let connection = session_handshake(&node, &peer).await;
+    let session = next_session(&mut callbacks).await;
+    let mut outgoing = session.open_bi().await.unwrap();
+    assert!(matches!(session.open_bi().await, Err(SessionError::Busy)));
+    let (mut overflow_send, mut overflow_recv) = connection.open_bi().await.unwrap();
+    overflow_send.write_all(b"\0\0\0\x04pull").await.unwrap();
+    assert!(matches!(session.accept_bi().await, Err(SessionError::Busy)));
+    assert!(overflow_recv.read_to_end(8).await.is_err());
+    assert_eq!(
+        outgoing.write_frame(b"large").await,
+        Err(SessionError::InvalidFrame)
+    );
+    outgoing.write_frame(b"ping").await.unwrap();
+    outgoing.finish_send().unwrap();
+    let (mut reply, mut request) = connection.accept_bi().await.unwrap();
+    assert_eq!(request.read_to_end(8).await.unwrap(), b"\0\0\0\x04ping");
+    reply.write_all(b"\0\0\0\x04pongx").await.unwrap();
+    reply.finish().unwrap();
+    assert_eq!(outgoing.read_frame().await.unwrap(), b"pong");
+    assert_eq!(outgoing.expect_fin().await, Err(SessionError::InvalidFrame));
+    assert_eq!(outgoing.expect_fin().await, Err(SessionError::Closed));
+    assert!(session.open_bi().await.is_ok());
+    drop(outgoing);
+
+    for header in [b"\0\0\0\0".as_slice(), b"\0\0\0\x05", b"\0\0"] {
+        let (mut send, _) = connection.open_bi().await.unwrap();
+        send.write_all(header).await.unwrap();
+        send.finish().unwrap();
+        let mut inbound = session.accept_bi().await.unwrap();
+        assert_eq!(inbound.read_frame().await, Err(SessionError::InvalidFrame));
+    }
+    node.shutdown();
+}
+
+#[tokio::test]
+async fn perda_de_uma_sessao_nao_cancela_sessao_paralela() {
+    let peer = RawPeer::new(config());
+    let auth = TestAuthorizer::new(Ok(None));
+    let (node, mut callbacks) = session_node(&peer, auth.clone());
+    let first = session_handshake(&node, &peer).await;
+    let old = next_session(&mut callbacks).await;
+    let second = session_handshake(&node, &peer).await;
+    let current = next_session(&mut callbacks).await;
+    assert_ne!(old.id(), current.id());
+
+    first.close(0u32.into(), b"fim da primeira sessao");
+    tokio::time::timeout(Duration::from_secs(2), old.cancelled())
+        .await
+        .unwrap();
+    assert!(matches!(old.open_bi().await, Err(SessionError::Closed)));
+    let mut active = current.open_bi().await.unwrap();
+    assert!(second.close_reason().is_none());
+
+    let (pending_read, ()) = tokio::join!(active.read_frame(), async {
+        auth.change(Ok(None)).await;
+        tokio::time::timeout(Duration::from_secs(2), current.cancelled())
+            .await
+            .unwrap();
+    },);
+    assert_eq!(pending_read, Err(SessionError::Closed));
+    assert!(matches!(
+        current.accept_bi().await,
+        Err(SessionError::Closed)
+    ));
+    node.shutdown();
+}
+
+#[tokio::test]
+async fn guard_negado_apos_promocao_nao_entrega_stream() {
+    let peer = RawPeer::new(config());
+    let auth = TestAuthorizer::new(Ok(None));
+    let (node, mut callbacks) = session_node(&peer, auth.clone());
+    let connection = session_handshake(&node, &peer).await;
+    let session = next_session(&mut callbacks).await;
+    let mut beat = tokio::time::timeout(Duration::from_secs(2), connection.accept_uni())
+        .await
+        .unwrap()
+        .unwrap();
+    beat.read_to_end(12).await.unwrap();
+    // Simula a mudança durável sem notificação, antes do próximo heartbeat.
+    *auth.policy.write().await = Err(LinkAuthorizationError::Denied);
+    let (mut send, _) = connection.open_bi().await.unwrap();
+    send.write_all(b"\0\0\0\x04pull").await.unwrap();
+    send.finish().unwrap();
+    assert!(matches!(
+        session.accept_bi().await,
+        Err(SessionError::Closed)
+    ));
+    assert_eq!(
+        close_code(&connection).await,
+        Rejection::NotAuthorized.code()
+    );
+    assert_ne!(
+        node.links().snapshot_or_never_seen(&peer.id).state,
+        LinkState::Ready
+    );
+    node.shutdown();
+}
+
+#[tokio::test]
+async fn prazo_e_silencio_cancelam_io_da_sessao() {
+    for lease in [true, false] {
+        let peer = RawPeer::new(config());
+        let auth = TestAuthorizer::new(Ok(lease.then(|| Instant::now() + Duration::from_secs(1))));
+        let interval = if lease {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_millis(100)
+        };
+        let (node, mut callbacks) =
+            session_node_with_config(&peer, auth, config().with_heartbeat(interval, 4));
+        let connection = session_handshake(&node, &peer).await;
+        let session = next_session(&mut callbacks).await;
+        let mut stream = session.open_bi().await.unwrap();
+        stream.write_frame(b"pull").await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), stream.read_frame())
+                .await
+                .unwrap(),
+            Err(SessionError::Closed),
+        );
+        session.cancelled().await;
+        assert!(matches!(session.open_bi().await, Err(SessionError::Closed)));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), connection.closed())
+                .await
+                .is_ok()
+        );
+        node.shutdown();
+    }
+}
+
+struct CleanupObserver {
+    started: tokio::sync::mpsc::UnboundedSender<SessionId>,
+    cancelled: tokio::sync::mpsc::UnboundedSender<SessionId>,
+    cleanup: tokio::sync::Semaphore,
+    finished: tokio::sync::mpsc::UnboundedSender<SessionId>,
+}
+
+impl OperationalSessionHandler for CleanupObserver {
+    fn run(&self, session: OperationalSession) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            self.started.send(session.id()).unwrap();
+            session.cancelled().await;
+            self.cancelled.send(session.id()).unwrap();
+            self.cleanup.acquire().await.unwrap().forget();
+            self.finished.send(session.id()).unwrap();
+        })
+    }
+}
+
+#[tokio::test]
+async fn limpa_callback_cancelado_sem_interferir_na_conexao_substituta() {
+    let peer = RawPeer::new(config());
+    let auth = TestAuthorizer::new(Ok(None));
+    let (started, mut start) = tokio::sync::mpsc::unbounded_channel();
+    let (cancelled, mut cancel) = tokio::sync::mpsc::unbounded_channel();
+    let (finished, mut finish) = tokio::sync::mpsc::unbounded_channel();
+    let observer = Arc::new(CleanupObserver {
+        started,
+        cancelled,
+        cleanup: tokio::sync::Semaphore::new(0),
+        finished,
+    });
+    let node = bind_session_fixture(&peer, auth.clone(), config(), observer.clone());
+    let next = async |events: &mut tokio::sync::mpsc::UnboundedReceiver<SessionId>| {
+        tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let _old = session_handshake(&node, &peer).await;
+    let old_id = next(&mut start).await;
+    auth.change(Ok(None)).await;
+    assert_eq!(next(&mut cancel).await, old_id);
+
+    let new = session_handshake(&node, &peer).await;
+    let new_id = next(&mut start).await;
+    assert_ne!(old_id, new_id);
+    observer.cleanup.add_permits(1);
+    assert_eq!(next(&mut finish).await, old_id);
+    assert_eq!(
+        node.links().snapshot_or_never_seen(&peer.id).state,
+        LinkState::Ready
+    );
+    assert!(new.close_reason().is_none());
+    assert!(cancel.try_recv().is_err());
+
+    node.shutdown();
+    assert_eq!(next(&mut cancel).await, new_id);
+    observer.cleanup.add_permits(1);
+    assert_eq!(next(&mut finish).await, new_id);
 }
