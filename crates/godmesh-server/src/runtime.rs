@@ -79,6 +79,20 @@ pub async fn serve<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    let result = serve_with_shared_pool(listener, app, shutdown).await;
+    pool.close().await;
+    result
+}
+
+/// Drena o listener. O supervisor fecha o pool depois dos outros serviços.
+pub async fn serve_with_shared_pool<F>(
+    listener: TcpListener,
+    app: Router,
+    shutdown: F,
+) -> Result<ServeReport, String>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let gauge = InFlight::new();
     let app = app.layer(middleware::from_fn_with_state(gauge.clone(), track));
 
@@ -100,9 +114,21 @@ where
     .with_graceful_shutdown(shutdown)
     .await;
     let drained = drained.load(Ordering::SeqCst);
-    pool.close().await;
     served.map_err(|e| format!("servidor encerrou com erro: {e}"))?;
     Ok(ServeReport { drained })
+}
+
+/// Cancela e aguarda serviços que compartilham o pool antes de fechá-lo.
+pub async fn finish_after_http(
+    http: Result<ServeReport, String>,
+    shutdown: &tokio::sync::watch::Sender<bool>,
+    pool: &PgPool,
+    cleanup: impl Future<Output = Result<(), String>>,
+) -> Result<ServeReport, String> {
+    let _ = shutdown.send(true);
+    let auxiliary = cleanup.await;
+    pool.close().await;
+    http.and_then(|report| auxiliary.map(|()| report))
 }
 
 /// Resolve em Ctrl-C ou SIGTERM; sem isso o processo só morre por SIGKILL.
@@ -152,5 +178,50 @@ mod tests {
         assert_eq!(gauge.count(), 1);
         gauge.count.fetch_sub(1, Ordering::SeqCst);
         assert_eq!(gauge.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn pool_compartilhado_fecha_apos_cancelar_tarefas_tambem_quando_http_falha() {
+        let Ok(url) = std::env::var("GODMESH_TEST_DATABASE_URL") else {
+            return;
+        };
+        for failing in [false, true] {
+            let pool = sqlx::PgPool::connect(&url).await.unwrap();
+            let mut connection = pool.acquire().await.unwrap();
+            let (cancel, mut stopped) = tokio::sync::watch::channel(false);
+            let observed_pool = pool.clone();
+            let auxiliary = tokio::spawn(async move {
+                stopped.changed().await.unwrap();
+                assert!(!observed_pool.is_closed());
+                let value: i32 = sqlx::query_scalar("SELECT 1")
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+                assert_eq!(value, 1);
+            });
+            let result = if failing {
+                Err("falha do listener de teste".to_owned())
+            } else {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    super::serve_with_shared_pool(listener, axum::Router::new(), async {}),
+                )
+                .await
+                .unwrap()
+            };
+            assert_eq!(result.is_err(), failing);
+            let ended = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                super::finish_after_http(result, &cancel, &pool, async {
+                    auxiliary.await.unwrap();
+                    Ok(())
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(ended.is_err(), failing);
+            assert!(pool.is_closed());
+        }
     }
 }

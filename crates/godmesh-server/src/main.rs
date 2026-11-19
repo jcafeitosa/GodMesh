@@ -65,22 +65,25 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use godmesh_federation::NodeIdentity;
 use godmesh_federation::link::LinkState;
 use godmesh_federation::node::{
     FederationConfig, FederationNode, LinkAuthorizationError, LinkAuthorizer, LinkIdentity,
     LinkPermit,
 };
 use godmesh_federation::peer::PeerRegistry;
-use godmesh_federation::NodeIdentity;
 use godmesh_host::collect::{Collector, SharedSnapshot};
 use godmesh_server::admission::AdmissionConfig;
-use godmesh_server::auth::GrantRegistry;
+use godmesh_server::auth::{Authorization, Clock, GrantRegistry, SystemClock};
+use godmesh_server::config_bundle::{BundleService, Fence, Preflight, Rejection, WriteError};
+use godmesh_server::config_https::{self, HttpsClient};
+use godmesh_server::config_operational::{ConfigPlane, ConfigPlaneConfig};
 use godmesh_server::http::HostTelemetry;
 use godmesh_server::portable_join::{PortableJoin, PortableJoinConfig, PortableJoinError};
 use godmesh_server::publisher::{OutboxConfig, Publisher};
@@ -176,6 +179,7 @@ enum Mode {
         /// Bootstrap de confiança e governança de ingresso validados no boot.
         decisions: Arc<godmesh_server::federation::DecisionConfig>,
         portable: Option<Box<PortableJoinConfig>>,
+        configuration: Option<Box<ConfigPlaneConfig>>,
     },
 }
 
@@ -225,6 +229,9 @@ impl Config {
                 let portable = PortableJoinConfig::from_env()
                     .map_err(|error| error.to_string())?
                     .map(Box::new);
+                let configuration = ConfigPlaneConfig::from_env()
+                    .map_err(|error| error.to_string())?
+                    .map(Box::new);
                 // O portão de abuso valida o ambiente na subida: tetos
                 // inválidos derrubam o processo (EX_CONFIG) em vez de virar
                 // default silencioso servindo tráfego.
@@ -239,6 +246,7 @@ impl Config {
                     admission: Box::new(admission),
                     decisions,
                     portable,
+                    configuration,
                 }
             }
         };
@@ -388,7 +396,11 @@ fn main() -> ExitCode {
 }
 
 /// Liga a autoridade do PostgreSQL às decisões locais de enlace.
-struct PortableLinkAuthorizer(Arc<PortableJoin>);
+struct PortableLinkAuthorizer {
+    portable: Arc<PortableJoin>,
+    configuration: Option<Arc<BundleService>>,
+    changes: tokio::sync::watch::Receiver<u64>,
+}
 
 impl LinkAuthorizer for PortableLinkAuthorizer {
     fn authorize<'a>(
@@ -397,26 +409,52 @@ impl LinkAuthorizer for PortableLinkAuthorizer {
         remote: &'a LinkIdentity,
     ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
         Box::pin(async move {
-            if self.0.cluster() != local.cluster || local.cluster != remote.cluster {
+            if self.portable.cluster() != local.cluster || local.cluster != remote.cluster {
                 return Err(LinkAuthorizationError::Denied);
             }
             let mut transaction = self
-                .0
+                .portable
                 .pool()
                 .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
                 .await
                 .map_err(|_| LinkAuthorizationError::Unavailable)?;
+            let mut guard = self
+                .portable
+                .lock_cluster_guard(&mut transaction)
+                .await
+                .map_err(link_authorization_error)?;
+            let now = SystemClock.now_unix();
             let local_expiry = self
-                .0
-                .authorize_local(&mut transaction)
+                .portable
+                .authorize_local_at(&mut guard, now)
                 .await
                 .map_err(link_authorization_error)?;
             let remote_expiry = self
-                .0
-                .authorize_peer(&mut transaction, &remote.node_id, &hex::encode(remote.public_key))
+                .portable
+                .authorize_peer_at(
+                    &mut guard,
+                    &remote.node_id,
+                    &hex::encode(remote.public_key),
+                    now,
+                )
                 .await
                 .map_err(link_authorization_error)?;
-            let expires_at = [local_expiry, remote_expiry]
+            // O transporte validou o ALPN godmesh/1 antes deste callback.
+            let config_expiry = if let Some(configuration) = &self.configuration {
+                match configuration
+                    .classify_fence_in_tx(&mut guard, 1, now)
+                    .await
+                    .map_err(|_| LinkAuthorizationError::Unavailable)?
+                {
+                    Fence::Allowed { recheck_at, .. } => Some(recheck_at),
+                    Fence::Blocked(_) | Fence::Disabled => {
+                        return Err(LinkAuthorizationError::Denied);
+                    }
+                }
+            } else {
+                None
+            };
+            let expires_at = [local_expiry, remote_expiry, config_expiry]
                 .into_iter()
                 .flatten()
                 .min()
@@ -428,7 +466,7 @@ impl LinkAuthorizer for PortableLinkAuthorizer {
     }
 
     fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.0.trust_changes()
+        self.changes.clone()
     }
 }
 
@@ -451,6 +489,81 @@ fn monotonic_lease_deadline(expires_at: i64) -> Result<Instant, LinkAuthorizatio
     monotonic_now
         .checked_add(remaining)
         .ok_or(LinkAuthorizationError::Denied)
+}
+
+/// Ativa a pendência e inspeciona o fence confirmado. Cada transação amostra
+/// o relógio depois de tomar o mesmo lock usado pelos efetores.
+async fn observe_configuration(
+    portable: &PortableJoin,
+    configuration: &BundleService,
+    clock: &dyn Clock,
+) -> Result<(Fence, Option<i64>), WriteError> {
+    configuration
+        .activate_due(portable, || clock.now_unix())
+        .await?;
+    let mut tx = portable
+        .pool()
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .await?;
+    let mut guard = portable.lock_cluster_guard(&mut tx).await?;
+    let now = clock.now_unix();
+    portable.authorize_local_at(&mut guard, now).await?;
+    let fence = configuration
+        .classify_fence_in_tx(&mut guard, 1, now)
+        .await?;
+    let next = match fence {
+        Fence::Allowed { recheck_at, .. } => Some(recheck_at),
+        _ => configuration.next_transition_in_tx(&mut guard, now).await?,
+    };
+    tx.commit().await?;
+    Ok((fence, next))
+}
+
+fn spawn_configuration_lifecycle(
+    portable: Arc<PortableJoin>,
+    configuration: Arc<BundleService>,
+    mut committed: tokio::sync::watch::Receiver<u64>,
+    interval: Duration,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    changes: tokio::sync::watch::Sender<u64>,
+) -> tokio::task::JoinHandle<()> {
+    let mut trust = portable.trust_changes();
+    tokio::spawn(async move {
+        loop {
+            let observed = tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                result = tokio::time::timeout(
+                    interval, observe_configuration(&portable, &configuration, &SystemClock)
+                ) => result,
+            };
+            if !matches!(observed, Ok(Ok((Fence::Allowed { .. }, _)))) {
+                // Fecha evidência antiga mesmo quando o banco fica inacessível.
+                changes.send_modify(|value| *value = value.wrapping_add(1));
+            }
+            let mut delay = interval;
+            if let Ok(Ok((_, Some(next)))) = observed {
+                delay = match monotonic_lease_deadline(next) {
+                    Ok(deadline) => {
+                        interval.min(deadline.saturating_duration_since(Instant::now()))
+                    }
+                    Err(_) => Duration::ZERO,
+                };
+            }
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                change = trust.changed() => {
+                    if change.is_err() { break; }
+                    changes.send_modify(|value| *value = value.wrapping_add(1));
+                }
+                change = committed.changed() => {
+                    if change.is_err() { break; }
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+    })
 }
 
 /// Conecta, migra, e serve até receber sinal de término (ou só migra).
@@ -487,6 +600,7 @@ async fn run(config: Config) -> Result<(), String> {
         admission,
         decisions,
         portable,
+        configuration,
     } = config.mode
     else {
         pool.close().await;
@@ -501,8 +615,52 @@ async fn run(config: Config) -> Result<(), String> {
         .await
         .map_err(|error| format!("preflight do ingresso portátil: {error}"))?;
     let identity = Arc::new(identity);
-    let portable = portable
-        .map(|policy| Arc::new(PortableJoin::new(*policy, pool.clone(), Arc::clone(&identity))));
+    let portable = portable.map(|policy| {
+        Arc::new(PortableJoin::new(
+            *policy,
+            pool.clone(),
+            Arc::clone(&identity),
+        ))
+    });
+
+    let policy = configuration.as_ref().map(|config| config.policy.clone());
+    let preflight = BundleService::preflight(&pool, portable.as_deref(), policy)
+        .await
+        .map_err(|error| format!("preflight da configuração M3: {error}"))?;
+    let config_plane = match (preflight, configuration, portable.as_ref()) {
+        (Preflight::Disabled, None, _) => None,
+        (Preflight::Enabled(service), Some(config), Some(portable)) => {
+            let service = Arc::new(service);
+            // Nós novos precisam do plano de controle para ingressar; autoridade
+            // ausente bloqueia seus efetores, mas permite o bootstrap M1C.
+            match observe_configuration(portable, &service, &SystemClock).await {
+                Ok(_) | Err(WriteError::Rejected(Rejection::LocalAuthority)) => {}
+                Err(error) => return Err(format!("estado efetivo da configuração M3: {error}")),
+            }
+            let https_addr = config.bind;
+            let pins = config.tls_pins();
+            let limits = config.https_limits();
+            let interval = config.link_recheck_interval;
+            let client = HttpsClient::new(&identity, limits)
+                .map_err(|error| format!("cliente de configuração M3: {error}"))?;
+            let plane = Arc::new(
+                ConfigPlane::new(
+                    *config,
+                    service,
+                    Arc::clone(portable),
+                    Arc::clone(&identity),
+                    Arc::new(Authorization::new(grants.clone(), pool.clone())),
+                    (*admission).clone(),
+                )
+                .map_err(|error| format!("configuração M3: {error}"))?,
+            );
+            let tls_listener = tokio::net::TcpListener::bind(https_addr)
+                .await
+                .map_err(|error| format!("listener HTTPS de configuração: {error}"))?;
+            Some((plane, tls_listener, client, limits, pins, interval))
+        }
+        _ => return Err("estado de preflight incoerente para a configuração M3".to_owned()),
+    };
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
@@ -530,10 +688,19 @@ async fn run(config: Config) -> Result<(), String> {
     // Um único sinal de término alimenta o HTTP, o publicador e a federação.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let sinal = runtime::shutdown_signal();
+    let stop_on_signal = shutdown_tx.clone();
     tokio::spawn(async move {
         sinal.await;
-        let _ = shutdown_tx.send(true);
+        let _ = stop_on_signal.send(true);
     });
+
+    let config_service = config_plane
+        .as_ref()
+        .map(|(plane, ..)| Arc::clone(plane.state()));
+    let config_signal = config_plane
+        .as_ref()
+        .map(|_| tokio::sync::watch::channel(0_u64));
+    let config_changes = config_signal.as_ref().map(|(_, receiver)| receiver.clone());
 
     // Runtime de federação: allowlist carregada de `federation_peer` (a decisão
     // administrativa é a autoridade) e recarregada periodicamente, para que
@@ -555,10 +722,16 @@ async fn run(config: Config) -> Result<(), String> {
                 .map_err(|e| format!("registro de pares indisponível: {e:?}"))?;
             registry.replace(peers);
             let authorizer = portable.as_ref().map(|service| {
-                Arc::new(PortableLinkAuthorizer(Arc::clone(service))) as Arc<dyn LinkAuthorizer>
+                Arc::new(PortableLinkAuthorizer {
+                    portable: Arc::clone(service),
+                    configuration: config_service.clone(),
+                    changes: config_changes
+                        .clone()
+                        .unwrap_or_else(|| service.trust_changes()),
+                }) as Arc<dyn LinkAuthorizer>
             });
             let node = FederationNode::bind_with_authorizer(
-                identity,
+                Arc::clone(&identity),
                 listener_config,
                 Arc::clone(&registry),
                 listener_bind,
@@ -578,16 +751,52 @@ async fn run(config: Config) -> Result<(), String> {
         }
     };
 
-    if let Some(node) = &runtime_federation {
-        // A manutenção usa o **mesmo** registro que o verificador de certificado
-        // do nó: `PeerRegistry` é compartilhado por `Arc`.
+    let peer_task = runtime_federation.as_ref().map(|node| {
         spawn_peers_maintenance(
             pool.clone(),
             Arc::clone(node),
             peers_refresh,
             shutdown_rx.clone(),
-        );
-    }
+        )
+    });
+
+    // Só inicia tarefas de controle após a montagem dos listeners.
+    let control_tasks = match (config_plane, config_signal) {
+        (Some((plane, listener, client, limits, pins, interval)), Some((changes, _))) => {
+            let portable = Arc::clone(portable.as_ref().ok_or("M3 exige ingresso portátil")?);
+            let lifecycle = spawn_configuration_lifecycle(
+                portable,
+                Arc::clone(plane.state()),
+                plane.changes(),
+                interval,
+                shutdown_rx.clone(),
+                changes,
+            );
+            let router = plane.router();
+            println!(
+                "godmesh-server: configuração M3 escutando em https://{}",
+                listener.local_addr().map_err(|error| error.to_string())?
+            );
+            let tls_identity = Arc::clone(&identity);
+            let tls_stop = shutdown_rx.clone();
+            let stop_on_tls_failure = shutdown_tx.clone();
+            let listener_task = tokio::spawn(async move {
+                let result =
+                    config_https::serve(listener, router, &tls_identity, pins, limits, tls_stop)
+                        .await;
+                if result.is_err() {
+                    let _ = stop_on_tls_failure.send(true);
+                }
+                result
+            });
+            let poll_stop = shutdown_rx.clone();
+            let poll_task = tokio::spawn(async move {
+                plane.run_polling(&client, poll_stop).await;
+            });
+            Some((lifecycle, listener_task, poll_task))
+        }
+        _ => None,
+    };
 
     let publisher = if outbox.enabled {
         println!(
@@ -626,7 +835,7 @@ async fn run(config: Config) -> Result<(), String> {
     // responde `unknown` — não "saúde" por omissão. Sem coletor de host o
     // `/metrics` declararia `source="none"`; aqui há coletor de verdade.
     let federation_links = runtime_federation.as_ref().map(|node| node.links());
-    let app = godmesh_server::http::router_runtime_with_portable(
+    let mut app = godmesh_server::http::router_runtime_with_portable(
         pool.clone(),
         grants,
         federation_links,
@@ -636,20 +845,38 @@ async fn run(config: Config) -> Result<(), String> {
         decisions,
         portable,
     );
-    let served = runtime::serve(listener, app, pool.clone(), async move {
-        let _ = encerrar.changed().await;
+    if let Some(service) = config_service {
+        app = app.layer(axum::Extension(service));
+    }
+    let result = runtime::serve_with_shared_pool(listener, app, async move {
+        let _ = encerrar.wait_for(|stopped| *stopped).await;
+    })
+    .await;
+    let served = runtime::finish_after_http(result, &shutdown_tx, &pool, async move {
+        if let Some(node) = runtime_federation {
+            node.shutdown();
+        }
+        if let Some(task) = peer_task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(publisher) = publisher {
+            let _ = publisher.await;
+        }
+        if let Some(task) = host_task {
+            let _ = task.await;
+        }
+        if let Some((lifecycle, listener_task, polling)) = control_tasks {
+            let _ = lifecycle.await;
+            let _ = polling.await;
+            listener_task
+                .await
+                .map_err(|error| format!("listener M3: {error}"))?
+                .map_err(|error| format!("listener M3 encerrou com erro: {error}"))?;
+        }
+        Ok(())
     })
     .await?;
-
-    if let Some(node) = &runtime_federation {
-        node.shutdown();
-    }
-    if let Some(publisher) = publisher {
-        let _ = publisher.await;
-    }
-    if let Some(task) = host_task {
-        let _ = task.await;
-    }
 
     println!(
         "godmesh-server: shutdown solicitado; {} requisição(ões) em voo drenada(s)",
@@ -677,7 +904,7 @@ fn spawn_peers_maintenance(
     node: Arc<FederationNode>,
     interval: Duration,
     mut parar: tokio::sync::watch::Receiver<bool>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -695,7 +922,7 @@ fn spawn_peers_maintenance(
             }
             dial_pending_peers(&node).await;
         }
-    });
+    })
 }
 
 /// Coleta o host no intervalo configurado e publica o snapshot.
