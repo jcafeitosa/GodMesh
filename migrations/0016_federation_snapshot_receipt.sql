@@ -13,6 +13,8 @@ CREATE TABLE federation_snapshot_receipt_policy (
     duration_seconds bigint NOT NULL CHECK (duration_seconds > 0),
     active boolean NOT NULL,
     PRIMARY KEY (policy_id, policy_version),
+    UNIQUE (policy_id, policy_version, local_node, origin_node, tenant_id,
+            stream_id, partition, authority_epoch, jurisdiction),
     FOREIGN KEY (origin_node, tenant_id, stream_id, partition, authority_epoch, local_node)
         REFERENCES federation_replica_namespace
             (origin_node, tenant_id, stream_id, partition, authority_epoch, local_node)
@@ -51,8 +53,15 @@ CREATE TABLE federation_snapshot_receipt (
     applied_at bigint NOT NULL,
     proof_expires_at bigint NOT NULL CHECK (proof_expires_at > applied_at),
     expires_at bigint NOT NULL CHECK (expires_at > applied_at AND expires_at <= proof_expires_at),
+    jurisdiction text NOT NULL CHECK (jurisdiction IN ('BR','CO')),
     PRIMARY KEY (local_node, origin_node, tenant_id, stream_id, partition, authority_epoch, cut_seq),
     FOREIGN KEY (origin_node, tenant_id, stream_id, partition, authority_epoch, local_node)
         REFERENCES federation_replica_namespace
-            (origin_node, tenant_id, stream_id, partition, authority_epoch, local_node)
+            (origin_node, tenant_id, stream_id, partition, authority_epoch, local_node),
+    FOREIGN KEY (policy_id, policy_version, local_node, origin_node, tenant_id,
+                 stream_id, partition, authority_epoch, jurisdiction)
+        REFERENCES federation_snapshot_receipt_policy
+            (policy_id, policy_version, local_node, origin_node, tenant_id,
+             stream_id, partition, authority_epoch, jurisdiction)
+        ON DELETE RESTRICT ON UPDATE RESTRICT
 );

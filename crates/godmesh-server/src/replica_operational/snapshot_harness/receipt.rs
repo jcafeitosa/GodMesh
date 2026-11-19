@@ -24,6 +24,7 @@ pub(super) struct Receipt {
     pub applied_at: i64,
     pub proof_expires_at: i64,
     pub expires_at: i64,
+    pub jurisdiction: String,
 }
 
 macro_rules! scope {
@@ -77,7 +78,7 @@ pub(super) async fn load(
 ) -> Result<Option<Receipt>, SnapshotEffectError> {
     crate::sql_budget::refresh(db).await?;
     let row = scope!(
-        "SELECT base_seq,event_count,manifest_digest,package_digest,policy_id,policy_version,applied_at,proof_expires_at,expires_at
+        "SELECT base_seq,event_count,manifest_digest,package_digest,policy_id,policy_version,applied_at,proof_expires_at,expires_at,jurisdiction
          FROM federation_snapshot_receipt
          WHERE (local_node,origin_node,tenant_id,stream_id,partition,authority_epoch,cut_seq)=($1,$2,$3,$4,$5,$6,$7)
          FOR SHARE", local, series,
@@ -95,6 +96,7 @@ pub(super) async fn load(
             applied_at: r.try_get("applied_at")?,
             proof_expires_at: r.try_get("proof_expires_at")?,
             expires_at: r.try_get("expires_at")?,
+            jurisdiction: r.try_get("jurisdiction")?,
         })
     })
     .transpose()
@@ -111,10 +113,10 @@ pub(super) async fn insert(
     scope!(
         "INSERT INTO federation_snapshot_receipt
          (local_node,origin_node,tenant_id,stream_id,partition,authority_epoch,cut_seq,
-          base_seq,event_count,manifest_digest,package_digest,policy_id,policy_version,applied_at,proof_expires_at,expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)", local, series,
+          base_seq,event_count,manifest_digest,package_digest,policy_id,policy_version,applied_at,proof_expires_at,expires_at,jurisdiction)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)", local, series,
     ).bind(cut).bind(r.identity.base).bind(r.identity.count)
      .bind(&r.identity.manifest[..]).bind(&r.identity.package[..]).bind(&r.policy_id)
-     .bind(r.policy_version).bind(r.applied_at).bind(r.proof_expires_at).bind(r.expires_at).execute(db).await?;
+     .bind(r.policy_version).bind(r.applied_at).bind(r.proof_expires_at).bind(r.expires_at).bind(&r.jurisdiction).execute(db).await?;
     Ok(())
 }

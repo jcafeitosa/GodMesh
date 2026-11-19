@@ -416,14 +416,21 @@ async fn replay_distingue_conflito_ausencia_expiracao_e_suspensao() {
         Err(SnapshotEffectError::ReceiptExpired)
     ));
     clock.store(125, Ordering::SeqCst);
-    sqlx::query("DELETE FROM federation_snapshot_receipt_policy WHERE policy_version=1")
-        .execute(&f.c.pool)
-        .await
-        .unwrap();
-    assert!(matches!(
-        c.apply(c_source, &c_raw, &c_policy, deadline()).await,
-        Err(SnapshotEffectError::ReceiptPolicy)
-    ));
+    let delete =
+        sqlx::query("DELETE FROM federation_snapshot_receipt_policy WHERE policy_version=1")
+            .execute(&f.c.pool)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        delete.as_database_error().unwrap().code().as_deref(),
+        Some("23503")
+    );
+    assert!(
+        c.apply(c_source, &c_raw, &c_policy, deadline())
+            .await
+            .unwrap()
+            .replay
+    );
     c.0.suspend_history(c_source, 3, deadline()).await.unwrap();
     assert!(matches!(
         c.apply(c_source, &c_raw, &c_policy, deadline()).await,

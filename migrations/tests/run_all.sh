@@ -238,7 +238,9 @@ verificar "$tests/0016_invariants.sql" \
     "OK 1: 0016 semeia zero políticas e comprovantes" \
     "OK 2: mesmo corte não pode ganhar segundo comprovante" \
     "OK 3: comprovante vincula identidade local exata" \
-    "OK 4: versão histórica de comprovante imutável"
+    "OK 4: versão histórica de comprovante imutável" \
+    "OK 5: referência bloqueia exclusão e recriação da versão histórica" \
+    "OK 6: comprovante recusa chave de política de outra série"
 
 rm -f "$saida"
 

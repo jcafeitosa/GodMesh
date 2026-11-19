@@ -294,6 +294,9 @@ impl EligibleReceiver {
                 if stored.identity != id {
                     return Err(SnapshotEffectError::SnapshotConflict);
                 }
+                if stored.jurisdiction != region {
+                    return Err(SnapshotEffectError::ReceiptInconsistent);
+                }
                 let historical = receipt::policy(
                     guard.connection(),
                     local,
@@ -385,6 +388,7 @@ impl EligibleReceiver {
                     applied_at: now,
                     proof_expires_at,
                     expires_at,
+                    jurisdiction: region,
                 },
             )
             .await?;
