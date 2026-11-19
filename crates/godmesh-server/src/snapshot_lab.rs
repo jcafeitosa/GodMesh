@@ -7,16 +7,32 @@ use serde::Deserialize;
 
 /// Pontos de interrupção controlados pelo ensaio, visíveis no log da fixture.
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub(super) enum Fault {
-    AfterIntent,
-    AfterCommit,
-    AfterCommitUnknown,
+    #[serde(rename = "after_intent")]
+    IntentPersisted,
+    #[serde(rename = "after_commit")]
+    SnapshotCommitted,
+    #[serde(rename = "after_commit_unknown")]
+    UnknownCommit,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct LabContext {
+    pub binding: LabBinding,
+    pub bootstrap_base: Option<i64>,
+    pub max_control_bytes: NonZeroU32,
+    pub max_snapshot_bytes: NonZeroU32,
+    pub max_manifest_bytes: NonZeroU32,
+    pub max_event_bytes: NonZeroU32,
+    pub max_events: NonZeroU32,
+    pub validity_seconds: NonZeroU32,
+    pub fault: Option<Fault>,
+}
+
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LabBinding {
     pub database: String,
     pub database_port: NonZeroU16,
     pub generation: NonZeroU64,
@@ -28,51 +44,86 @@ pub(super) struct LabContext {
     pub partition: u32,
     pub authority_epoch: i64,
     pub retention_class: String,
-    pub bootstrap_base: Option<i64>,
-    pub max_control_bytes: NonZeroU32,
-    pub max_snapshot_bytes: NonZeroU32,
-    pub max_manifest_bytes: NonZeroU32,
-    pub max_event_bytes: NonZeroU32,
-    pub max_events: NonZeroU32,
-    pub validity_seconds: NonZeroU32,
-    pub fault: Option<Fault>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LabRegistration {
+    binding: LabBinding,
+    system_identifier: String,
+    database_oid: NonZeroU32,
+}
+
+impl LabRegistration {
+    pub async fn verify_database(&self, pool: &sqlx::PgPool) -> Result<(), String> {
+        let (system_identifier, oid): (String, i64) = sqlx::query_as(
+            "SELECT control.system_identifier::text, database.oid::bigint
+             FROM pg_catalog.pg_control_system() AS control
+             CROSS JOIN pg_catalog.pg_database AS database
+             WHERE database.datname = pg_catalog.current_database()",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|_| "identidade PostgreSQL do laboratório indisponível".to_owned())?;
+        if system_identifier == self.system_identifier && oid == i64::from(self.database_oid.get())
+        {
+            Ok(())
+        } else {
+            Err("instância PostgreSQL diverge do registro corrente do laboratório".to_owned())
+        }
+    }
 }
 
 impl LabContext {
     /// Só aceita a forma de conexão emitida pelo runner PostgreSQL descartável.
-    pub fn decode(bytes: &[u8], database_url: &str) -> Result<Self, &'static str> {
+    pub fn decode(
+        bytes: &[u8],
+        registration: &[u8],
+        database_url: &str,
+    ) -> Result<(Self, LabRegistration), &'static str> {
         let context: Self =
             serde_json::from_slice(bytes).map_err(|_| "contexto snapshot inválido")?;
+        let registration: LabRegistration = serde_json::from_slice(registration)
+            .map_err(|_| "registro corrente do laboratório inválido")?;
+        let binding = &context.binding;
+        if binding != &registration.binding
+            || registration
+                .system_identifier
+                .parse::<NonZeroU64>()
+                .is_err()
+        {
+            return Err("contexto snapshot diverge do registro corrente do laboratório");
+        }
         let matches_connection = database_url
             .strip_prefix("postgresql://gm_m1c@127.0.0.1:")
             .and_then(|rest| rest.split_once('/'))
             .is_some_and(|(port, database)| {
-                port.parse::<NonZeroU16>().ok() == Some(context.database_port)
-                    && database == context.database
+                port.parse::<NonZeroU16>().ok() == Some(binding.database_port)
+                    && database == binding.database
                     && matches!(database, "gm_m1c_a" | "gm_m1c_b" | "gm_m1c_c")
             });
         if !matches_connection {
             return Err("contexto snapshot exige o banco descartável correspondente");
         }
         let text = |value: &str| !value.trim().is_empty() && value.len() <= MAX_FIELD_LEN;
-        if !is_node_id(&context.node_id)
-            || !is_node_id(&context.origin_node)
-            || !text(&context.cluster)
-            || !text(&context.tenant_id)
-            || !text(&context.retention_class)
-            || !text(&context.stream_id)
-            || !context
+        if !is_node_id(&binding.node_id)
+            || !is_node_id(&binding.origin_node)
+            || !text(&binding.cluster)
+            || !text(&binding.tenant_id)
+            || !text(&binding.retention_class)
+            || !text(&binding.stream_id)
+            || !binding
                 .stream_id
                 .strip_prefix("m4a.metadata.")
                 .is_some_and(text)
-            || context.partition != 0
-            || context.authority_epoch <= 0
+            || binding.partition != 0
+            || binding.authority_epoch <= 0
             || context.bootstrap_base.is_some_and(|base| base < 0)
-            || context.bootstrap_base.is_none() != (context.node_id == context.origin_node)
+            || context.bootstrap_base.is_none() != (binding.node_id == binding.origin_node)
         {
             return Err("escopo do contexto snapshot inválido");
         }
-        Ok(context)
+        Ok((context, registration))
     }
 }
 
@@ -83,8 +134,12 @@ fn process() {
         .expect("a fixture deve fornecer o contexto externo");
     let mut config = super::Config::from_env(super::Args::Serve).expect("configuração da fixture");
     let bytes = std::fs::read(path).expect("leitura do contexto da fixture");
-    config.snapshot_lab =
-        Some(LabContext::decode(&bytes, &config.database_url).expect("contexto da fixture"));
+    let registry_path = std::env::var_os("GODMESH_TEST_SNAPSHOT_REGISTRY")
+        .expect("a fixture deve fornecer o registro corrente externo");
+    let registry = std::fs::read(registry_path).expect("leitura do registro corrente");
+    config.snapshot_lab = Some(
+        LabContext::decode(&bytes, &registry, &config.database_url).expect("contexto da fixture"),
+    );
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -102,6 +157,7 @@ mod tests {
 
     fn context() -> serde_json::Value {
         json!({
+            "binding": {
             "database": "gm_m1c_b",
             "database_port": 56000,
             "generation": 1,
@@ -112,7 +168,8 @@ mod tests {
             "stream_id": "m4a.metadata.snapshot",
             "partition": 0,
             "authority_epoch": 7,
-            "retention_class": "m4a_metadados_posicao",
+            "retention_class": "m4a_metadados_posicao"
+            },
             "bootstrap_base": 0,
             "max_control_bytes": 8192,
             "max_snapshot_bytes": 32768,
@@ -123,10 +180,21 @@ mod tests {
         })
     }
 
+    fn registration(context: &serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "binding": context["binding"],
+            "system_identifier": "7646167893808755902",
+            "database_oid": 16405
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn laboratorio_exige_banco_descartavel_correspondente() {
-        let bytes = serde_json::to_vec(&context()).unwrap();
-        assert!(LabContext::decode(&bytes, LAB_DATABASE).is_ok());
+        let context = context();
+        let bytes = serde_json::to_vec(&context).unwrap();
+        let current = registration(&context);
+        assert!(LabContext::decode(&bytes, &current, LAB_DATABASE).is_ok());
         for database in [
             "postgresql://gm_m1c@127.0.0.1:56000/gm_m1c_c",
             "postgresql://gm_m1c@127.0.0.1:56001/gm_m1c_b",
@@ -134,8 +202,19 @@ mod tests {
             "postgresql://outro@127.0.0.1:56000/gm_m1c_b",
             "postgresql://gm_m1c@127.0.0.1:56000/gm_m1c_b?socket=/tmp/pg",
         ] {
-            assert!(LabContext::decode(&bytes, database).is_err());
+            assert!(LabContext::decode(&bytes, &current, database).is_err());
         }
+    }
+
+    #[test]
+    fn registro_corrente_prevalece_sobre_o_contexto_de_outra_geracao() {
+        let stale = context();
+        let mut current = stale.clone();
+        current["binding"]["generation"] = json!(2);
+        let registration = registration(&current);
+        let stale = serde_json::to_vec(&stale).unwrap();
+        assert!(LabContext::decode(&stale, &registration, LAB_DATABASE).is_err());
+        assert!(LabContext::decode(&stale, b"", LAB_DATABASE).is_err());
     }
 
     #[test]
@@ -150,9 +229,17 @@ mod tests {
             ("stream_id", json!("m4a.metadata.")),
         ] {
             let mut value = context();
-            value[field] = invalid;
+            if value["binding"].get(field).is_some() {
+                value["binding"][field] = invalid;
+            } else {
+                value[field] = invalid;
+            }
             let bytes = serde_json::to_vec(&value).unwrap();
-            assert!(LabContext::decode(&bytes, LAB_DATABASE).is_err(), "{field}");
+            let current = registration(&value);
+            assert!(
+                LabContext::decode(&bytes, &current, LAB_DATABASE).is_err(),
+                "{field}"
+            );
         }
     }
 }

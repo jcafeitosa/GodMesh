@@ -170,7 +170,7 @@ struct Config {
     migrations_dir: PathBuf,
     mode: Mode,
     #[cfg(all(test, feature = "snapshot-harness"))]
-    snapshot_lab: Option<snapshot_lab::LabContext>,
+    snapshot_lab: Option<(snapshot_lab::LabContext, snapshot_lab::LabRegistration)>,
 }
 
 /// Configuração específica do modo escolhido.
@@ -589,6 +589,11 @@ async fn run(config: Config) -> Result<(), String> {
         .await
         .map_err(|e| format!("não foi possível conectar ao Postgres em DATABASE_URL: {e}"))?;
 
+    #[cfg(all(test, feature = "snapshot-harness"))]
+    if let Some((_, registration)) = &lab {
+        registration.verify_database(&pool).await?;
+    }
+
     let report = migrate::migrate(&pool, &config.migrations_dir)
         .await
         .map_err(|e| {
@@ -664,8 +669,8 @@ async fn run(config: Config) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
                 let runtime = ReplicaRuntime::new(replica);
                 #[cfg(all(test, feature = "snapshot-harness"))]
-                let runtime = if let Some(lab) = lab {
-                    runtime.with_snapshot(lab, Arc::clone(&identity)).await?
+                let runtime = if let Some((context, _)) = lab {
+                    runtime.with_snapshot(context, Arc::clone(&identity)).await?
                 } else {
                     runtime
                 };

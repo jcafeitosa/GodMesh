@@ -30,21 +30,21 @@ impl ReplicaRuntime {
         signer: Arc<NodeIdentity>,
     ) -> Result<Self, String> {
         let config = self.service.config();
-        if context.node_id != signer.node_id()
-            || context.origin_node != config.origin_pin.node_id
-            || context.cluster != config.cluster
-            || context.tenant_id != config.namespace.tenant_id
-            || context.stream_id != config.namespace.stream_id
-            || i64::from(context.partition) != i64::from(config.namespace.partition)
-            || context.authority_epoch != config.authority_epoch
+        if context.binding.node_id != signer.node_id()
+            || context.binding.origin_node != config.origin_pin.node_id
+            || context.binding.cluster != config.cluster
+            || context.binding.tenant_id != config.namespace.tenant_id
+            || context.binding.stream_id != config.namespace.stream_id
+            || i64::from(context.binding.partition) != i64::from(config.namespace.partition)
+            || context.binding.authority_epoch != config.authority_epoch
             || (context.bootstrap_base.is_some() != (config.role == Role::Receiver))
         {
             return Err("contexto snapshot diverge da réplica configurada".to_owned());
         }
         let receiver = if config.role == Role::Receiver {
             let history = HarnessHistory {
-                database: context.database.clone(),
-                generation: context.generation,
+                database: context.binding.database.clone(),
+                generation: context.binding.generation,
             };
             let deadline = Instant::now() + config.attempt_timeout;
             Some(
@@ -81,18 +81,18 @@ impl SnapshotRuntime {
     fn namespace(&self) -> Namespace {
         let context = &self.context;
         Namespace {
-            cluster: context.cluster.clone(),
-            tenant_id: context.tenant_id.clone(),
-            stream_id: context.stream_id.clone(),
-            partition: context.partition,
-            authority_epoch: context.authority_epoch as u64,
+            cluster: context.binding.cluster.clone(),
+            tenant_id: context.binding.tenant_id.clone(),
+            stream_id: context.binding.stream_id.clone(),
+            partition: context.binding.partition,
+            authority_epoch: context.binding.authority_epoch as u64,
         }
     }
 
     fn policy(&self, remote: &Remote, max_package: NonZeroU32) -> SnapshotPolicy {
         let context = &self.context;
         let local_identity = SnapshotIdentity {
-            node_id: context.node_id.clone(),
+            node_id: context.binding.node_id.clone(),
             public_key: self.signer.public_key_hex(),
         };
         let remote_identity = SnapshotIdentity {
@@ -105,14 +105,14 @@ impl SnapshotRuntime {
             (local_identity, remote_identity)
         };
         SnapshotPolicy {
-            cluster: context.cluster.clone(),
+            cluster: context.binding.cluster.clone(),
             origin,
             destination,
-            tenant_id: context.tenant_id.clone(),
-            stream_id: context.stream_id.clone(),
-            partition: context.partition,
-            authority_epoch: context.authority_epoch as u64,
-            retention_class: context.retention_class.clone(),
+            tenant_id: context.binding.tenant_id.clone(),
+            stream_id: context.binding.stream_id.clone(),
+            partition: context.binding.partition,
+            authority_epoch: context.binding.authority_epoch as u64,
+            retention_class: context.binding.retention_class.clone(),
             limits: SnapshotLimits {
                 max_package_bytes: NonZeroUsize::new(max_package.get() as usize)
                     .expect("teto positivo representável no host"),
@@ -137,7 +137,7 @@ impl SnapshotRuntime {
         else {
             return Err(AttemptError::Protocol);
         };
-        if request.origin_node != context.node_id
+        if request.origin_node != context.binding.node_id
             || request.destination_node != remote.node_id
             || request.namespace != self.namespace()
         {
@@ -274,8 +274,8 @@ impl SnapshotRuntime {
         }
         let request = Request {
             request_id: runtime.request_id()?,
-            origin_node: context.origin_node.clone(),
-            destination_node: context.node_id.clone(),
+            origin_node: context.binding.origin_node.clone(),
+            destination_node: context.binding.node_id.clone(),
             namespace: self.namespace(),
             base_seq: base as u64,
             receiver_max_snapshot_bytes: context.max_snapshot_bytes,
@@ -316,13 +316,13 @@ impl SnapshotRuntime {
             .await
             .map_err(effect_error)?;
         eprintln!("event=m4_snapshot_intent attempt={}", token.get());
-        if context.fault == Some(Fault::AfterIntent) {
+        if context.fault == Some(Fault::IntentPersisted) {
             std::future::pending::<()>().await;
         }
         let application = receiver
             .apply(peer, token, &package, &policy, deadline)
             .await;
-        if context.fault == Some(Fault::AfterCommitUnknown)
+        if context.fault == Some(Fault::UnknownCommit)
             && matches!(
                 &application,
                 Err(SnapshotEffectError::Effect(EffectError::CommitUnknown(_)))
@@ -336,7 +336,7 @@ impl SnapshotRuntime {
             return Err(AttemptError::Protocol);
         }
         eprintln!("event=m4_snapshot_committed cut={}", applied.through);
-        if context.fault == Some(Fault::AfterCommit) {
+        if context.fault == Some(Fault::SnapshotCommitted) {
             std::future::pending::<()>().await;
         }
         let ack = Ack {
