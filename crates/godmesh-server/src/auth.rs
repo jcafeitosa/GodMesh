@@ -973,6 +973,15 @@ impl Authorization {
         }
     }
 
+    /// Resolve a credencial antes da transação do plano de configuração.
+    /// Janela, revogação e escopo são decididos sob o lock M1C.
+    pub(crate) async fn resolve_config_grant(&self, token: &str) -> Result<GrantRecord, AuthError> {
+        match self.registry.verify(token) {
+            Some(record) => Ok(record.clone()),
+            None => self.issued_record(token).await?.ok_or(AuthError::Unauthenticated),
+        }
+    }
+
     /// Autentica a credencial sem julgar escopo.
     ///
     /// Ordem deliberada: token desconhecido → revogação declarada → janela →

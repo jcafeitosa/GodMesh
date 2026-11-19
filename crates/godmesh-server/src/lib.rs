@@ -13,6 +13,7 @@ pub mod api;
 pub mod auth;
 pub mod config_bundle;
 pub mod config_https;
+pub mod config_operational;
 pub mod events;
 pub mod federation;
 pub mod http;
