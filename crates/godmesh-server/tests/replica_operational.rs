@@ -843,3 +843,135 @@ fn cota_de_streams_respeita_o_limite_do_semaforo() {
     let error = ReplicaConfig::from_env_with(vars).unwrap_err();
     assert_eq!(error.field, "MAX_STREAMS_PER_CONNECTION");
 }
+
+#[tokio::test]
+async fn admissoes_canceladas_preservam_pool_e_permit_retem_lock() {
+    use godmesh_federation::node::{LinkAuthorizationError, LinkIdentity};
+    use godmesh_server::replica_operational::authorize_link_until;
+
+    let Some(f) = ReceiverFixture::new("link_lease").await else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*f.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let portable = Arc::new(PortableJoin::new(
+        f.portable_config.clone(),
+        pool.clone(),
+        f.receiver.clone(),
+    ));
+    let identity = |node: &NodeIdentity| LinkIdentity {
+        node_id: node.node_id().to_owned(),
+        public_key: node.public_key_bytes(),
+        cluster: CLUSTER.into(),
+    };
+    let local = identity(&f.receiver);
+    let remote = identity(&f.origin);
+    let mut external = f.pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *external)
+        .await
+        .unwrap();
+    f.portable.lock_cluster_guard(&mut external).await.unwrap();
+    let mut cancelled = None;
+    for _ in 0..4 {
+        let waiter: i32 = tokio::time::timeout(
+            Duration::from_secs(1),
+            sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&pool),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_ne!(
+            cancelled,
+            Some(waiter),
+            "uma sessão cancelada foi devolvida ao pool"
+        );
+        cancelled = Some(waiter);
+        let attempt = authorize_link_until(portable.clone(), None, &local, &remote, deadline());
+        tokio::pin!(attempt);
+        tokio::select! {
+            result = &mut attempt => panic!("o lock externo ainda está retido: {:?}", result.err()),
+            () = espera_lock_do_enlace(&f.pool,blocker,waiter) => {}
+        };
+        // Encerra o future externamente enquanto aguarda o advisory lock.
+        // O pool precisa servir outra operação enquanto o bloqueador segue ativo.
+    }
+    let session: (String, String, i64) = tokio::time::timeout(
+        Duration::from_secs(1),
+        sqlx::query_as(
+            "SELECT current_setting('lock_timeout'),current_setting('statement_timeout'),
+            (SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory')",
+        )
+        .fetch_one(&pool),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(session, ("0".into(), "0".into(), 0));
+    let timed = authorize_link_until(
+        portable.clone(),
+        None,
+        &local,
+        &remote,
+        Instant::now() + Duration::from_millis(80),
+    )
+    .await;
+    assert!(matches!(timed, Err(LinkAuthorizationError::Timeout)));
+    external.rollback().await.unwrap();
+
+    let (token, expires) = authorize_link_until(portable, None, &local, &remote, deadline())
+        .await
+        .unwrap_or_else(|err| panic!("{err:?}"));
+    assert_eq!(expires, None);
+    let lock: String = format!("godmesh.federation.portable.v2:{CLUSTER}");
+    let mut contender = f.pool.begin().await.unwrap();
+    let acquired = |lock: String| {
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(lock)
+    };
+    assert!(
+        !acquired(lock.clone())
+            .fetch_one(&mut *contender)
+            .await
+            .unwrap()
+    );
+    assert!(pool.try_acquire().is_none());
+    drop(token);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if acquired(lock.clone())
+                .fetch_one(&mut *contender)
+                .await
+                .unwrap()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    contender.rollback().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+async fn espera_lock_do_enlace(pool: &sqlx::PgPool, blocker: i32, waiter: i32) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (
+                SELECT FROM pg_locks WHERE locktype='advisory' AND NOT granted AND $1 = ANY(pg_blocking_pids(pid)) AND pid=$2
+            )").bind(blocker).bind(waiter).fetch_one(pool).await.unwrap();
+            if waiting { return; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+}

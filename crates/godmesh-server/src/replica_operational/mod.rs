@@ -1,9 +1,11 @@
 //! Efeitos M4-A2 após autenticação e correlação na fronteira da sessão.
 //! Cada método abre e termina sua transação antes de entregar o resultado.
 mod db;
+mod link;
 mod resume;
 mod settings;
 
+pub use link::{authorize_link_in_tx, authorize_link_until};
 pub use settings::{ConfigError, Pin, ReplicaConfig, Role};
 
 use std::{fmt, future::Future, sync::Arc, time::Duration};
