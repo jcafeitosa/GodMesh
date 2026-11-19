@@ -386,3 +386,13 @@ ver a mesma evidência §6.
 A federação pode avançar por fatias. Antes de implementar cada fatia, fechar o planejamento no escopo correspondente, concluir a revisão independente e registrar a aprovação da SPEC rastreável daquela fatia. A primeira frente é o ingresso e a confiança entre servidores, começando pela integração da M1B.
 
 Esta decisão substitui, para a federação, a exigência anterior de aprovar todas as SPECs do produto antes de iniciar qualquer fatia. O teste de ponta a ponta deve envolver pelo menos três servidores. O escopo integral do GodMesh e a ordem da ADR-072 ficam preservados.
+
+## ADR-076 — Prova portátil e revogação de ingresso
+
+**Status:** direção adotada pela coordenação em 18/11/2026. O usuário pediu que a execução continuasse após a apresentação desta proposta.
+
+A prova portátil de ingresso é o certificado v2. A assinatura do aprovador vincula identidade, chave e manifesto do candidato. Cada servidor verifica a cadeia a partir de uma raiz genesis configurada para o cluster. As aprovações v1 preservam seu uso local.
+
+Em cluster explicitamente declarado sem votantes, um genesis do mesmo cluster ou o emissor autorizado da aprovação pode revogar aquela prova de ingresso por declaração assinada. Uma cadeia com elo revogado deixa de habilitar seus descendentes. Um descendente pode voltar a ser habilitado quando apresentar outra cadeia válida. A prova revogada permanece inválida. A verificação inclui evidência de frescor da revogação, conforme o contrato da fatia.
+
+O quórum dos bundles de confiança segue a ADR-072. A [SPEC M1C](../08-specs/federacao/m1c-cadeia-confianca.md) detalha a emissão, o consumo e o teste em três servidores.

@@ -1,6 +1,6 @@
 # M1C — prova portátil de ingresso e revogação assinada
 
-**Estado:** rascunho para decisão. A M1C depende da integração M1B/I e estende a decisão HTTP local para que outro servidor possa verificar e consumir a prova de ingresso. O aceite usa três instâncias com bancos e chaves próprios. Distribuição de configuração e confiança em produção permanece na M3. Replicação de eventos e autorização do Inbox permanecem na M4.
+**Estado:** rascunho do contrato operacional. A [ADR-076](../../06-planejamento/decisoes.md#adr-076--prova-portátil-e-revogação-de-ingresso) registra a direção adotada. A M1C depende da integração M1B/I e estende a decisão HTTP local para que outro servidor possa verificar e consumir a prova de ingresso. O aceite usa três instâncias com bancos e chaves próprios. Distribuição de configuração e confiança em produção permanece na M3. Replicação de eventos e autorização do Inbox permanecem na M4.
 
 ## 1. Escolha do formato
 
@@ -29,10 +29,10 @@ A M1C deve entregar e consumir a revogação por um caminho oficial verificável
 
 | Tema | Decisão necessária |
 |---|---|
-| **Revogação** | Quem pode revogar quem, inclusive genesis. Se o alvo é uma prova, uma geração da identidade ou o nó. Efeito sobre descendentes, regra de reingresso, desempate entre autoridades e escopo do contador monotônico. Definir fonte e limite de frescor da revogação, inclusive comportamento offline ou com cadeia incompleta. |
+| **Revogação** | A ADR-076 define quem pode revogar, o alvo e o efeito na cadeia. Falta fixar a emissão, a propagação, a ordem durável de decisões, o desempate e como os servidores comprovam frescor. Também falta definir a revalidação no transporte, no ingest e em estados offline ou de cadeia incompleta. |
 | **Validade** | Duração, tolerância de relógio, renovação e efeito da expiração de um elo sobre descendentes. Recomenda-se exigir cadeia válida no consumo e limitar a validade do filho à do pai. |
 | **Escopos** | Vocabulário e regra de delegação. Recomenda-se declarar a capacidade de aprovar e limitar os escopos delegados aos do aprovador. `federation_peer_scope` continua sendo autorização explícita e independente para o ingest. |
-| **Quórum** | A M1B/I v1.2 delimita `single_approver` à decisão **local** em cluster explicitamente sem votantes. Registrar se essa exceção da ADR-071 também autoriza emissão, consumo e revogação portáteis. A ADR-072 exige quórum nos bundles de confiança. Até o fechamento normativo, a portabilidade fica desabilitada e clusters com votantes seguem sem fallback. |
+| **Quórum** | A decisão local da M1B/I e o fluxo portátil da M1C seguem o modo explícito de cluster sem votantes. Clusters com votantes dependem dos contratos de quórum da M3. O runtime precisa aplicar esta fronteira em emissão, importação e revogação. |
 
 ## 5. Aceite da fatia
 

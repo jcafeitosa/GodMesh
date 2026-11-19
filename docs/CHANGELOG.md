@@ -2,6 +2,7 @@
 
 - **18/11/2026 — ADR-075.** O usuário aprovou o planejamento, a revisão e a liberação da federação por fatia. O aceite de ponta a ponta deve envolver pelo menos três servidores.
 - **18/11/2026 — M1B/I.** Integra decisão de ingresso assinada e ingest de eventos assinados. O aceite local verificou três instâncias QUIC/mTLS com queda e reconexão. [Evidência da integração](09-equipe/evidencias/2026-11-18-integracao-m1b.md)
+- **18/11/2026 — ADR-076.** Registra a direção de certificado v2 portátil e revogação assinada de provas de ingresso. A M1C detalha a verificação de cadeia entre servidores.
 
 ## Porta do SEC1 concorrente: teto do extrator, `effect: unknown` e timeout 503 — 18/11/2026
 - Três melhorias de `1799e51` portadas **sem** substituir a implementação integrada: a arquitetura de dois portões, os limites e os defaults testados permanecem.
