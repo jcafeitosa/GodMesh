@@ -768,3 +768,62 @@ async fn criacao_exige_politica_e_acl_da_tupla_exata() {
     ));
     assert_eq!(f.counts().await, (0, 0, 0, 0));
 }
+
+async fn prefixo_antes_de_expiracao(secondary_first: bool) {
+    let Some(f) = Fixture::new().await else {
+        return;
+    };
+    if secondary_first {
+        // Provisiona uma segunda versão antes da reserva. A primária vence
+        // aos 150 e a secundária aos 130 para a sequência 2.
+        sqlx::query("UPDATE federation_replica_policy SET active=false WHERE policy_id=$1")
+            .bind(f.b.node_id())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO federation_replica_policy
+           SELECT policy_id,2,tenant_id,retention_class,class_version,jurisdiction,copy_node,copy_kind,
+                  purpose,trigger_event,30,allow_discard,hold_mode,true
+           FROM federation_replica_policy WHERE policy_id=$1 AND policy_version=1")
+            .bind(f.b.node_id()).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE federation_replica_acl SET policy_version=2 WHERE destination=$1")
+            .bind(f.b.node_id())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    f.reserve(100).await.unwrap();
+    let first = f.event(1, 105);
+    let blocked = f.event(2, 100);
+    let later = f.event(3, 105);
+    for raw in [&first, &blocked, &later] {
+        f.admit(raw, 105, true).await.unwrap();
+    }
+
+    let expiry = if secondary_first { 130 } else { 150 };
+    assert_eq!(
+        f.select(&f.b, 1, expiry - 1, limits())
+            .await
+            .unwrap()
+            .frames
+            .len(),
+        3
+    );
+    let page = f.select(&f.b, 1, expiry, limits()).await.unwrap();
+    assert_eq!(page.frames, [first]);
+    assert!(page.has_more);
+    assert!(matches!(
+        f.select(&f.b, 2, expiry, limits()).await,
+        Err(Error::HistoryUnavailable)
+    ));
+}
+
+#[tokio::test]
+async fn selecao_preserva_prefixo_antes_da_expiracao_primaria() {
+    prefixo_antes_de_expiracao(false).await;
+}
+
+#[tokio::test]
+async fn selecao_preserva_prefixo_antes_da_expiracao_secundaria() {
+    prefixo_antes_de_expiracao(true).await;
+}

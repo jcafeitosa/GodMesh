@@ -325,7 +325,15 @@ impl Replication {
                     has_more: true,
                 });
             }
-            let proof = usable(conn, &reservation, &primary, seq, now).await?;
+            let proof = match usable(conn, &reservation, &primary, seq, now).await {
+                Err(Error::HistoryUnavailable) if !frames.is_empty() => {
+                    return Ok(CopyPage {
+                        frames,
+                        has_more: true,
+                    });
+                }
+                result => result?,
+            };
             let combined = bytes
                 .checked_add(proof.frame.len())
                 .ok_or(Error::LimitExceeded)?;
@@ -346,12 +354,18 @@ impl Replication {
             if sequence(&event)? != seq || event.issued_at != proof.issued_at || !proof.published {
                 return Err(Error::ProofConflict);
             }
-            secondary
-                .expiration(event.issued_at, now)
-                .map_err(|error| match error {
-                    Error::RetentionExpired => Error::HistoryUnavailable,
-                    other => other,
-                })?;
+            match secondary.expiration(event.issued_at, now) {
+                Err(Error::RetentionExpired) if !frames.is_empty() => {
+                    return Ok(CopyPage {
+                        frames,
+                        has_more: true,
+                    });
+                }
+                Err(Error::RetentionExpired) => return Err(Error::HistoryUnavailable),
+                result => {
+                    result?;
+                }
+            }
             bytes = combined;
             frames.push(proof.frame);
         }

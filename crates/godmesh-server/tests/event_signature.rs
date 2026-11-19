@@ -874,3 +874,152 @@ async fn ingest_aceita_reenvio_depois_de_preencher_lacuna() {
     assert_eq!(ack["seq"], 2);
     assert_eq!(rows(&pool, &stream).await, 2);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reserva_aguarda_commit_do_escritor_legado_e_recusa_historico() {
+    use godmesh_server::{
+        portable_join::{PortableJoin, PortableJoinConfig},
+        replication::{Error, Namespace, NodeContext, PolicyRef, Replication, Reservation},
+    };
+
+    let Some(pool) = pool().await else { return };
+    let writer_pool = common::pool_para(&common::database_url().unwrap(), 1).await;
+    let writer: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&writer_pool)
+        .await
+        .unwrap();
+    let addr = serve(writer_pool).await;
+    declare_tenant(&pool, TENANT).await;
+
+    for inbox in [false, true] {
+        let stream = unique("m4a.metadata.escritor-primeiro");
+        let origin = std::sync::Arc::new(no_autorizado(&pool, &stream).await);
+        let key = origin.public_key_hex();
+        let pin = format!("{}:{key}", origin.node_id());
+        let config = PortableJoinConfig::from_env_with(|name| {
+            Some(
+                match name {
+                    "GODMESH_FEDERATION_GOVERNANCE" => "single_approver:m4a-test",
+                    "GODMESH_FEDERATION_GENESIS" => &pin,
+                    "GODMESH_FEDERATION_REGION" => "lab",
+                    "GODMESH_FEDERATION_ADVERTISE_QUIC" => "quic://127.0.0.1:4433",
+                    "GODMESH_FEDERATION_PORTABLE_MAX_DEPTH" => "4",
+                    "GODMESH_FEDERATION_PORTABLE_MAX_FRAME_BYTES" => "8192",
+                    "GODMESH_FEDERATION_PORTABLE_MAX_VALIDITY_SECONDS" => "60",
+                    _ => return None,
+                }
+                .to_owned(),
+            )
+        })
+        .unwrap()
+        .unwrap();
+        let portable = PortableJoin::new(config, pool.clone(), origin.clone());
+
+        // O índice de política ativa também separa as rodadas pelo nó de cópia.
+        let destination = NodeIdentity::generate_in_memory().unwrap();
+        for (node, kind) in [
+            (origin.node_id(), "primary"),
+            (destination.node_id(), "secondary"),
+        ] {
+            sqlx::query("INSERT INTO federation_replica_policy
+                VALUES ($1,1,$2,$3,1,'BR',$1,$4,'replica_metadata','issued_at',50,true,'explicit',true)")
+                .bind(node).bind(TENANT).bind(CLASS).bind(kind).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO federation_replica_acl
+            VALUES ($1,$2,$3,0,7,$4,'export',$5,1,'BR','secondary',$4,1,0,1000,false)",
+        )
+        .bind(origin.node_id())
+        .bind(TENANT)
+        .bind(&stream)
+        .bind(destination.node_id())
+        .bind(CLASS)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let request = Reservation {
+            namespace: Namespace {
+                origin_node: origin.node_id().to_owned(),
+                tenant_id: TENANT.to_owned(),
+                stream_id: stream.clone(),
+                partition: 0,
+            },
+            authority_epoch: 7,
+            local_node: origin.node_id().to_owned(),
+            profile: "metadata".to_owned(),
+            profile_version: 1,
+            retention_class: CLASS.to_owned(),
+            class_version: 1,
+            jurisdiction: "BR".to_owned(),
+            policy: PolicyRef {
+                id: origin.node_id().to_owned(),
+                version: 1,
+            },
+        };
+
+        let mut gate = pool.begin().await.unwrap();
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *gate)
+            .await
+            .unwrap();
+        sqlx::query("LOCK TABLE event_position IN SHARE MODE")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        let (route, body) = if inbox {
+            (
+                "/v1/sync/inbox",
+                serde_json::json!({
+                    "retention_class": CLASS,
+                    "positions": [{"origin_node":origin.node_id(), "stream_id":stream,
+                        "partition":0,"authority_epoch":9,"seq":1}],
+                })
+                .to_string(),
+            )
+        } else {
+            (
+                "/v1/events",
+                common::envelope_assinado(&origin, TENANT, &stream, 0, 9, 1, CLASS),
+            )
+        };
+        let writing = tokio::task::spawn_blocking(move || {
+            common::call(addr, "POST", route, Some(TOKEN), Some(&body))
+        });
+        aguardar_bloqueio(&pool, writer, gate_pid, "relation").await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let reservation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let reserving = tokio::spawn(async move {
+            let mut guard = portable.lock_cluster_guard(&mut tx).await.unwrap();
+            let local = NodeContext {
+                node_id: origin.node_id(),
+                public_key: &key,
+            };
+            let result =
+                Replication::reserve_namespace_in_tx(&mut guard, &request, local, || 100).await;
+            tx.commit().await.unwrap();
+            result
+        });
+        aguardar_bloqueio(&pool, reservation_pid, writer, "advisory").await;
+        gate.commit().await.unwrap();
+
+        let response = writing.await.unwrap();
+        assert_eq!(
+            response.status,
+            if inbox { 200 } else { 201 },
+            "{}",
+            response.body
+        );
+        let result = reserving.await.unwrap();
+        assert!(matches!(result, Err(Error::LegacyHistory)), "{result:?}");
+        let stored: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM event_position WHERE tenant_id=$1 AND stream_id=$2 AND authority_epoch=9),
+                    (SELECT count(*) FROM sync_inbox_state WHERE tenant_id=$1 AND stream_id=$2 AND authority_epoch=9 AND contiguous_prefix=1),
+                    (SELECT count(*) FROM federation_replica_namespace WHERE tenant_id=$1 AND stream_id=$2)")
+            .bind(TENANT).bind(&stream).fetch_one(&pool).await.unwrap();
+        assert_eq!(stored, (1, i64::from(inbox), 0));
+    }
+}
