@@ -100,6 +100,30 @@ impl ExternalObservation {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationLogins {
+    pub target_login: String,
+    pub observer_login: String,
+    pub cas_login: String,
+}
+
+impl GenerationLogins {
+    fn validate(&self) -> Result<(), Error> {
+        let valid =
+            |login: &str| !login.trim().is_empty() && login.len() <= 63 && !login.contains('\0');
+        if ![&self.target_login, &self.observer_login, &self.cas_login]
+            .into_iter()
+            .all(|login| valid(login))
+            || self.target_login == self.observer_login
+            || self.target_login == self.cas_login
+            || self.observer_login == self.cas_login
+        {
+            return Err(Error::Scope);
+        }
+        Ok(())
+    }
+}
+
 pub struct ExternalStore(PgPool, std::sync::Arc<dyn Fn() -> i64 + Send + Sync>);
 
 async fn in_tx<T>(
@@ -172,6 +196,51 @@ impl ExternalStore {
         }).await
     }
 
+    /// Registro administrativo. Repetição exata é idempotente.
+    pub async fn register_logins(
+        &self,
+        binding: &super::Binding,
+        logins: &GenerationLogins,
+        deadline: Instant,
+    ) -> Result<(), Error> {
+        binding.validate()?;
+        logins.validate()?;
+        in_tx(&self.0, deadline, async |db| {
+            sql_budget::refresh(db).await?;
+            let query = format!(
+                "INSERT INTO federation_restore_generation_logins
+                ({KEY_SQL},generation,target_db_id,target_login,observer_login,cas_login)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING"
+            );
+            keyed!(sqlx::AssertSqlSafe(query), binding.key)
+                .bind(binding.generation as i64)
+                .bind(&binding.target_db_id)
+                .bind(&logins.target_login)
+                .bind(&logins.observer_login)
+                .bind(&logins.cas_login)
+                .execute(&mut *db)
+                .await?;
+            match read_logins(db, &binding.key, binding.generation, &binding.target_db_id).await {
+                Ok(stored) if stored == *logins => Ok(()),
+                Ok(_) | Err(Error::Incomplete) => Err(Error::Conflict),
+                Err(error) => Err(error),
+            }
+        })
+        .await
+    }
+
+    pub async fn logins(
+        &self,
+        binding: &super::Binding,
+        deadline: Instant,
+    ) -> Result<GenerationLogins, Error> {
+        binding.validate()?;
+        in_tx(&self.0, deadline, async |db| {
+            read_logins(db, &binding.key, binding.generation, &binding.target_db_id).await
+        })
+        .await
+    }
+
     pub async fn observe(
         &self,
         key: &RestoreKey,
@@ -213,6 +282,11 @@ impl ExternalStore {
         }
         in_tx(&self.0,deadline,async |db| {
             let old = observe(db,&high.key,true).await?;
+            let previous_logins = read_logins(db, &high.key, high.fenced_generation, &fence.cut_db_id).await?;
+            if previous_logins.target_login != fence.old_login {
+                return Err(Error::Conflict);
+            }
+            read_logins(db, &high.key, binding.generation, &binding.target_db_id).await?;
             if old.binding == binding { return Ok(old); }
             if old.binding.generation != high.fenced_generation || old.binding.target_db_id != fence.cut_db_id
                 || high.fenced_generation.checked_add(1) != Some(binding.generation) {
@@ -346,6 +420,38 @@ impl ExternalStore {
             observe(db,&body.key,true).await
         }).await
     }
+}
+
+async fn read_logins(
+    db: &mut PgConnection,
+    key: &RestoreKey,
+    generation: u64,
+    target_db_id: &str,
+) -> Result<GenerationLogins, Error> {
+    sql_budget::refresh(db).await?;
+    let row = keyed!(
+        concat!(
+            "SELECT target_db_id,target_login,observer_login,cas_login
+            FROM federation_restore_generation_logins WHERE ",
+            where_key!(),
+            " AND generation=$9"
+        ),
+        key
+    )
+    .bind(generation as i64)
+    .fetch_optional(db)
+    .await?
+    .ok_or(Error::Incomplete)?;
+    if row.try_get::<&str, _>("target_db_id")? != target_db_id {
+        return Err(Error::Conflict);
+    }
+    let logins = GenerationLogins {
+        target_login: row.try_get("target_login")?,
+        observer_login: row.try_get("observer_login")?,
+        cas_login: row.try_get("cas_login")?,
+    };
+    logins.validate()?;
+    Ok(logins)
 }
 
 async fn observe(

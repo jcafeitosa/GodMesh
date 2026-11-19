@@ -302,8 +302,98 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
         .await,
         Err(Error::Incomplete)
     ));
-    let high = signed_high(high_body, &signer);
+    let high = signed_high(high_body.clone(), &signer);
     let binding = Binding::from_high_water(&high).unwrap();
+    assert!(ext.publish(&high, &fence, deadline()).await.is_err());
+    assert_eq!(
+        ext.observe(&key, deadline()).await.unwrap().binding(),
+        &first
+    );
+    let prior_logins = GenerationLogins {
+        target_login: "fixture_old".into(),
+        observer_login: "fixture_observer".into(),
+        cas_login: "fixture_cas".into(),
+    };
+    let target_logins = GenerationLogins {
+        target_login: "fixture_new".into(),
+        ..prior_logins.clone()
+    };
+    ext.register_logins(&first, &prior_logins, deadline())
+        .await
+        .unwrap();
+    ext.register_logins(&first, &prior_logins, deadline())
+        .await
+        .unwrap();
+    assert_eq!(ext.logins(&first, deadline()).await.unwrap(), prior_logins);
+    assert!(matches!(
+        ext.register_logins(&first, &target_logins, deadline())
+            .await,
+        Err(Error::Conflict)
+    ));
+    let mut wrong_database = first.clone();
+    wrong_database.target_db_id = binding.target_db_id.clone();
+    assert!(matches!(
+        ext.logins(&wrong_database, deadline()).await,
+        Err(Error::Conflict)
+    ));
+    assert!(matches!(
+        ext.register_logins(&wrong_database, &prior_logins, deadline())
+            .await,
+        Err(Error::Conflict)
+    ));
+    let mut other_key = binding.clone();
+    other_key.key.stream_id.push_str("-other");
+    for another in [&binding, &other_key] {
+        assert!(matches!(
+            ext.register_logins(another, &prior_logins, deadline())
+                .await,
+            Err(Error::Conflict)
+        ));
+    }
+    let mut duplicate_role = target_logins.clone();
+    duplicate_role.cas_login = duplicate_role.observer_login.clone();
+    assert!(matches!(
+        ext.register_logins(&binding, &duplicate_role, deadline())
+            .await,
+        Err(Error::Scope)
+    ));
+    assert!(matches!(
+        ext.publish(&high, &fence, deadline()).await,
+        Err(Error::Incomplete)
+    ));
+    ext.register_logins(&binding, &target_logins, deadline())
+        .await
+        .unwrap();
+    assert_eq!(
+        ext.logins(&binding, deadline()).await.unwrap(),
+        target_logins
+    );
+    for mutation in [
+        "UPDATE federation_restore_generation_logins SET target_login='replacement'",
+        "DELETE FROM federation_restore_generation_logins",
+        "TRUNCATE federation_restore_generation_logins",
+    ] {
+        let error = sqlx::query(mutation).execute(&external).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("23514")
+        );
+    }
+
+    let mut wrong_fence = fence.clone();
+    wrong_fence.old_login = target_logins.target_login;
+    let mut wrong_high = high_body;
+    wrong_high.fence_sha256 = wrong_fence.digest().unwrap();
+    let wrong_high = signed_high(wrong_high, &signer);
+    assert!(matches!(
+        ext.publish(&wrong_high, &wrong_fence, deadline()).await,
+        Err(Error::Conflict)
+    ));
+    assert_eq!(
+        ext.observe(&key, deadline()).await.unwrap().binding(),
+        &first
+    );
+    ext.publish(&high, &fence, deadline()).await.unwrap();
     ext.publish(&high, &fence, deadline()).await.unwrap();
     let observed = ext
         .record_origin(&binding, &a_observed, deadline())

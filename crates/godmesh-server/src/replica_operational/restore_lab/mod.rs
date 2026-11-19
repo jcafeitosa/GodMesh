@@ -9,7 +9,8 @@ pub use controls::{CutObservation, M3Tuple, OriginObservation, observe_cut, obse
 pub use local::{AdmissionGate, LocalPhase, LocalRestore, allocation_id};
 pub use operations::{BackupArtifact, PromotionCandidate, capture_gap};
 pub use store::{
-    ExternalObservation, ExternalPhase, ExternalStore, OpeningOrigin, observe_opening_origin,
+    ExternalObservation, ExternalPhase, ExternalStore, GenerationLogins, OpeningOrigin,
+    observe_opening_origin,
 };
 
 use godmesh_federation::restore_evidence::{
