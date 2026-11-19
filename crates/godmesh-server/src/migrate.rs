@@ -34,6 +34,11 @@ use std::path::{Path, PathBuf};
 use sqlx::PgPool;
 use sqlx::postgres::PgConnection;
 
+#[cfg(any(test, feature = "snapshot-harness"))]
+mod restore_check;
+#[cfg(feature = "snapshot-harness")]
+pub use restore_check::verify_restore_schema;
+
 /// Variável de ambiente que aponta o diretório das migrações.
 pub const MIGRATIONS_DIR_ENV: &str = "GODMESH_MIGRATIONS_DIR";
 
