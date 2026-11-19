@@ -2145,6 +2145,62 @@ mod pinned_dial {
 
     #[cfg(feature = "relay-harness")]
     #[tokio::test]
+    async fn relay_dial_permit_externo_expirado_com_quic_aberto_nao_promove() {
+        let expires = Instant::now() + Duration::from_millis(750);
+        let route = RelayDialFixture::with_authorizer(TestAuthorizer::new(Ok(Some(expires)))).await;
+        let remote = node(config());
+        let raw = RawPeer::new(config());
+        let gate = Arc::new(PromotionGate {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            reject: false,
+            authority: TestAuthorizer::new(Ok(None)),
+        });
+        let (caller, mut callbacks) = session_node_with_config(&raw, gate.clone(), config());
+        caller
+            .registry()
+            .insert(remote.record_for(TrustState::Authorized));
+        remote.registry.insert(PeerRecord::authorized_from_key(
+            &caller.identity().public_key_bytes(),
+            CLUSTER,
+        ));
+        let destination = target(&remote, remote.addr());
+        let mut attempt = caller
+            .start_relay_dial(destination.clone(), &route.cancellation)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+
+        // Relógio monotônico avança sem poll do supervisor externo no runtime local.
+        std::thread::sleep(expires.saturating_duration_since(Instant::now()));
+        let outer_closed = route.session.cancelled();
+        tokio::pin!(outer_closed);
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(outer_closed.as_mut().poll(cx).is_pending())
+            })
+            .await
+        );
+        assert!(matches!(
+            caller.start_relay_dial(destination, &route.cancellation),
+            Err(DialError::Cancelled)
+        ));
+        gate.release.notify_one();
+        assert!(matches!(attempt.wait().await, Err(DialError::Cancelled)));
+        assert!(callbacks.try_recv().is_err());
+        assert_ne!(
+            caller.links().snapshot_or_never_seen(&remote.id).state,
+            LinkState::Ready
+        );
+        caller.shutdown();
+        remote.node.shutdown();
+        route.outer.shutdown();
+    }
+
+    #[cfg(feature = "relay-harness")]
+    #[tokio::test]
     async fn relay_dial_promocao_primeiro_fecha_so_a_instancia_da_rota() {
         for close_outer in [false, true] {
             let route = RelayDialFixture::new().await;
@@ -3051,9 +3107,12 @@ struct RelayDialFixture {
 #[cfg(feature = "relay-harness")]
 impl RelayDialFixture {
     async fn new() -> Self {
+        Self::with_authorizer(TestAuthorizer::new(Ok(None))).await
+    }
+
+    async fn with_authorizer(authorizer: Arc<TestAuthorizer>) -> Self {
         let peer = RawPeer::new(config());
-        let (outer, mut sessions) =
-            session_node_with_config(&peer, TestAuthorizer::new(Ok(None)), config());
+        let (outer, mut sessions) = session_node_with_config(&peer, authorizer, config());
         let connection = session_handshake(&outer, &peer).await;
         let session = next_session(&mut sessions).await;
         let cap = NonZeroU32::new(512).unwrap();

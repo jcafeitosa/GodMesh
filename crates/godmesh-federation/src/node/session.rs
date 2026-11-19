@@ -24,7 +24,7 @@ use super::{
     close_with_rejection,
 };
 use crate::handshake::Rejection;
-use crate::link::PeerLinks;
+use crate::link::{OperationalValidity, PeerLinks};
 
 // Faixa de controle de streams, separada dos motivos de fechamento da conexão.
 const STREAM_BUSY: u32 = 0x474D_0101;
@@ -127,7 +127,7 @@ impl std::error::Error for SessionError {}
 struct SessionState {
     id: SessionId,
     link: Arc<OperationalLink>,
-    links: Arc<PeerLinks>,
+    validity: Arc<OperationalValidity>,
     max_frame_bytes: u32,
     #[cfg(feature = "snapshot-harness")]
     snapshot: Option<SnapshotSessionLimits>,
@@ -142,8 +142,8 @@ impl SessionState {
     }
 
     fn check_ready(&self) -> Result<(), SessionError> {
-        self.links
-            .operational_is_ready(&self.link.remote.node_id, self.connection())
+        self.validity
+            .is_current(std::time::Instant::now())
             .then_some(())
             .ok_or(SessionError::Closed)
     }
@@ -196,10 +196,12 @@ impl OperationalSession {
         let id = NEXT_SESSION
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .ok()?;
+        let validity =
+            links.operational_validity(&link.remote.node_id, &link.validity.connection)?;
         let state = Arc::new(SessionState {
             id: SessionId(id),
             link,
-            links,
+            validity,
             max_frame_bytes: limits.max_frame_bytes.get(),
             #[cfg(feature = "snapshot-harness")]
             snapshot,
