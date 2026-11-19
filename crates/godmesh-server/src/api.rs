@@ -188,7 +188,24 @@ pub enum ApiError {
         /// Epoch reivindicado pelo envelope recusado.
         got: u64,
     },
+    PortableJoin(crate::portable_join::PortableJoinError),
     Storage(sqlx::Error),
+}
+
+impl From<crate::portable_join::PortableJoinError> for ApiError {
+    fn from(error: crate::portable_join::PortableJoinError) -> Self {
+        use crate::portable_join::PortableJoinError as Join;
+        match error {
+            Join::Storage(error) => Self::Storage(error),
+            Join::Disabled => Self::FederationGovernanceDisabled,
+            Join::Epoch { recorded, presented } => Self::ApprovalEpochRegressed {
+                recorded: recorded as u64,
+                presented: presented as u64,
+            },
+            Join::State(state) => Self::JoinRequestStateConflict { state },
+            other => Self::PortableJoin(other),
+        }
+    }
 }
 
 impl From<sqlx::Error> for ApiError {

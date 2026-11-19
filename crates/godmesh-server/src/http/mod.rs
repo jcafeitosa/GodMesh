@@ -51,6 +51,7 @@ mod federation;
 mod gate;
 mod incidents;
 mod openapi;
+mod portable_join;
 mod sync;
 
 /// Estado compartilhado.
@@ -74,6 +75,7 @@ pub struct AppState {
     /// honesto, em vez de fingir saúde. `GET /v1/meta →
     /// capabilities.federation_enabled` publica exatamente isto.
     pub federation: Option<Arc<PeerLinks>>,
+    pub portable: Option<Arc<crate::portable_join::PortableJoin>>,
     /// Portão de abuso: cotas, tetos de payload e admissão por classe. Vive em
     /// `Arc` porque o estado é clonado por requisição; os buckets são **por
     /// processo** (ver docs de `crate::admission`). Os limites efetivos saem
@@ -207,6 +209,7 @@ pub fn router_with_admission(
         false,
         HostTelemetry::default(),
         decisions_from_env(),
+        None,
     )
 }
 
@@ -226,6 +229,7 @@ pub fn router_with_log(
         false,
         HostTelemetry::default(),
         decisions_from_env(),
+        None,
     )
 }
 
@@ -247,6 +251,7 @@ pub fn router_with(pool: PgPool, authorization: Authorization) -> Router {
         false,
         HostTelemetry::default(),
         decisions_from_env(),
+        None,
     )
 }
 
@@ -270,6 +275,7 @@ pub fn router_with_federation(
         false,
         HostTelemetry::default(),
         decisions_from_env(),
+        None,
     )
 }
 
@@ -293,6 +299,7 @@ pub fn router_with_federation_and_admission(
         false,
         HostTelemetry::default(),
         decisions_from_env(),
+        None,
     )
 }
 
@@ -338,16 +345,25 @@ pub fn router_runtime_with_host(
     host: HostTelemetry,
     decisions: Arc<DecisionConfig>,
 ) -> Router {
+    router_runtime_with_portable(pool, grants, federation, admission, outbox_enabled, host, decisions, None)
+}
+
+/// Composição do binário com autoridade portátil opcional, após o preflight.
+#[allow(clippy::too_many_arguments)]
+pub fn router_runtime_with_portable(
+    pool: PgPool,
+    grants: GrantRegistry,
+    federation: Option<Arc<PeerLinks>>,
+    admission: AdmissionConfig,
+    outbox_enabled: bool,
+    host: HostTelemetry,
+    decisions: Arc<DecisionConfig>,
+    portable: Option<Arc<crate::portable_join::PortableJoin>>,
+) -> Router {
     let authorization = Authorization::new(grants, pool.clone());
     build_router(
-        pool,
-        authorization,
-        Arc::new(StderrRequestLog),
-        federation,
-        admission,
-        outbox_enabled,
-        host,
-        decisions,
+        pool, authorization, Arc::new(StderrRequestLog), federation,
+        admission, outbox_enabled, host, decisions, portable,
     )
 }
 
@@ -369,6 +385,7 @@ pub fn router_with_host(
         false,
         host,
         decisions_from_env(),
+        None,
     )
 }
 
@@ -388,6 +405,7 @@ pub fn router_with_log_and_decisions(
         false,
         HostTelemetry::default(),
         Arc::new(decisions),
+        None,
     )
 }
 
@@ -401,6 +419,7 @@ fn build_router(
     outbox_enabled: bool,
     host: HostTelemetry,
     decisions: Arc<DecisionConfig>,
+    portable: Option<Arc<crate::portable_join::PortableJoin>>,
 ) -> Router {
     let join_window = JoinWindow::from_env();
     let event_window = EventWindow::from_env();
@@ -412,6 +431,7 @@ fn build_router(
     sync::register(&mut reg);
     admin::register(&mut reg);
     federation::register(&mut reg);
+    portable_join::register(&mut reg);
 
     // Métricas operacionais: escopo próprio (`admin:metrics`). Ver a nota em
     // `get_metrics` sobre por que não é só loopback.
@@ -496,6 +516,7 @@ fn build_router(
         event_window,
         decisions,
         federation,
+        portable,
         admission,
         outbox_enabled,
         route_specs,
@@ -691,6 +712,9 @@ impl ApiErrorResponse {
         match &self.0 {
             ApiError::IllegalTransition { current } => {
                 vec![("state", Value::String(current.clone()))]
+            }
+            ApiError::PortableJoin(crate::portable_join::PortableJoinError::Proof(reason)) => {
+                vec![("reason", json!(reason))]
             }
             ApiError::JoinRequestStateConflict { state } => {
                 vec![("state", Value::String(state.clone()))]

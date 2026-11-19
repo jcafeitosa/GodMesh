@@ -347,10 +347,37 @@ async fn gate(State(gate): State<Gate>, request: Request, next: Next) -> Respons
 // compilador (match exaustivo, sem wildcard).
 // ---------------------------------------------------------------------------
 
-/// `(when, retryable, hint)` por variante. O `match` é exaustivo de caso
-/// **novo**: variante sem entrada não compila, e isso é mais forte que teste.
-const fn advice(e: &ApiError) -> (&'static str, bool, &'static str) {
+use crate::portable_join::PortableJoinError as Join;
+
+fn portable_error(error: &Join) -> (StatusCode, &'static str, &'static str) {
+    let invalid = StatusCode::UNPROCESSABLE_ENTITY;
+    let conflict = StatusCode::CONFLICT;
+    match error {
+        Join::Proof(_) => (invalid, "join_proof_invalid", "a prova portátil foi recusada"),
+        Join::Issuer => (invalid, "join_issuer_not_authorized", "o nó não tem autoridade portátil para esta operação"),
+        Join::Validity => (invalid, "join_validity_invalid", "a vigência apresentada ou configurada não se aplica à prova"),
+        Join::Revoked => (invalid, "join_proof_revoked", "a cadeia contém um elo revogado"),
+        Join::Revocation => (invalid, "join_revocation_invalid", "a declaração ou o recibo de revogação foi recusado"),
+        Join::Capacity => (invalid, "join_envelope_capacity_exceeded", "um envelope de uso da cadeia excede o teto local de corpo"),
+        Join::Replacement => (conflict, "join_chain_replacement_conflict", "a origem ou a prova vigente conflita com a importação"),
+        Join::RevocationConflict => (conflict, "join_revocation_conflict", "o elo já tem outra declaração de revogação"),
+        Join::NotFound => (StatusCode::NOT_FOUND, "join_proof_not_found", "nenhuma prova confirmada nesta raiz para o pedido"),
+        Join::Configuration(_) | Join::Encoding(_) | Join::Storage(_) =>
+            (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "estado portátil indisponível"),
+        Join::Disabled => (invalid, "federation_governance_disabled", "governança portátil desabilitada"),
+        Join::Epoch { .. } => (invalid, "approval_epoch_regressed", "epoch inferior ao piso registrado"),
+        Join::State(_) => (conflict, "join_request_state_conflict", "o pedido já foi decidido"),
+    }
+}
+
+/// `(when, retryable, hint)` por variante.
+fn advice(e: &ApiError) -> (&'static str, bool, &'static str) {
     match e {
+        ApiError::PortableJoin(error) => (
+            portable_error(error).2,
+            false,
+            "confira a prova, a política e o estado do pedido na raiz",
+        ),
         ApiError::Unauthenticated => (
             "nenhuma credencial apresentada, esquema errado ou token desconhecido",
             false,
@@ -638,6 +665,15 @@ fn probes() -> Vec<ApiError> {
             ApiError::NoAuthorizedApprover,
             ApiError::FederationGovernanceDisabled,
             ApiError::JoinRequestNotFound,
+            ApiError::PortableJoin(Join::NotFound),
+            ApiError::PortableJoin(Join::Proof("malformed_frame")),
+            ApiError::PortableJoin(Join::Issuer),
+            ApiError::PortableJoin(Join::Validity),
+            ApiError::PortableJoin(Join::Revoked),
+            ApiError::PortableJoin(Join::Revocation),
+            ApiError::PortableJoin(Join::Capacity),
+            ApiError::PortableJoin(Join::Replacement),
+            ApiError::PortableJoin(Join::RevocationConflict),
             ApiError::JoinRequestStateConflict {
                 state: "approved".to_owned(),
             },
@@ -664,6 +700,10 @@ fn probes() -> Vec<ApiError> {
 #[must_use]
 pub(crate) fn error_parts(e: &ApiError) -> (StatusCode, &'static str, String) {
     match e {
+        ApiError::PortableJoin(error) => {
+            let (status, code, detail) = portable_error(error);
+            (status, code, detail.to_owned())
+        }
         // 401 com `WWW-Authenticate` é o formato esperado por cliente HTTP.
         ApiError::Unauthenticated => (
             StatusCode::UNAUTHORIZED,

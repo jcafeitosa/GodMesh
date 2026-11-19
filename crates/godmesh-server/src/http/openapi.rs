@@ -259,13 +259,14 @@ fn operation(spec: &RouteSpec) -> OperationBuilder {
             )));
             description.push_str(" na operação normal ou com `dry_run=true`");
         }
-        responses = responses.response(
-            status.to_string(),
-            ResponseBuilder::new()
-                .description(description)
-                .content(media, json_content(schema, example))
-                .build(),
-        );
+        let mut response = ResponseBuilder::new()
+            .description(description)
+            .content(media, json_content(schema, example));
+        if matches!(success_schema, Schema::Ref("JoinValidityEnvelope")) {
+            response = response.header("Cache-Control", HeaderBuilder::new()
+                .schema(Some(primitive("string"))).description(Some("Sempre no-store")).build());
+        }
+        responses = responses.response(status.to_string(), response.build());
     }
     if spec.destructive && doc.success.iter().all(|(status, _)| *status != 200) {
         responses = responses.response(
@@ -356,8 +357,51 @@ fn build(specs: &[RouteSpec]) -> OpenApi {
         .build()
 }
 
+fn portable_object(fields: &[(&str, &str)]) -> Object {
+    use utoipa::openapi::schema::AdditionalProperties;
+    fields.iter().fold(
+        ObjectBuilder::new()
+            .schema_type(Type::Object)
+            .additional_properties(Some(AdditionalProperties::FreeForm(false))),
+        |schema, (property, kind)| {
+            let value = match *kind {
+                "integer" | "string" => RefOr::T(SchemaValue::Object(primitive(kind))),
+                schema => RefOr::Ref(Ref::from_schema_name(schema)),
+            };
+            schema.property(*property, value).required(*property)
+        },
+    ).build()
+}
+
 fn components() -> Components {
-    ComponentsBuilder::default()
+    super::portable_join::schemas(ComponentsBuilder::default())
+        .schema("JoinValidityV1", portable_object(&[
+            ("cluster", "string"), ("root_node_id", "string"), ("leaf_digest", "string"),
+            ("issued_at", "integer"), ("expires_at", "integer"), ("signature", "string"),
+        ]))
+        .schema("JoinRevocationV1", portable_object(&[
+            ("cluster", "string"), ("root_node_id", "string"), ("target_digest", "string"),
+            ("revoker_node_id", "string"), ("epoch", "integer"), ("signature", "string"),
+        ]))
+        .schema("JoinRevocationReceiptV1", portable_object(&[
+            ("cluster", "string"), ("root_node_id", "string"), ("revocation_digest", "string"),
+            ("accepted_at", "integer"), ("signature", "string"),
+        ]))
+        .schema("JoinValidityEnvelope", portable_object(&[("validity", "JoinValidityV1")]))
+        .schema("JoinRevocationEnvelope", portable_object(&[
+            ("revocation", "JoinRevocationV1"), ("receipt", "JoinRevocationReceiptV1"),
+        ]))
+        .schema("ChainImportEnvelope", portable_object(&[
+            ("expected_node_id", "string"), ("expected_public_key", "string"),
+            ("chain_json", "string"), ("validity", "JoinValidityV1"),
+        ]))
+        .schema("RevocationEnvelope", portable_object(&[
+            ("target_chain_json", "string"), ("revocation", "JoinRevocationV1"),
+        ]))
+        .schema("RevocationImportEnvelope", portable_object(&[
+            ("target_chain_json", "string"), ("revocation", "JoinRevocationV1"),
+            ("receipt", "JoinRevocationReceiptV1"),
+        ]))
         // Tipos de domínio: as mesmas structs serde que os handlers
         // serializam — sem segunda definição de schema para divergir.
         .schema_from::<IncidentPayload>()

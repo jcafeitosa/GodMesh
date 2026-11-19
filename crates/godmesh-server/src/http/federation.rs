@@ -228,12 +228,24 @@ async fn get_join_requests(
 ///
 /// O corpo é a segunda autoridade: sem `approval`, a operação morre no
 /// extrator com `invalid_request` e nenhum estado muda.
+async fn require_legacy_cluster(state: &AppState, id: &str) -> Result<(), ApiErrorResponse> {
+    if let Some(portable) = &state.portable {
+        let belongs: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM federation_join_request
+              WHERE join_request_id = $1 AND manifest->>'cluster' = $2)",
+        ).bind(id).bind(portable.cluster()).fetch_one(&state.pool).await.map_err(ApiError::from)?;
+        if belongs { return Err(ApiError::FederationGovernanceDisabled.into()); }
+    }
+    Ok(())
+}
+
 async fn post_join_request_approve(
     State(state): State<AppState>,
     Extension(grant): Extension<VerifiedGrant>,
     Path(join_request_id): Path<String>,
     payload: Result<Json<ApprovalDecision>, JsonRejection>,
 ) -> Result<Json<JoinRequestView>, ApiErrorResponse> {
+    require_legacy_cluster(&state, &join_request_id).await?;
     let Json(decision) = payload.map_err(|rejection| {
         ApiErrorResponse::from(ApiError::InvalidRequest(format!(
             "aprovar exige o certificado de aprovação assinado por nó autorizado no corpo \
@@ -295,6 +307,7 @@ async fn post_join_request_reject(
     Path(join_request_id): Path<String>,
     payload: Result<Json<ApprovalDecision>, JsonRejection>,
 ) -> Result<Json<JoinRequestView>, ApiErrorResponse> {
+    require_legacy_cluster(&state, &join_request_id).await?;
     let Json(decision) = payload.map_err(|rejection| {
         ApiErrorResponse::from(ApiError::InvalidRequest(format!(
             "rejeitar exige o certificado de rejeição assinado por nó autorizado no corpo \

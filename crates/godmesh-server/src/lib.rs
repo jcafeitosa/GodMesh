@@ -20,5 +20,6 @@ pub mod lifecycle;
 pub mod metrics;
 pub mod observability;
 pub mod migrate;
+pub mod portable_join;
 pub mod publisher;
 pub mod runtime;

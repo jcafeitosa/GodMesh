@@ -52,7 +52,7 @@ use sqlx::PgPool;
 /// Total de rotas publicadas no contrato. Mudar o número **exige** mudar o
 /// contrato com ele: é o grito pedido pelo CTO quando alguém registra uma
 /// rota e "esquece" de documentá-la.
-const EXPECTED_ROUTE_COUNT: usize = 24;
+const EXPECTED_ROUTE_COUNT: usize = 33;
 
 const TENANT: &str = "tenant-contrato-br";
 const TOKEN_ALL: &str = "token-contrato-todos-escopos";
@@ -383,6 +383,18 @@ async fn contrato_publicado_e_o_mesmo_registro_do_router() {
         key(&docs),
         "conjunto de (método, caminho) do meta ≠ do openapi"
     );
+
+    for (method, suffix) in [
+        ("GET", "/local-manifest"), ("POST", "/genesis-imports"),
+        ("POST", "/join-signatures"), ("POST", "/join-requests/{join_request_id}/approve-v2"),
+        ("GET", "/join-requests/{join_request_id}/proof"), ("POST", "/join-validity"),
+        ("POST", "/join-imports"), ("POST", "/join-revocations"),
+        ("POST", "/join-revocation-imports"),
+    ] {
+        let path = format!("/v1/federation{suffix}");
+        assert!(routes.iter().any(|(verb, route, scope)| verb == method && route == &path
+            && scope.as_deref() == Some("federation:admin")), "{method} {path}");
+    }
 
     // Escopo idêntico nas duas leituras.
     for (method, path, scope) in &routes {

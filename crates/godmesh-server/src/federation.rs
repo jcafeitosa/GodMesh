@@ -181,8 +181,7 @@ pub struct JoinRequestView {
     pub approved_at: Option<i64>,
     /// Principal do grant que aprovou, quando aprovado.
     pub approved_by: Option<String>,
-    /// `node_id` do nó que assinou a aprovação (ADR-071 emenda §2). Presente
-    /// exatamente quando `state = "approved"`.
+    /// Signatário da prova v1. Aprovação portátil é consultada em `/proof`.
     pub approved_by_node: Option<String>,
     /// Assinatura Ed25519 do aprovador sobre o certificado (dado público: é o
     /// que qualquer nó da malha re-verifica contra a chave registrada).
@@ -245,13 +244,32 @@ fn new_join_request_id() -> Result<String, ApiError> {
 /// para uma coluna. SQL estático (sem interpolação) em todas as variantes.
 macro_rules! join_query {
     ($tail:expr) => {
+        join_query!("federation_join_request ", $tail)
+    };
+    ($from:expr, $tail:expr) => {
         concat!(
             "SELECT join_request_id, node_id, epoch, manifest::text AS manifest, ",
             "extract(epoch from requested_at)::bigint AS requested_at, ",
             "extract(epoch from approved_at)::bigint AS approved_at, approved_by, ",
             "approved_by_node, approval_signature, approval_epoch, ",
             "extract(epoch from approval_expires_at)::bigint AS approval_expires_at, state ",
-            "FROM federation_join_request ",
+            "FROM ", $from, $tail
+        )
+    };
+}
+
+// O pedido e o certificado legado permanecem intactos. A confirmação v2
+// compõe o estado público com o carimbo da decisão e deixa a prova em /proof.
+macro_rules! visible_join_query {
+    ($tail:expr) => {
+        join_query!(
+            "(SELECT r.join_request_id, r.node_id, r.epoch, r.manifest, r.requested_at,
+                     COALESCE(r.approved_at, to_timestamp(d.decided_at::double precision)) AS approved_at,
+                     COALESCE(r.approved_by, d.approved_by) AS approved_by,
+                     r.approved_by_node, r.approval_signature, r.approval_epoch, r.approval_expires_at,
+                     CASE WHEN d.join_request_id IS NULL THEN r.state ELSE 'approved' END AS state
+                FROM federation_join_request r LEFT JOIN federation_portable_decisions d USING (join_request_id)
+             ) AS visible ",
             $tail
         )
     };
@@ -336,7 +354,7 @@ pub async fn submit_join_request(
     let created = inserted.is_some();
     // Se o INSERT não criou nada, o pedido daquela geração já existe: devolve o
     // mesmo registro, sem reescrever `requested_at` nem a decisão já tomada.
-    let row = sqlx::query(join_query!("WHERE node_id = $1 AND epoch = $2"))
+    let row = sqlx::query(visible_join_query!("WHERE node_id = $1 AND epoch = $2"))
         .bind(&manifest.node_id)
         .bind(manifest.epoch as i64)
         .fetch_one(pool)
@@ -362,7 +380,7 @@ pub async fn list_join_requests(
                     "state desconhecido: {state}; use pending, approved, rejected ou expired"
                 )));
             }
-            sqlx::query(join_query!(
+            sqlx::query(visible_join_query!(
                 "WHERE state = $1 ORDER BY requested_at DESC, join_request_id"
             ))
             .bind(state)
@@ -370,7 +388,7 @@ pub async fn list_join_requests(
             .await?
         }
         None => {
-            sqlx::query(join_query!("ORDER BY requested_at DESC, join_request_id"))
+            sqlx::query(visible_join_query!("ORDER BY requested_at DESC, join_request_id"))
                 .fetch_all(pool)
                 .await?
         }
@@ -655,6 +673,11 @@ pub async fn approve_join_request(
         .ok_or(ApiError::JoinRequestNotFound)?;
     let request = join_view(&row)?;
     config.require_enabled(&request.manifest.cluster)?;
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM federation_portable_decisions WHERE join_request_id = $1)",
+    ).bind(join_request_id).fetch_one(&mut *tx).await? {
+        return Err(ApiError::FederationGovernanceDisabled);
+    }
 
     let mut nodes = [certificate.node_id.as_str(), request.node_id.as_str()];
     nodes.sort_unstable();
@@ -815,6 +838,11 @@ pub async fn reject_join_request(
     let request = join_view(&row)?;
 
     config.require_enabled(&request.manifest.cluster)?;
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM federation_portable_decisions WHERE join_request_id = $1)",
+    ).bind(join_request_id).fetch_one(&mut *tx).await? {
+        return Err(ApiError::FederationGovernanceDisabled);
+    }
     lock_decision_node(&mut tx, &certificate.node_id).await?;
     let (_, decision_epoch) = verify_approval_certificate(
         &mut tx,
