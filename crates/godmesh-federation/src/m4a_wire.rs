@@ -283,7 +283,7 @@ fn validate_message(message: &Message<'_>) -> Result<(), WireError> {
     Ok(())
 }
 
-fn validate_event(frame: &[u8]) -> Result<(), WireError> {
+fn decode_event(frame: &[u8]) -> Result<SignedEvent, WireError> {
     #[derive(Deserialize)]
     struct EventShape<'a> {
         #[serde(borrow)]
@@ -304,7 +304,7 @@ fn validate_event(frame: &[u8]) -> Result<(), WireError> {
     if !(1..=i64::MAX as u64).contains(&event.position.seq) {
         return Err(WireError::InvalidField("seq"));
     }
-    Ok(())
+    Ok(event)
 }
 
 fn event_slices(array: &RawValue) -> Result<Vec<&[u8]>, WireError> {
@@ -328,7 +328,7 @@ fn event_slices(array: &RawValue) -> Result<Vec<&[u8]>, WireError> {
         let end = parser.byte_offset();
         let delimiter = trim_start(&rest[end..]);
         let item = &rest[..rest.len() - delimiter.len()];
-        validate_event(item)?;
+        decode_event(item)?;
         events.push(item);
         if delimiter == b"]" {
             return Ok(events);
@@ -403,7 +403,7 @@ fn encode_batch(batch: &Batch<'_>, local_frame_bytes: NonZeroU32) -> Result<Vec<
         .ok_or(WireError::LimitExceeded)?;
     check_len(full_len, limit)?;
     for (index, event) in batch.events.iter().enumerate() {
-        validate_event(event)?;
+        decode_event(event)?;
         if index != 0 {
             body.push(b',');
         }
@@ -436,7 +436,8 @@ pub fn encode_body(
 /// Confere a resposta contra o Pull da mesma stream e o tamanho do JSON recebido.
 ///
 /// # Errors
-/// Recusa correlação divergente, mínimos incorretos ou limites excedidos.
+/// Recusa correlação divergente, mínimos incorretos, limites excedidos ou posições
+/// fora do namespace e da sequência contígua esperada.
 pub fn validate_batch(pull: &Pull, batch: &Batch<'_>, body_len: usize) -> Result<(), WireError> {
     if batch.request_id != pull.request_id
         || batch.namespace != pull.namespace
@@ -453,7 +454,26 @@ pub fn validate_batch(pull: &Pull, batch: &Batch<'_>, body_len: usize) -> Result
         return Err(WireError::InvalidField("has_more"));
     }
     check_len(body_len, limits.frame_bytes)?;
-    check_events(&batch.events, limits)
+    check_events(&batch.events, limits)?;
+    let mut seq = pull.after_seq;
+    for frame in &batch.events {
+        let event = decode_event(frame)?;
+        let position = event.position;
+        let namespace = &pull.namespace;
+        if position.origin_node != namespace.origin_node
+            || event.tenant_id != namespace.tenant_id
+            || position.stream_id != namespace.stream_id
+            || i32::try_from(position.partition).ok() != Some(namespace.partition)
+            || i64::try_from(position.authority_epoch).ok() != Some(namespace.authority_epoch)
+        {
+            return Err(WireError::CorrelationMismatch);
+        }
+        seq = seq.checked_add(1).ok_or(WireError::InvalidField("seq"))?;
+        if i64::try_from(position.seq).ok() != Some(seq) {
+            return Err(WireError::InvalidField("seq"));
+        }
+    }
+    Ok(())
 }
 
 /// Confere o ACK contra a requisição e a última sequência enviada na stream.
