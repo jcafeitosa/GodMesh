@@ -4,6 +4,7 @@ mod tests;
 
 mod admission;
 mod quotas;
+mod scheduling;
 
 pub use admission::{Registry, RelayAdmission, Route, RouteInstance, normalize_endpoint};
 pub use quotas::{Direction, MAX_CONTROL_BYTES, MAX_DATAGRAM_BYTES, Probe, SendCredit, Usage};
