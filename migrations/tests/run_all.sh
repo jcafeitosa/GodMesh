@@ -17,6 +17,7 @@
 #   migrations/0013_federation_config_bundle.sql
 #   migrations/0014_federation_replication.sql
 #   migrations/0015_federation_replica_resume.sql
+#   migrations/0016_federation_snapshot_receipt.sql
 # depois roda todos os `*_invariants.sql` e falha (exit != 0) se algum bloco
 # `NOTICE: OK` esperado não aparecer.
 #
@@ -93,6 +94,8 @@ aplicar "$raiz/migrations/0013_federation_config_bundle.sql"
 aplicar "$raiz/migrations/0014_federation_replication.sql"
 
 aplicar "$raiz/migrations/0015_federation_replica_resume.sql"
+
+aplicar "$raiz/migrations/0016_federation_snapshot_receipt.sql"
 
 if [ -n "$sabotagem" ]; then
     [ -f "$sabotagem" ] || { echo "erro: sabotagem inexistente: $sabotagem" >&2; exit 2; }
@@ -230,6 +233,12 @@ verificar "$tests/0015_invariants.sql" \
     "OK 2: suspensão referencia reserva sem criar checkpoint" \
     "OK 3: suspensão exige destino exato da reserva" \
     "OK 4: suspensão exige sequência positiva"
+
+verificar "$tests/0016_invariants.sql" \
+    "OK 1: 0016 semeia zero políticas e comprovantes" \
+    "OK 2: mesmo corte não pode ganhar segundo comprovante" \
+    "OK 3: comprovante vincula identidade local exata" \
+    "OK 4: versão histórica de comprovante imutável"
 
 rm -f "$saida"
 
