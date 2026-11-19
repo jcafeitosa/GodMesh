@@ -9,7 +9,7 @@ use super::contract::{Access, ParamSpec, Registry, RouteDoc, Schema};
 use super::{created_status, AppState, ApiErrorResponse};
 use crate::api::ApiError;
 use crate::auth::{Scope, VerifiedGrant};
-use crate::events::{create_event, list_events, EventAck, EventPage, EventQuery};
+use crate::events::{create_event_with_portable, list_events, EventAck, EventPage, EventQuery};
 use godmesh_federation::SignedEvent;
 use godmesh_federation::now_unix;
 
@@ -79,7 +79,16 @@ pub(super) async fn post_event(
     // 201 na posição nova, 200 na repetição idempotente da mesma posição. O ACK
     // nunca passa de `persisted_local` (ADR-058). A janela de frescor usa o
     // relógio do processo; o caso de uso aceita `now` injetável para teste.
-    match create_event(&state.pool, &grant, event, &state.event_window, now_unix()).await {
+    match create_event_with_portable(
+        &state.pool,
+        &grant,
+        event,
+        &state.event_window,
+        now_unix(),
+        state.portable.as_deref(),
+    )
+    .await
+    {
         Ok(outcome) => Ok((created_status(outcome.created), Json(outcome.response))),
         Err(e) => Err(ApiErrorResponse::from(e)),
     }

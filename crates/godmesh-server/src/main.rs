@@ -63,20 +63,26 @@
 
 #![forbid(unsafe_code)]
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use godmesh_federation::link::LinkState;
-use godmesh_federation::node::{FederationConfig, FederationNode};
+use godmesh_federation::node::{
+    FederationConfig, FederationNode, LinkAuthorizationError, LinkAuthorizer, LinkIdentity,
+    LinkPermit,
+};
 use godmesh_federation::peer::PeerRegistry;
 use godmesh_federation::NodeIdentity;
 use godmesh_host::collect::{Collector, SharedSnapshot};
 use godmesh_server::admission::AdmissionConfig;
 use godmesh_server::auth::GrantRegistry;
 use godmesh_server::http::HostTelemetry;
+use godmesh_server::portable_join::{PortableJoin, PortableJoinConfig, PortableJoinError};
 use godmesh_server::publisher::{OutboxConfig, Publisher};
 use godmesh_server::{federation, migrate, runtime};
 use godmesh_sync::pg_outbox::{PgOutbox, PgSink};
@@ -169,6 +175,7 @@ enum Mode {
         admission: Box<AdmissionConfig>,
         /// Bootstrap de confiança e governança de ingresso validados no boot.
         decisions: Arc<godmesh_server::federation::DecisionConfig>,
+        portable: Option<Box<PortableJoinConfig>>,
     },
 }
 
@@ -215,6 +222,9 @@ impl Config {
                     .map_err(|e| format!("configuração da telemetria de host: {e}"))?;
                 let decisions = Arc::new(godmesh_server::federation::DecisionConfig::from_env()?);
                 let federation = federation_runtime_from_env()?;
+                let portable = PortableJoinConfig::from_env()
+                    .map_err(|error| error.to_string())?
+                    .map(Box::new);
                 // O portão de abuso valida o ambiente na subida: tetos
                 // inválidos derrubam o processo (EX_CONFIG) em vez de virar
                 // default silencioso servindo tráfego.
@@ -228,6 +238,7 @@ impl Config {
                     federation: Box::new(federation),
                     admission: Box::new(admission),
                     decisions,
+                    portable,
                 }
             }
         };
@@ -376,6 +387,72 @@ fn main() -> ExitCode {
     }
 }
 
+/// Liga a autoridade do PostgreSQL às decisões locais de enlace.
+struct PortableLinkAuthorizer(Arc<PortableJoin>);
+
+impl LinkAuthorizer for PortableLinkAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        local: &'a LinkIdentity,
+        remote: &'a LinkIdentity,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkPermit, LinkAuthorizationError>> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.cluster() != local.cluster || local.cluster != remote.cluster {
+                return Err(LinkAuthorizationError::Denied);
+            }
+            let mut transaction = self
+                .0
+                .pool()
+                .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+                .await
+                .map_err(|_| LinkAuthorizationError::Unavailable)?;
+            let local_expiry = self
+                .0
+                .authorize_local(&mut transaction)
+                .await
+                .map_err(link_authorization_error)?;
+            let remote_expiry = self
+                .0
+                .authorize_peer(&mut transaction, &remote.node_id, &hex::encode(remote.public_key))
+                .await
+                .map_err(link_authorization_error)?;
+            let expires_at = [local_expiry, remote_expiry]
+                .into_iter()
+                .flatten()
+                .min()
+                .map(monotonic_lease_deadline)
+                .transpose()?;
+            // O crate aplica a decisão com a transação ainda protegendo o cluster.
+            Ok(LinkPermit::new(Box::new(transaction), expires_at))
+        })
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.trust_changes()
+    }
+}
+
+fn link_authorization_error(error: PortableJoinError) -> LinkAuthorizationError {
+    match error {
+        PortableJoinError::Storage(_) => LinkAuthorizationError::Unavailable,
+        _ => LinkAuthorizationError::Denied,
+    }
+}
+
+fn monotonic_lease_deadline(expires_at: i64) -> Result<Instant, LinkAuthorizationError> {
+    let seconds = u64::try_from(expires_at).map_err(|_| LinkAuthorizationError::Denied)?;
+    let wall_deadline = UNIX_EPOCH
+        .checked_add(Duration::from_secs(seconds))
+        .ok_or(LinkAuthorizationError::Denied)?;
+    let monotonic_now = Instant::now();
+    let remaining = wall_deadline
+        .duration_since(SystemTime::now())
+        .map_err(|_| LinkAuthorizationError::Denied)?;
+    monotonic_now
+        .checked_add(remaining)
+        .ok_or(LinkAuthorizationError::Denied)
+}
+
 /// Conecta, migra, e serve até receber sinal de término (ou só migra).
 async fn run(config: Config) -> Result<(), String> {
     let pool = PgPoolOptions::new()
@@ -409,6 +486,7 @@ async fn run(config: Config) -> Result<(), String> {
         federation,
         admission,
         decisions,
+        portable,
     } = config.mode
     else {
         pool.close().await;
@@ -419,6 +497,12 @@ async fn run(config: Config) -> Result<(), String> {
         listener: federation_listener,
         peers_refresh,
     } = *federation;
+    PortableJoin::preflight(&pool, portable.as_deref())
+        .await
+        .map_err(|error| format!("preflight do ingresso portátil: {error}"))?;
+    let identity = Arc::new(identity);
+    let portable = portable
+        .map(|policy| Arc::new(PortableJoin::new(*policy, pool.clone(), Arc::clone(&identity))));
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
@@ -470,11 +554,15 @@ async fn run(config: Config) -> Result<(), String> {
                 .await
                 .map_err(|e| format!("registro de pares indisponível: {e:?}"))?;
             registry.replace(peers);
-            let node = FederationNode::bind(
+            let authorizer = portable.as_ref().map(|service| {
+                Arc::new(PortableLinkAuthorizer(Arc::clone(service))) as Arc<dyn LinkAuthorizer>
+            });
+            let node = FederationNode::bind_with_authorizer(
                 identity,
                 listener_config,
                 Arc::clone(&registry),
                 listener_bind,
+                authorizer,
             )
             .map_err(|e| format!("listener de federação não abriu: {e}"))?;
             let addr = node
@@ -538,7 +626,7 @@ async fn run(config: Config) -> Result<(), String> {
     // responde `unknown` — não "saúde" por omissão. Sem coletor de host o
     // `/metrics` declararia `source="none"`; aqui há coletor de verdade.
     let federation_links = runtime_federation.as_ref().map(|node| node.links());
-    let app = godmesh_server::http::router_runtime_with_host(
+    let app = godmesh_server::http::router_runtime_with_portable(
         pool.clone(),
         grants,
         federation_links,
@@ -546,6 +634,7 @@ async fn run(config: Config) -> Result<(), String> {
         outbox.enabled,
         HostTelemetry::new(host_snapshot.clone(), host.stale_after()),
         decisions,
+        portable,
     );
     let served = runtime::serve(listener, app, pool.clone(), async move {
         let _ = encerrar.changed().await;

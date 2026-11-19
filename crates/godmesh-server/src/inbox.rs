@@ -194,6 +194,7 @@ pub async fn receive_batch(
         tenant_id,
         &anchor.stream_id,
         partition,
+        None,
     )
     .await?;
     let jurisdiction = resolve_jurisdiction(&mut tx, tenant_id).await?;

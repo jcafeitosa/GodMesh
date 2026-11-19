@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::api::ApiError;
+use crate::portable_join::{PortableJoin, PortableJoinError};
 use crate::auth::VerifiedGrant;
 
 /// Perfil de schema declarado no cursor. Não é negociação de wire: é a marca
@@ -197,6 +198,22 @@ pub async fn create_event(
     window: &EventWindow,
     now: i64,
 ) -> Result<EventOutcome, ApiError> {
+    create_event_with_portable(pool, grant, event, window, now, None).await
+}
+
+/// Ingere um evento com a política portátil do cluster anexada quando configurada.
+///
+/// # Errors
+/// Os mesmos de [create_event]. Um nó local ou par inelegível no cluster
+/// portátil retorna [ApiError::EventNodeUnauthorized].
+pub async fn create_event_with_portable(
+    pool: &PgPool,
+    grant: &VerifiedGrant,
+    event: SignedEvent,
+    window: &EventWindow,
+    now: i64,
+    portable: Option<&PortableJoin>,
+) -> Result<EventOutcome, ApiError> {
     grant.validate().map_err(ApiError::InvalidCredential)?;
 
     match grant.predicate.evaluate() {
@@ -239,6 +256,7 @@ pub async fn create_event(
         tenant_id,
         &event.position.stream_id,
         partition,
+        portable,
     )
     .await?;
 
@@ -246,14 +264,14 @@ pub async fn create_event(
     // por ingresso (migração 0008). O envelope não carrega `public_key`: trazê-
     // la no corpo abriria um canal de troca de identidade que a assinatura não
     // fecha — quem apresenta a chave decidiria quem é.
-    let peer: Option<(String, String)> = sqlx::query_as(
-        "SELECT public_key, trust_state FROM federation_peer WHERE node_id = $1 FOR SHARE",
+    let peer: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT public_key, trust_state, cluster FROM federation_peer WHERE node_id = $1 FOR SHARE",
     )
     .bind(&event.node_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(ApiError::Storage)?;
-    let Some((public_key, trust_state)) = peer else {
+    let Some((public_key, trust_state, cluster)) = peer else {
         return Err(ApiError::EventNodeUnauthorized(format!(
             "nó {} não tem chave registrada na federação",
             event.node_id
@@ -270,6 +288,17 @@ pub async fn create_event(
             "nó {} está em estado {trust_state}; só nó autorizado escreve no log durável",
             event.node_id
         )));
+    }
+
+    if let Some(service) = portable.filter(|service| service.cluster() == cluster) {
+        service
+            .authorize_local(&mut tx)
+            .await
+            .map_err(portable_event_error)?;
+        service
+            .authorize_peer(&mut tx, &event.node_id, &public_key)
+            .await
+            .map_err(portable_event_error)?;
     }
 
     // Tenancy: o tenant assinado no envelope é conferido contra o grant.
@@ -678,12 +707,19 @@ pub(crate) async fn begin_event_write(
     tenant_id: &str,
     stream_id: &str,
     partition: i32,
+    portable: Option<&PortableJoin>,
 ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, ApiError> {
     // A primeira leitura após esperar pelo lock precisa de um snapshot novo.
     let mut tx = pool
         .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
         .await
         .map_err(ApiError::Storage)?;
+    if let Some(service) = portable {
+        service
+            .lock_cluster(&mut tx)
+            .await
+            .map_err(portable_event_error)?;
+    }
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended( \
             jsonb_build_array('godmesh.event_position'::text, $1::text, $2::text, \
@@ -697,6 +733,15 @@ pub(crate) async fn begin_event_write(
     .await
     .map_err(ApiError::Storage)?;
     Ok(tx)
+}
+
+fn portable_event_error(error: PortableJoinError) -> ApiError {
+    match error {
+        PortableJoinError::Storage(error) => ApiError::Storage(error),
+        _ => ApiError::EventNodeUnauthorized(
+            "a prova portátil do nó local ou do signatário não autoriza a ingestão".to_owned(),
+        ),
+    }
 }
 
 /// Maior `p` tal que todo `1..=p` existe neste namespace — o prefixo contíguo.
