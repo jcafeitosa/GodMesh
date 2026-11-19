@@ -592,8 +592,25 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
         gated.checkpoint(a_peer, deadline()).await.unwrap(),
         ReceiverState::Ready { after_seq: 2 }
     );
+    gated
+        .apply_copy(
+            a_peer,
+            Limits::new(12, 4096, 16_384).unwrap(),
+            &frames[2..],
+            deadline(),
+        )
+        .await
+        .unwrap();
     drop(local_b);
-    let (local_b, gated) = local(&b, binding).await;
+    let gate = AdmissionGate::new(binding).unwrap();
+    let gated = Arc::new(
+        b.boot()
+            .await
+            .unwrap()
+            .with_clock(clock.clone())
+            .with_restore_gate(gate.clone()),
+    );
+    let local_b = LocalRestore::new(gated.clone(), gate).unwrap();
     assert!(matches!(
         gated.checkpoint(a_peer, deadline()).await,
         Err(EffectError::RestoreClosed)
@@ -601,6 +618,25 @@ async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
     assert_eq!(
         local_b.boot_closed(&observed, deadline()).await.unwrap(),
         LocalPhase::ReconciledClosed
+    );
+    local_b
+        .opening_candidate(a_peer, &high, &observed, deadline())
+        .await
+        .unwrap();
+    local_b
+        .open(
+            a_peer,
+            &high,
+            &observed,
+            &promotion,
+            observed.opening_origin().unwrap(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        gated.checkpoint(a_peer, deadline()).await.unwrap(),
+        ReceiverState::Ready { after_seq: 3 }
     );
     local_b.retire(deadline()).await.unwrap();
     assert!(matches!(

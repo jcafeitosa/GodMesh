@@ -59,6 +59,12 @@ pub async fn capture_gap(
     Ok(snapshot_harness::capture_range(svc, signer, peer, range, window, policy, deadline).await?)
 }
 
+#[derive(Clone, Copy)]
+enum PrefixCheck<'a> {
+    Exact(&'a OriginObservation),
+    Opening(&'a OriginObservation),
+}
+
 impl LocalRestore {
     #[allow(
         clippy::too_many_arguments,
@@ -114,7 +120,7 @@ impl LocalRestore {
             }
             if row.phase == LocalPhase::ReconciledClosed {
                 return Ok(self
-                    .prove(guard, peer, evidence, origin, now, &row)
+                    .prove(guard, peer, evidence, PrefixCheck::Exact(origin), now, &row)
                     .await?
                     .reconciliation);
             }
@@ -198,7 +204,8 @@ impl LocalRestore {
         self.service
             .transact_restore(deadline, async |guard, now| {
                 let row = local::load(guard.connection(), self.binding()).await?;
-                self.prove(guard, peer, evidence, origin, now, &row).await
+                self.prove(guard, peer, evidence, PrefixCheck::Exact(origin), now, &row)
+                    .await
             })
             .await
     }
@@ -214,7 +221,19 @@ impl LocalRestore {
         let origin = observed.opening_origin().ok_or(Error::Incomplete)?;
         let decision = observed.decision.ok_or(Error::Incomplete)?;
         let candidate = self
-            .promotion_candidate(peer, evidence, origin, deadline)
+            .service
+            .transact_restore(deadline, async |guard, now| {
+                let row = local::load(guard.connection(), self.binding()).await?;
+                self.prove(
+                    guard,
+                    peer,
+                    evidence,
+                    PrefixCheck::Opening(origin),
+                    now,
+                    &row,
+                )
+                .await
+            })
             .await?;
         if candidate.authorization != Some(decision.authorization)
             || candidate.reconciliation.digest()? != decision.reconciliation
@@ -243,7 +262,9 @@ impl LocalRestore {
                     return Err(Error::Incomplete);
                 }
                 let row = local::load(guard.connection(), self.binding()).await?;
-                let mut candidate = self.prove(guard, peer, evidence, origin, now, &row).await?;
+                let mut candidate = self
+                    .prove(guard, peer, evidence, PrefixCheck::Exact(origin), now, &row)
+                    .await?;
                 if candidate.reconciliation.digest()? != p.reconciliation_sha256 {
                     return Err(Error::Conflict);
                 }
@@ -290,7 +311,16 @@ impl LocalRestore {
                 if row.authorization != Some(decision.authorization) {
                     return Err(Error::Conflict);
                 }
-                let result = self.prove(guard, peer, evidence, origin, now, &row).await?;
+                let result = self
+                    .prove(
+                        guard,
+                        peer,
+                        evidence,
+                        PrefixCheck::Opening(origin),
+                        now,
+                        &row,
+                    )
+                    .await?;
                 if result.reconciliation.digest()? != decision.reconciliation {
                     return Err(Error::Conflict);
                 }
@@ -319,7 +349,7 @@ impl LocalRestore {
         guard: &mut ClusterGuard<'_, '_>,
         peer: SessionPeer<'_>,
         evidence: &VerifiedHighWater,
-        origin: &OriginObservation,
+        check: PrefixCheck<'_>,
         now: i64,
         row: &local::LocalRow,
     ) -> Result<PromotionCandidate, Error> {
@@ -336,7 +366,10 @@ impl LocalRestore {
         let svc = &self.service;
         check_key(svc, &mark.key, peer)?;
         let authority = svc.authority(peer, svc.local_limits())?;
-        let (control, valid_until) = controls::target(
+        let origin = match check {
+            PrefixCheck::Exact(origin) | PrefixCheck::Opening(origin) => origin,
+        };
+        let (mut control, valid_until) = controls::target(
             svc,
             guard,
             &mark.key,
@@ -347,9 +380,14 @@ impl LocalRestore {
         )
         .await?;
         available(&control)?;
-        if control.prefix != mark.cut_prefix {
+        if control.prefix < mark.cut_prefix
+            || (matches!(check, PrefixCheck::Exact(_)) && control.prefix != mark.cut_prefix)
+        {
             return Err(Error::Incomplete);
         }
+        // O comprovante anterior vincula a faixa até o corte. O checkpoint
+        // corrente pode ter avançado após a abertura e nunca é regravado aqui.
+        control.prefix = mark.cut_prefix;
         let digest = self
             .verify_prefix(guard, authority, evidence, control.prefix, now)
             .await?;
