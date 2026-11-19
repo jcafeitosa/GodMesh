@@ -1,0 +1,13 @@
+# M4-A2 — transporte da réplica de metadados
+
+A coordenação aprova o [wire M4-A2 v0.3](../../08-specs/federacao/m4-a2-replica-quic.md) no SHA-256 `be34dd612ff93075ddaf644941452755145237c7f932e9f4940c0f614143f9d7` e o [delta de runtime](../../08-specs/federacao/m4-a2-delta-runtime.md) no SHA-256 `267beec97faf622a6b420269e440c3d12651a00f58f0d290a46e46d5a60bed7f`, sob a autorização por fatia da ADR-075. A revisão independente conferiu os contratos e os deltas. A [M3-B2](2026-11-18-m3-b2-integracao-operacional.md#aceite-em-três-instâncias) e a [M4-A1](2026-11-18-m4-a1-persistencia-transacional.md#aceite-da-persistência) são as dependências aceitas.
+
+1. **Mensagens.** Implementar o codec JSON estrito, a correlação da tentativa e a negociação dos três tetos. Preservar cada envelope original incluindo whitespace externo e escapes. Testar limites, truncamento, campos inválidos e a paginação sem salto.
+2. **Sessão QUIC.** Habilitar o dispatcher após promoção operacional, preservando manifesto e heartbeat. Controlar abertura e aceitação de streams, framing, FIN, cotas e cancelamento por sessão. Testar uma stream antecipada e o isolamento de enlaces paralelos.
+3. **Efeitos transacionais.** Obter o mesmo guard M1C e o lock de namespace antes de amostrar o segundo. Revalidar M1C, piso M3 e ACL por efeito, com prazo SQL local. Usar o checkpoint A1 e gravar a suspensão da `0015` quando a próxima prova fica indisponível.
+4. **Runtime.** Validar opt-in, política e reserva antes do bind. Rodar pull por destino e namespace, com uma tentativa em voo, retry limitado e rechecagem de ACL. Emitir ACK `persisted_local` após commit, com retomada pelo checkpoint.
+5. **Aceite.** Testar A/B/C com processos, chaves, bancos e políticas sintéticas próprios. Exercitar perda de ACK, partição, revogação isolada, suspensão após reconexão e reinício, bloqueio M3 e ausência de escrita parcial. Registrar suíte, Clippy, SQL, revisão independente e ensaio do SHA integrado.
+
+Na verificação preparatória, A obteve o registro de autoridade local por `POST /v1/federation/join-requests` (`201`) e aprovação M1B assinada (`200`). Após reiniciar em M1C com a mesma chave e o mesmo banco, o runner autenticou um grant sintético e usou o pin local para autorizar a admissão A1. O evento produziu posição, prova publicada e prefixo em um commit. O ensaio preparatório confirma essa etapa do bootstrap. As verificações de M3 efetiva e cópia no fio ficam no aceite A2.
+
+A fatia usa dados sintéticos, sem dependências novas. Políticas com dados reais e o ensaio em hosts Linux independentes seguem seus gates. A implementação e o aceite operacional da A2 estão pendentes.
