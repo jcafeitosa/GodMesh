@@ -1,0 +1,561 @@
+#[test]
+fn estados_distinguem_cas_de_abertura() {
+    use super::LocalPhase;
+    assert_ne!(LocalPhase::ReconciledClosed, LocalPhase::Open);
+    assert_ne!(LocalPhase::RetiredClosed, LocalPhase::Open);
+}
+
+use super::super::fixture;
+use fixture::{CLASS, CLUSTER, ReceiverFixture, boot_source, deadline, isolated_database};
+
+use godmesh_federation::{
+    NodeIdentity,
+    restore_evidence::{
+        BackupKind, ExpectedHighWater, ExpectedPromotion, Fence, IntentState, RestoreHighWaterV1,
+        RestorePromotionV1, VerifiedHighWater, VerifiedPromotion, verify_high_water,
+        verify_promotion,
+    },
+    snapshot::{SnapshotIdentity, SnapshotLimits, SnapshotPolicy, verify_snapshot},
+};
+use sha2::{Digest, Sha256};
+use std::{num::NonZeroUsize, sync::Arc};
+
+use super::*;
+use crate::{
+    replica_operational::{ReceiverState, snapshot_harness::Window},
+    replication::Limits,
+};
+
+fn identity(id: &NodeIdentity) -> SnapshotIdentity {
+    SnapshotIdentity {
+        node_id: id.node_id().into(),
+        public_key: id.public_key_hex(),
+    }
+}
+fn peer(id: &SnapshotIdentity) -> SessionPeer<'_> {
+    SessionPeer {
+        node_id: &id.node_id,
+        public_key: &id.public_key,
+        protocol: 1,
+    }
+}
+
+fn signed_high(mut body: RestoreHighWaterV1, signer: &NodeIdentity) -> VerifiedHighWater {
+    body.sign(signer).unwrap();
+    verify_high_water(
+        &serde_json::to_vec(&body).unwrap(),
+        NonZeroUsize::new(16_384).unwrap(),
+        &ExpectedHighWater {
+            key: &body.key,
+            target_db_id: &body.target_db_id,
+            fenced_generation: body.fenced_generation,
+            target_generation: body.target_generation,
+            high_water_sha256: body.digest().unwrap(),
+            fence_sha256: body.fence_sha256,
+            harness_public_key: &signer.public_key_hex(),
+        },
+    )
+    .unwrap()
+}
+
+fn signed_promotion(
+    high: &VerifiedHighWater,
+    reconciliation: &godmesh_federation::restore_evidence::Reconciliation,
+    signer: &NodeIdentity,
+) -> VerifiedPromotion {
+    let mark = high.high_water();
+    let mut body = RestorePromotionV1 {
+        version: 1,
+        key: mark.key.clone(),
+        target_db_id: mark.target_db_id.clone(),
+        fenced_generation: mark.fenced_generation,
+        target_generation: mark.target_generation,
+        high_water_sha256: high.digest(),
+        reconciliation_sha256: reconciliation.digest().unwrap(),
+        fence_sha256: mark.fence_sha256,
+        not_before: 100,
+        expires_at: 200,
+        signature: [0; 64],
+    };
+    body.sign(signer).unwrap();
+    verify_promotion(
+        &serde_json::to_vec(&body).unwrap(),
+        NonZeroUsize::new(16_384).unwrap(),
+        &ExpectedPromotion {
+            high_water: high,
+            reconciliation,
+        },
+        110,
+    )
+    .unwrap()
+}
+
+async fn local(f: &ReceiverFixture, binding: Binding) -> (LocalRestore, Arc<ReplicaService>) {
+    let gate = AdmissionGate::new(binding).unwrap();
+    let svc = Arc::new(f.boot().await.unwrap().with_restore_gate(gate.clone()));
+    (LocalRestore::new(svc.clone(), gate).unwrap(), svc)
+}
+
+#[tokio::test]
+async fn restore_corte_fixo_cas_fechado_reinicio_e_cerca_irreversivel() {
+    let Some(a) = ReceiverFixture::new("restore_a").await else {
+        return;
+    };
+    let cut = ReceiverFixture::new_with(
+        "restore_cut",
+        a.origin.clone(),
+        a.receiver.clone(),
+        &a.config.namespace.tenant_id,
+    )
+    .await
+    .unwrap();
+    let b = ReceiverFixture::new_with(
+        "restore_target",
+        a.origin.clone(),
+        a.receiver.clone(),
+        &a.config.namespace.tenant_id,
+    )
+    .await
+    .unwrap();
+    let external = isolated_database("restore_external").await.unwrap();
+    for f in [&cut, &b] {
+        f.reserve().await;
+        sqlx::raw_sql(LOCAL_DDL).execute(&f.pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO federation_snapshot_receipt_policy
+            VALUES ('restore',1,$1,$2,$3,$4,0,7,'BR','snapshot_receipt',60,true)",
+        )
+        .bind(f.receiver.node_id())
+        .bind(f.origin.node_id())
+        .bind(&f.config.namespace.tenant_id)
+        .bind(&f.config.namespace.stream_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::raw_sql(EXTERNAL_DDL)
+        .execute(&external)
+        .await
+        .unwrap();
+    let ext = ExternalStore::new(external).with_clock(Arc::new(|| 110));
+    let policy = SnapshotPolicy {
+        cluster: CLUSTER.into(),
+        origin: identity(&a.origin),
+        destination: identity(&b.receiver),
+        tenant_id: a.config.namespace.tenant_id.clone(),
+        stream_id: a.config.namespace.stream_id.clone(),
+        partition: 0,
+        authority_epoch: 7,
+        retention_class: CLASS.into(),
+        limits: SnapshotLimits {
+            max_package_bytes: 16_384.try_into().unwrap(),
+            max_manifest_bytes: 4096.try_into().unwrap(),
+            max_event_bytes: 4096.try_into().unwrap(),
+            max_events: 12.try_into().unwrap(),
+        },
+    };
+    let key = RestoreKey {
+        fixture_id: "22".repeat(16),
+        cluster: policy.cluster.clone(),
+        local_node: policy.destination.node_id.clone(),
+        origin_node: policy.origin.node_id.clone(),
+        tenant_id: policy.tenant_id.clone(),
+        stream_id: policy.stream_id.clone(),
+        partition: 0,
+        authority_epoch: 7,
+    };
+    let frames: Vec<_> = (1..=3)
+        .map(|seq| [b" \t".to_vec(), a.frame(seq), b"\n".to_vec()].concat())
+        .collect();
+    let source = boot_source(
+        &a,
+        Arc::new(NodeIdentity::generate_in_memory().unwrap()),
+        &frames,
+    )
+    .await;
+    let a_peer = peer(&policy.origin);
+    let b_peer = peer(&policy.destination);
+    let first = Binding {
+        key: key.clone(),
+        generation: 1,
+        target_db_id: allocation_id(&cut.pool).await.unwrap(),
+        high_water_sha256: [11; 32],
+        fence_sha256: [12; 32],
+    };
+    ext.seed(&first, deadline()).await.unwrap();
+    let seeded = ext.observe(&key, deadline()).await.unwrap();
+    let (old, old_service) = local(&cut, first.clone()).await;
+    old.boot_initial(&seeded, deadline()).await.unwrap();
+    old_service
+        .apply_copy(
+            a_peer,
+            Limits::new(12, 4096, 16_384).unwrap(),
+            &frames[..2],
+            deadline(),
+        )
+        .await
+        .unwrap();
+    old.retire(deadline()).await.unwrap();
+    assert!(matches!(
+        old.boot_initial(&seeded, deadline()).await,
+        Err(Error::Retired)
+    ));
+    assert!(matches!(
+        old_service.checkpoint(a_peer, deadline()).await,
+        Err(EffectError::RestoreClosed)
+    ));
+    let a_observed = observe_origin(&source, &key, b_peer, deadline())
+        .await
+        .unwrap();
+    let fixed = observe_cut(&old_service, &key, 1, a_peer, &a_observed, 0, deadline())
+        .await
+        .unwrap();
+    assert_eq!(fixed.control.prefix, 2);
+    let fence = Fence {
+        key: key.clone(),
+        fenced_generation: 1,
+        cut_db_id: first.target_db_id.clone(),
+        target_db_id: allocation_id(&b.pool).await.unwrap(),
+        old_login: "fixture_old".into(),
+        admission_closed: true,
+        nologin_confirmed: true,
+        grants_removed: true,
+        remaining_sessions: 0,
+        unknown_effects: 0,
+        fenced_at: 109,
+    };
+    let artifact = BackupArtifact {
+        bytes: 7,
+        sha256: Sha256::digest(b"fixture").into(),
+    };
+    let high_body = RestoreHighWaterV1 {
+        version: 1,
+        key: key.clone(),
+        backup_db_id: first.target_db_id.clone(),
+        target_db_id: fence.target_db_id.clone(),
+        backup_generation: 1,
+        fenced_generation: 1,
+        target_generation: 2,
+        backup_kind: BackupKind::BeforeCut,
+        backup_bytes: artifact.bytes,
+        backup_sha256: artifact.sha256,
+        backup_prefix: 0,
+        cut_prefix: 2,
+        backup_proof_count: 0,
+        backup_proofs_sha256: fixed.backup_proofs_sha256,
+        gap_proof_count: 2,
+        gap_proofs_sha256: fixed.gap_proofs_sha256,
+        control_state_sha256: fixed.control.digest().unwrap(),
+        blocked_next_seq: 0,
+        intent_state: IntentState::Absent,
+        attempt_id: 0,
+        fence_sha256: fence.digest().unwrap(),
+        cut_at: fixed.cut_at,
+        signature: [0; 64],
+    };
+    let signer = NodeIdentity::generate_in_memory().unwrap();
+    let mut suspended = high_body.clone();
+    suspended.blocked_next_seq = 3;
+    let suspended = signed_high(suspended, &signer);
+    assert!(matches!(
+        capture_gap(
+            &source,
+            &a.origin,
+            b_peer,
+            &suspended,
+            Window {
+                not_before: 100,
+                expires_at: 190
+            },
+            &policy,
+            deadline()
+        )
+        .await,
+        Err(Error::Incomplete)
+    ));
+    let mut pending = high_body.clone();
+    pending.intent_state = IntentState::Pending;
+    pending.attempt_id = 9;
+    let pending = signed_high(pending, &signer);
+    assert!(matches!(
+        capture_gap(
+            &source,
+            &a.origin,
+            b_peer,
+            &pending,
+            Window {
+                not_before: 100,
+                expires_at: 190
+            },
+            &policy,
+            deadline()
+        )
+        .await,
+        Err(Error::Incomplete)
+    ));
+    let high = signed_high(high_body, &signer);
+    let binding = Binding::from_high_water(&high).unwrap();
+    ext.publish(&high, &fence, deadline()).await.unwrap();
+    let observed = ext
+        .record_origin(&binding, &a_observed, deadline())
+        .await
+        .unwrap();
+    let (local_b, gated) = local(&b, binding.clone()).await;
+    assert_eq!(
+        local_b.boot_closed(&observed, deadline()).await.unwrap(),
+        LocalPhase::RestoreClosed
+    );
+    assert!(matches!(
+        gated.checkpoint(a_peer, deadline()).await,
+        Err(EffectError::RestoreClosed)
+    ));
+    let package = capture_gap(
+        &source,
+        &a.origin,
+        b_peer,
+        &high,
+        Window {
+            not_before: 100,
+            expires_at: 190,
+        },
+        &policy,
+        deadline(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(verify_snapshot(&package, &policy).unwrap().cut(), (0, 2));
+    assert_eq!(
+        verify_snapshot(&package, &policy).unwrap().events(),
+        &frames[..2]
+    );
+    sqlx::query(
+        "INSERT INTO federation_replica_resume_block
+        (local_node,origin_node,tenant_id,stream_id,partition,authority_epoch,blocked_next_seq)
+        VALUES ($1,$2,$3,$4,0,7,1)",
+    )
+    .bind(&key.local_node)
+    .bind(&key.origin_node)
+    .bind(&key.tenant_id)
+    .bind(&key.stream_id)
+    .execute(&b.pool)
+    .await
+    .unwrap();
+    assert!(
+        local_b
+            .reconcile(
+                a_peer,
+                &high,
+                &observed,
+                &a_observed,
+                artifact,
+                Some((&package, &policy)),
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT blocked_next_seq FROM federation_replica_resume_block"
+        )
+        .fetch_one(&b.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    sqlx::query("DELETE FROM federation_replica_resume_block")
+        .execute(&b.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO federation_snapshot_intent_marker
+        (local_node,origin_node,tenant_id,stream_id,partition,authority_epoch) VALUES ($1,$2,$3,$4,0,7)")
+        .bind(&key.local_node).bind(&key.origin_node).bind(&key.tenant_id).bind(&key.stream_id)
+        .execute(&b.pool).await.unwrap();
+    assert!(
+        local_b
+            .reconcile(
+                a_peer,
+                &high,
+                &observed,
+                &a_observed,
+                artifact,
+                Some((&package, &policy)),
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM federation_snapshot_intent_marker")
+            .fetch_one(&b.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT prefix FROM federation_replica_checkpoint")
+            .fetch_one(&b.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("DELETE FROM federation_snapshot_intent_marker")
+        .execute(&b.pool)
+        .await
+        .unwrap();
+    let mut damaged = package.clone();
+    *damaged.last_mut().unwrap() ^= 1;
+    assert!(
+        local_b
+            .reconcile(
+                a_peer,
+                &high,
+                &observed,
+                &a_observed,
+                artifact,
+                Some((&damaged, &policy)),
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        local_b.phase(deadline()).await.unwrap(),
+        LocalPhase::RestoreClosed
+    );
+    let result = local_b
+        .reconcile(
+            a_peer,
+            &high,
+            &observed,
+            &a_observed,
+            artifact,
+            Some((&package, &policy)),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.final_prefix, 2);
+    assert_eq!(
+        local_b.phase(deadline()).await.unwrap(),
+        LocalPhase::ReconciledClosed
+    );
+    sqlx::query("UPDATE federation_restore_local SET final_prefix=3")
+        .execute(&b.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        local_b
+            .promotion_candidate(a_peer, &high, &a_observed, deadline())
+            .await,
+        Err(Error::Conflict)
+    ));
+    sqlx::query("UPDATE federation_restore_local SET final_prefix=2")
+        .execute(&b.pool)
+        .await
+        .unwrap();
+    let promotion = signed_promotion(&high, &result, &signer);
+    let candidate = local_b
+        .promotion_candidate(a_peer, &high, &a_observed, deadline())
+        .await
+        .unwrap();
+    assert!(matches!(
+        ext.consume(&promotion, &candidate, deadline()).await,
+        Err(Error::Conflict)
+    ));
+    let mut mismatched = a_observed.clone();
+    mismatched.0.m3.version += 1;
+    assert!(
+        local_b
+            .prepare_promotion(a_peer, &high, &promotion, &mismatched, deadline())
+            .await
+            .is_err()
+    );
+    let candidate = local_b
+        .prepare_promotion(a_peer, &high, &promotion, &a_observed, deadline())
+        .await
+        .unwrap();
+    ext.consume(&promotion, &candidate, deadline())
+        .await
+        .unwrap();
+    ext.consume(&promotion, &candidate, deadline())
+        .await
+        .unwrap();
+    assert!(matches!(
+        gated.checkpoint(a_peer, deadline()).await,
+        Err(EffectError::RestoreClosed)
+    ));
+    drop(local_b);
+
+    let observed = ext.observe(&key, deadline()).await.unwrap();
+    let (local_b, gated) = local(&b, binding.clone()).await;
+    local_b.boot_closed(&observed, deadline()).await.unwrap();
+    assert!(
+        local_b
+            .open(
+                a_peer,
+                &high,
+                &observed,
+                &promotion,
+                &mismatched,
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    local_b
+        .open(
+            a_peer,
+            &high,
+            &observed,
+            &promotion,
+            observed.origin().unwrap(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        gated.checkpoint(a_peer, deadline()).await.unwrap(),
+        ReceiverState::Ready { after_seq: 2 }
+    );
+    drop(local_b);
+    let (local_b, gated) = local(&b, binding).await;
+    assert!(matches!(
+        gated.checkpoint(a_peer, deadline()).await,
+        Err(EffectError::RestoreClosed)
+    ));
+    assert_eq!(
+        local_b.boot_closed(&observed, deadline()).await.unwrap(),
+        LocalPhase::ReconciledClosed
+    );
+    local_b.retire(deadline()).await.unwrap();
+    assert!(matches!(
+        local_b
+            .open(
+                a_peer,
+                &high,
+                &observed,
+                &promotion,
+                observed.origin().unwrap(),
+                deadline()
+            )
+            .await,
+        Err(Error::Retired)
+    ));
+    assert!(matches!(
+        local_b.boot_closed(&observed, deadline()).await,
+        Err(Error::Retired)
+    ));
+    let err = sqlx::query("UPDATE federation_restore_local SET phase='reconciled_closed'")
+        .execute(&b.pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.as_database_error().unwrap().code().as_deref(),
+        Some("23514")
+    );
+    assert!(matches!(
+        ext.seed(&first, deadline()).await,
+        Err(Error::Conflict)
+    ));
+}

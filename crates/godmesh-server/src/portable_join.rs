@@ -1435,3 +1435,115 @@ impl PortableJoin {
         Ok(true)
     }
 }
+
+#[cfg(feature = "snapshot-harness")]
+impl PortableJoin {
+    pub(crate) async fn restore_local_authority(
+        &self,
+        guard: &mut ClusterGuard<'_, '_>,
+        now: i64,
+    ) -> Result<
+        (
+            String,
+            godmesh_federation::restore_evidence::AuthorityKind,
+            [u8; 32],
+        ),
+        PortableJoinError,
+    > {
+        use godmesh_federation::restore_evidence::AuthorityKind;
+        let expiry = self.authorize_local_at(guard, now).await?;
+        let node = self.identity.node_id();
+        if expiry.is_none() {
+            return Ok((
+                node.to_owned(),
+                AuthorityKind::Genesis,
+                self.identity.public_key_bytes(),
+            ));
+        }
+        let tx = guard.transaction();
+        let record = self
+            .load_import(tx, node)
+            .await?
+            .ok_or(PortableJoinError::Issuer)?;
+        let raw = record
+            .chain_json
+            .as_deref()
+            .ok_or(PortableJoinError::Issuer)?;
+        let frame = self.frame(raw)?;
+        if record.digests.as_ref() != Some(&frame.digests) {
+            return Err(PortableJoinError::Issuer);
+        }
+        let mut digest = [0; 32];
+        hex::decode_to_slice(
+            frame.digests.last().ok_or(PortableJoinError::Issuer)?,
+            &mut digest,
+        )
+        .map_err(|_| PortableJoinError::Issuer)?;
+        Ok((frame.root_node_id, AuthorityKind::Leaf, digest))
+    }
+
+    pub(crate) async fn restore_revocations(
+        &self,
+        guard: &mut ClusterGuard<'_, '_>,
+    ) -> Result<Vec<godmesh_federation::restore_evidence::RevocationReference>, PortableJoinError>
+    {
+        use godmesh_federation::restore_evidence::RevocationReference;
+        if guard.cluster() != self.cluster() {
+            return Err(PortableJoinError::Issuer);
+        }
+        let tx = guard.transaction();
+        crate::sql_budget::refresh(tx).await?;
+        type RevocationRow = (String, String, String, String, String, String, Option<String>);
+        let rows:Vec<RevocationRow> = sqlx::query_as(
+            "SELECT v.root_node_id,v.target_digest,v.revocation_digest,v.target_chain_json,
+                    v.revocation::text,v.receipt::text,r.public_key
+             FROM federation_portable_revocations v LEFT JOIN federation_portable_roots r USING(cluster,root_node_id)
+             WHERE v.cluster=$1",
+        ).bind(self.cluster()).fetch_all(&mut **tx).await?;
+        rows.into_iter()
+            .map(
+                |(root, target, digest, raw, rev_raw, receipt_raw, root_key)| {
+                    let root_key = root_key.ok_or(PortableJoinError::Revocation)?;
+                let revocation: JoinRevocationV1 = serde_json::from_str(&rev_raw)?;
+                    let receipt: JoinRevocationReceiptV1 = serde_json::from_str(&receipt_raw)?;
+                    if receipt.root_node_id != root
+                        || receipt.cluster != self.cluster()
+                        || receipt.revocation_digest != digest
+                        || revocation.target_digest != target
+                        || self
+                            .config
+                            .pin(&root)
+                            .is_none_or(|pin| pin.public_key != root_key)
+                    {
+                        return Err(PortableJoinError::Revocation);
+                    }
+                    let frame = self.frame(&raw)?;
+                    let verified =
+                        self.verify(&frame, &raw, &frame.expected(), receipt.accepted_at)?;
+                    let (key, _) = self.revoker_key(&frame, &revocation)?;
+                    let evidence = revocation
+                        .verify_for_chain(key, &verified)
+                        .map_err(|_| PortableJoinError::Revocation)?;
+                    receipt
+                        .verify_for_revocation(&root_key, &evidence)
+                        .map_err(|_| PortableJoinError::Revocation)?;
+                    let mut item = RevocationReference {
+                        cluster: self.cluster().to_owned(),
+                        root_node_id: root,
+                        target_digest: [0; 32],
+                        revocation_digest: [0; 32],
+                        accepted_at: receipt.accepted_at,
+                        receipt_signature: [0; 64],
+                    };
+                    hex::decode_to_slice(target, &mut item.target_digest)
+                        .map_err(|_| PortableJoinError::Revocation)?;
+                    hex::decode_to_slice(digest, &mut item.revocation_digest)
+                        .map_err(|_| PortableJoinError::Revocation)?;
+                    hex::decode_to_slice(receipt.signature, &mut item.receipt_signature)
+                        .map_err(|_| PortableJoinError::Revocation)?;
+                    Ok(item)
+                },
+            )
+            .collect()
+    }
+}

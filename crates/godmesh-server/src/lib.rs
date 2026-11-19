@@ -29,5 +29,7 @@ pub mod publisher;
 pub mod replica_operational;
 pub mod replication;
 pub mod runtime;
+#[cfg(feature = "snapshot-harness")]
+pub use replica_operational::restore_lab;
 
 mod sql_budget;
