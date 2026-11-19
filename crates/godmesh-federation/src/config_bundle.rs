@@ -11,9 +11,9 @@ use crate::{
     manifest::{MAX_FIELD_LEN, push_field},
 };
 
-const PROFILE: u64 = 1;
+pub const PROFILE: u64 = 1;
 const MAX_INTEGER: u64 = i64::MAX as u64;
-const NAMESPACE: &str = "federation";
+pub const NAMESPACE: &str = "federation";
 const ENTRY_KEY: &str = "federation.minimum_protocol_version";
 const BUNDLE_DOMAIN: &[u8] = b"godmesh.federation.config.bundle.v1";
 const VOTE_DOMAIN: &[u8] = b"godmesh.federation.config.vote.v1";
@@ -32,6 +32,17 @@ pub struct BundlePolicy {
     pub epoch: u64,
     pub max_frame_bytes: NonZeroUsize,
     pub voters: Vec<PinnedVoter>,
+}
+
+impl BundlePolicy {
+    /// Valida identidade e quórum estático do perfil, sem depender de um frame.
+    pub fn validate(&self) -> Result<(), BundleError> {
+        if valid_policy(self) {
+            Ok(())
+        } else {
+            Err(BundleError::InvalidPolicy)
+        }
+    }
 }
 
 /// Componentes de versão de software comparados em ordem de major, minor e patch.
@@ -477,9 +488,7 @@ pub fn authenticate_bundle(
 ) -> Result<AuthenticatedBundle, BundleError> {
     use BundleError::*;
 
-    if !valid_policy(policy) {
-        return Err(InvalidPolicy);
-    }
+    policy.validate()?;
     if frame.len() > policy.max_frame_bytes.get() {
         return Err(FrameTooLarge);
     }
