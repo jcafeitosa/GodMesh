@@ -1,6 +1,7 @@
 //! Orquestra uma réplica M4-A2 sobre uma sessão QUIC já promovida.
 
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,18 +11,25 @@ use godmesh_federation::m4a_wire::{
     self as wire, Ack, AckClass, Batch, ErrorCode, ErrorMessage, Message, Pull, WireError,
 };
 use godmesh_federation::node::{
-    OperationalBiStream, OperationalSession, OperationalSessionHandler, SessionError, SessionLimits,
+    FederationConfig, FederationNode, LinkAuthorizer, OperationalBiStream, OperationalSession,
+    OperationalSessionHandler, SessionError, SessionLimits,
 };
+use godmesh_federation::{NodeIdentity, PeerRegistry, transport::TransportError};
 use godmesh_server::replica_operational::{
     EffectError, ReceiverState, ReplicaConfig, ReplicaService, Role, SessionPeer,
 };
 use godmesh_server::replication::{CopyPage, Error as ReplicationError, Limits};
 use tokio::{sync::Mutex, task::JoinSet, time::Instant};
 
+#[cfg(all(test, feature = "snapshot-harness"))]
+mod snapshot;
+
 pub struct ReplicaRuntime {
     service: Arc<ReplicaService>,
     receiver: Mutex<()>,
     next_request: AtomicU64,
+    #[cfg(all(test, feature = "snapshot-harness"))]
+    snapshot: Option<Arc<snapshot::SnapshotRuntime>>,
 }
 
 impl ReplicaRuntime {
@@ -30,6 +38,8 @@ impl ReplicaRuntime {
             service: Arc::new(service),
             receiver: Mutex::new(()),
             next_request: AtomicU64::new(0),
+            #[cfg(all(test, feature = "snapshot-harness"))]
+            snapshot: None,
         }
     }
 
@@ -42,25 +52,64 @@ impl ReplicaRuntime {
         }
     }
 
+    pub fn bind(
+        self: Arc<Self>,
+        identity: Arc<NodeIdentity>,
+        config: FederationConfig,
+        registry: Arc<PeerRegistry>,
+        addr: SocketAddr,
+        authorizer: Arc<dyn LinkAuthorizer>,
+    ) -> Result<FederationNode, TransportError> {
+        let limits = self.session_limits();
+        #[cfg(all(test, feature = "snapshot-harness"))]
+        if let Some(snapshot) = &self.snapshot {
+            return FederationNode::bind_with_snapshot_session_handler(
+                identity,
+                config,
+                registry,
+                addr,
+                authorizer,
+                snapshot.session_limits(limits),
+                self,
+            );
+        }
+        FederationNode::bind_with_session_handler(
+            identity, config, registry, addr, authorizer, limits, self,
+        )
+    }
+
     async fn serve(&self, session: &OperationalSession, remote: &Remote) {
         let mut tasks = JoinSet::new();
-        loop {
-            let mut stream = tokio::select! {
-                biased;
-                _ = session.cancelled() => break,
-                _ = tasks.join_next(), if !tasks.is_empty() => continue,
-                result = session.accept_bi() => match result {
-                    Ok(stream) => stream,
-                    Err(SessionError::Busy | SessionError::Timeout) => continue,
-                    Err(_) => break,
-                },
+        'serve: loop {
+            // Recolher um handler concluído não cancela a admissão em curso.
+            let accepting = session.accept_bi();
+            tokio::pin!(accepting);
+            let mut stream = loop {
+                tokio::select! {
+                    biased;
+                    _ = session.cancelled() => break 'serve,
+                    _ = tasks.join_next(), if !tasks.is_empty() => {},
+                    result = &mut accepting => match result {
+                        Ok(stream) => break stream,
+                        Err(SessionError::Busy | SessionError::Timeout) => continue 'serve,
+                        Err(_) => break 'serve,
+                    },
+                }
             };
             let service = Arc::clone(&self.service);
             let remote = remote.clone();
+            #[cfg(all(test, feature = "snapshot-harness"))]
+            let snapshot = self.snapshot.clone();
             tasks.spawn(async move {
                 let deadline = stream.deadline();
                 let _ = tokio::select! {
-                    result = serve_pull(&service, &remote, &mut stream) => result,
+                    result = serve_stream(
+                        &service,
+                        &remote,
+                        &mut stream,
+                        #[cfg(all(test, feature = "snapshot-harness"))]
+                        snapshot.as_deref(),
+                    ) => result,
                     loss = recheck(&service, &remote, deadline) => Err(loss),
                 };
             });
@@ -69,13 +118,6 @@ impl ReplicaRuntime {
     }
 
     async fn receive(&self, session: &OperationalSession, remote: &Remote, delay: Duration) {
-        // Sessões paralelas disputam a única tarefa deste namespace. O guard
-        // fica com o callback da conexão que iniciou o pull.
-        let _one_pull = tokio::select! {
-            biased;
-            _ = session.cancelled() => return,
-            guard = self.receiver.lock() => guard,
-        };
         loop {
             let cycle = tokio::select! {
                 biased;
@@ -108,7 +150,7 @@ impl ReplicaRuntime {
         for attempt in 1..=config.max_attempts.get() {
             let deadline = Instant::now() + config.attempt_timeout;
             let result = tokio::select! {
-                result = self.pull_once(session, remote, deadline) => result,
+                result = self.receiver_attempt(session, remote, deadline) => result,
                 loss = recheck(&self.service, remote, deadline) => Err(loss),
             };
             match result {
@@ -121,6 +163,34 @@ impl ReplicaRuntime {
         unreachable!("o orçamento de tentativas M4 é positivo")
     }
 
+    async fn receiver_attempt(
+        &self,
+        session: &OperationalSession,
+        remote: &Remote,
+        deadline: Instant,
+    ) -> Result<Cycle, AttemptError> {
+        // Uma reserva por runtime. Sessões paralelas disputam a mesma chave.
+        let _operation = tokio::time::timeout_at(deadline, self.receiver.lock())
+            .await
+            .map_err(|_| AttemptError::Timeout)?;
+        #[cfg(all(test, feature = "snapshot-harness"))]
+        if let Some(snapshot) = &self.snapshot
+            && let Some(cycle) = snapshot.receive(self, session, remote, deadline).await?
+        {
+            return Ok(cycle);
+        }
+        self.pull_once(session, remote, deadline).await
+    }
+
+    fn request_id(&self) -> Result<String, AttemptError> {
+        self.next_request
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map(|request| format!("{request:032x}"))
+            .map_err(|_| AttemptError::Protocol)
+    }
+
     async fn pull_once(
         &self,
         session: &OperationalSession,
@@ -131,15 +201,9 @@ impl ReplicaRuntime {
             ReceiverState::Ready { after_seq } => after_seq,
             ReceiverState::SuspendedHistory { .. } => return Ok(Cycle::Suspended),
         };
-        let request = self
-            .next_request
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
-            .map_err(|_| AttemptError::Protocol)?;
         let config = self.service.config();
         let pull = Pull {
-            request_id: format!("{request:032x}"),
+            request_id: self.request_id()?,
             namespace: namespace(config),
             destination: session.local().node_id.clone(),
             after_seq,
@@ -452,11 +516,11 @@ async fn serve_pull(
     service: &ReplicaService,
     remote: &Remote,
     stream: &mut OperationalBiStream,
+    body: &[u8],
 ) -> Result<(), AttemptError> {
     let deadline = stream.deadline();
     let config = service.config();
-    let body = io(deadline, stream.read_frame()).await?;
-    let Message::Pull(pull) = wire::decode_body(&body, config.max_frame_bytes)? else {
+    let Message::Pull(pull) = wire::decode_body(body, config.max_frame_bytes)? else {
         return Err(AttemptError::Protocol);
     };
     let source = limits(config);
@@ -514,6 +578,25 @@ async fn serve_pull(
         }
     }
     Ok(())
+}
+
+async fn serve_stream(
+    service: &ReplicaService,
+    remote: &Remote,
+    stream: &mut OperationalBiStream,
+    #[cfg(all(test, feature = "snapshot-harness"))] snapshot: Option<&snapshot::SnapshotRuntime>,
+) -> Result<(), AttemptError> {
+    #[cfg(all(test, feature = "snapshot-harness"))]
+    if let Some(snapshot) = snapshot {
+        use godmesh_federation::node::StreamOpening;
+
+        return match stream.read_opening().await? {
+            StreamOpening::A2(body) => serve_pull(service, remote, stream, &body).await,
+            StreamOpening::Snapshot(body) => snapshot.serve(service, remote, stream, &body).await,
+        };
+    }
+    let body = io(stream.deadline(), stream.read_frame()).await?;
+    serve_pull(service, remote, stream, &body).await
 }
 
 #[cfg(test)]

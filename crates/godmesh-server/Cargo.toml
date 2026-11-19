@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+snapshot-harness = ["godmesh-federation/snapshot-harness"]
+
 [dependencies]
 godmesh-core = { path = "../godmesh-core" }
 godmesh-emergency = { path = "../godmesh-emergency" }

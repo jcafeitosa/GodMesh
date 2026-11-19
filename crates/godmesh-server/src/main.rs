@@ -97,6 +97,8 @@ use godmesh_sync::pg_outbox::{PgOutbox, PgSink};
 use sqlx::postgres::PgPoolOptions;
 
 mod replica_runtime;
+#[cfg(all(test, feature = "snapshot-harness"))]
+mod snapshot_lab;
 use replica_runtime::ReplicaRuntime;
 
 /// Endereço padrão aceito **apenas** em ambiente de desenvolvimento: só loopback.
@@ -167,6 +169,8 @@ struct Config {
     database_url: String,
     migrations_dir: PathBuf,
     mode: Mode,
+    #[cfg(all(test, feature = "snapshot-harness"))]
+    snapshot_lab: Option<snapshot_lab::LabContext>,
 }
 
 /// Configuração específica do modo escolhido.
@@ -268,6 +272,8 @@ impl Config {
             database_url,
             migrations_dir,
             mode,
+            #[cfg(all(test, feature = "snapshot-harness"))]
+            snapshot_lab: None,
         })
     }
 }
@@ -568,6 +574,15 @@ fn spawn_configuration_lifecycle(
 
 /// Conecta, migra, e serve até receber sinal de término (ou só migra).
 async fn run(config: Config) -> Result<(), String> {
+    #[cfg(all(test, feature = "snapshot-harness"))]
+    let lab = {
+        if config.snapshot_lab.is_some()
+            && !matches!(config.mode, Mode::Serve { replica: Some(_), .. })
+        {
+            return Err("snapshot de laboratório exige réplica M4 configurada".to_owned());
+        }
+        config.snapshot_lab
+    };
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect(&config.database_url)
@@ -647,7 +662,14 @@ async fn run(config: Config) -> Result<(), String> {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-                Some(Arc::new(ReplicaRuntime::new(replica)))
+                let runtime = ReplicaRuntime::new(replica);
+                #[cfg(all(test, feature = "snapshot-harness"))]
+                let runtime = if let Some(lab) = lab {
+                    runtime.with_snapshot(lab, Arc::clone(&identity)).await?
+                } else {
+                    runtime
+                };
+                Some(Arc::new(runtime))
             } else {
                 None
             };
@@ -751,14 +773,12 @@ async fn run(config: Config) -> Result<(), String> {
                 }) as Arc<dyn LinkAuthorizer>
             });
             let node = match (replica_runtime, authorizer) {
-                (Some(handler), Some(authorizer)) => FederationNode::bind_with_session_handler(
+                (Some(handler), Some(authorizer)) => handler.bind(
                     Arc::clone(&identity),
                     listener_config,
                     Arc::clone(&registry),
                     listener_bind,
                     authorizer,
-                    handler.session_limits(),
-                    handler,
                 ),
                 (Some(_), None) => {
                     return Err("m4_preflight_mismatch: a réplica exige autorização portátil".to_owned());
