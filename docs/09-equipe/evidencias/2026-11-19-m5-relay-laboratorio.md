@@ -40,6 +40,6 @@ O candidato `ae5aa29fc149db6e609564636ac6402541ec2d8e` inclui o reforço das neg
 
 Na revogação sem sinal em IPv4-mapped, com poll M3 de 650 ms e rechecagem do enlace M3 de 750 ms, R registrou D1 bloqueada em até 213,5 ms desde antes da atualização transacional. D2 confirmou 3. A retomada em IPv6 promoveu os dois enlaces depois do reinício, mas só um destino confirmou 3. A rodada IPv4-mapped falhou antes da posição 2. O tempo registrado no build diagnóstico anterior distingue a espera pelo guard da execução interna. Ainda falta medir separadamente crédito e rechecagem sob a mesma carga antes de atribuir as falhas a uma etapa única.
 
-As suítes do workspace desse candidato passaram em PostgreSQL 16.15. A configuração padrão aprovou 658 testes com um ignorado. Com todas as features, 696 passaram e oito ficaram ignorados, incluindo os três compostos executados separadamente. Clippy estrito em ambos os perfis e `git diff --check` passaram. O código permanece no candidato local.
+As suítes do workspace desse candidato passaram em PostgreSQL 16.15. A configuração padrão aprovou 658 testes com um ignorado. Com todas as features, 696 passaram e oito ficaram ignorados, incluindo os três compostos executados separadamente. Clippy estrito em ambos os perfis e `git diff --check` passaram. O merge local `1c9ae84` integrou o código de laboratório à `main`. O código, as dependências e as migrações coincidem com o candidato ensaiado.
 
 O aceite M5 e o ensaio em três hosts Linux independentes seguem pendentes.
