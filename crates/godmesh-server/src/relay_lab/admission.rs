@@ -159,8 +159,9 @@ impl RelayAdmission {
         })
     }
 
-    #[cfg(test)]
-    pub(super) fn with_clock(mut self, clock: Arc<dyn Fn() -> Duration + Send + Sync>) -> Self {
+    /// Relógio de autoridade injetável pela fixture de harness (não compõe o runtime).
+    #[cfg(feature = "relay-harness")]
+    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> Duration + Send + Sync>) -> Self {
         self.clock = clock;
         self
     }

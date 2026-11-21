@@ -34,5 +34,5 @@ pub use replica_operational::restore_lab;
 
 mod sql_budget;
 
-#[cfg(feature = "snapshot-harness")]
+#[cfg(feature = "relay-harness")]
 pub mod relay_lab;

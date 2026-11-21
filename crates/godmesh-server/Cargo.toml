@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [features]
 snapshot-harness = ["godmesh-federation/snapshot-harness"]
+relay-harness = ["godmesh-federation/relay-harness"]
 
 [dependencies]
 godmesh-core = { path = "../godmesh-core" }

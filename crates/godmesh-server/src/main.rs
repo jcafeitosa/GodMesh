@@ -95,6 +95,8 @@ use godmesh_server::{federation, migrate, runtime};
 use godmesh_sync::pg_outbox::{PgOutbox, PgSink};
 use sqlx::postgres::PgPoolOptions;
 
+#[cfg(all(test, feature = "relay-harness"))]
+mod relay_process;
 mod replica_runtime;
 #[cfg(all(test, feature = "snapshot-harness"))]
 mod restore_process;
@@ -174,6 +176,8 @@ struct Config {
     snapshot_lab: Option<(snapshot_lab::LabContext, snapshot_lab::LabRegistration)>,
     #[cfg(all(test, feature = "snapshot-harness"))]
     restore_process: Option<restore_process::RestoreProcess>,
+    #[cfg(all(test, feature = "relay-harness"))]
+    relay_process: Option<relay_process::Selection>,
 }
 
 /// Configuração específica do modo escolhido.
@@ -279,6 +283,8 @@ impl Config {
             snapshot_lab: None,
             #[cfg(all(test, feature = "snapshot-harness"))]
             restore_process: None,
+            #[cfg(all(test, feature = "relay-harness"))]
+            relay_process: None,
         })
     }
 }
@@ -582,6 +588,10 @@ async fn prepare_database(config: &Config) -> Result<sqlx::PgPool, String> {
     if let Some(restore) = &config.restore_process {
         return restore.connect_target(&config.database_url).await;
     }
+    #[cfg(all(test, feature = "relay-harness"))]
+    if let Some(selection) = &config.relay_process {
+        selection.verify_url(&config.database_url)?;
+    }
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect(&config.database_url)
@@ -591,6 +601,10 @@ async fn prepare_database(config: &Config) -> Result<sqlx::PgPool, String> {
     #[cfg(all(test, feature = "snapshot-harness"))]
     if let Some((_, registration)) = &config.snapshot_lab {
         registration.verify_database(&pool).await?;
+    }
+    #[cfg(all(test, feature = "relay-harness"))]
+    if let Some(selection) = &config.relay_process {
+        selection.verify_allocation(&pool).await?;
     }
 
     let report = migrate::migrate(&pool, &config.migrations_dir)
@@ -625,7 +639,17 @@ async fn run(config: Config) -> Result<(), String> {
             return Err("laboratório exige réplica M4 configurada".to_owned());
         }
     }
+    #[cfg(all(test, feature = "relay-harness", feature = "snapshot-harness"))]
+    if config.relay_process.is_some()
+        && (config.snapshot_lab.is_some() || config.restore_process.is_some())
+    {
+        return Err("use um único contexto de laboratório por processo".into());
+    }
     let pool = prepare_database(&config).await?;
+    #[cfg(all(test, feature = "relay-harness"))]
+    let relay_process = config.relay_process;
+    #[cfg(all(test, feature = "relay-harness"))]
+    let mut relay_runtime = None;
     #[cfg(all(test, feature = "snapshot-harness"))]
     let lab = config.snapshot_lab;
     #[cfg(all(test, feature = "snapshot-harness"))]
@@ -672,7 +696,13 @@ async fn run(config: Config) -> Result<(), String> {
         (Preflight::Disabled, None, _) if replica.is_some() => {
             return Err("m4_preflight_mismatch: a réplica exige M1C e M3 configuradas".to_owned());
         }
-        (Preflight::Disabled, None, _) => (None, None),
+        (Preflight::Disabled, None, _) => {
+            #[cfg(all(test, feature = "relay-harness"))]
+            if relay_process.is_some() {
+                return Err("relay de laboratório exige M1C e M3".into());
+            }
+            (None, None)
+        }
         (Preflight::Enabled(service), Some(config), Some(portable)) => {
             let service = Arc::new(service);
             let replica_runtime = if let Some(replica) = replica {
@@ -733,6 +763,21 @@ async fn run(config: Config) -> Result<(), String> {
                 )
                 .map_err(|error| format!("configuração M3: {error}"))?,
             );
+            #[cfg(all(test, feature = "relay-harness"))]
+            if let Some(lab) = relay_process {
+                let endpoint = federation_listener
+                    .as_ref()
+                    .ok_or("relay de laboratório exige listener QUIC")?
+                    .bind;
+                relay_runtime = Some(lab.prepare(
+                    &identity,
+                    endpoint,
+                    Arc::clone(portable),
+                    Arc::clone(plane.state()),
+                    replica_runtime.clone(),
+                    Some(plane.changes()),
+                )?);
+            }
             let tls_listener = tokio::net::TcpListener::bind(https_addr)
                 .await
                 .map_err(|error| format!("listener HTTPS de configuração: {error}"))?;
@@ -810,6 +855,21 @@ async fn run(config: Config) -> Result<(), String> {
                 }) as Arc<dyn LinkAuthorizer>
             });
             let node = match (replica_runtime, authorizer) {
+                #[cfg(all(test, feature = "relay-harness"))]
+                (_, Some(authorizer)) if relay_runtime.is_some() => {
+                    let lab = relay_runtime.as_ref().expect("contexto M5");
+                    let handler: Arc<dyn godmesh_federation::node::OperationalSessionHandler> =
+                        lab.clone();
+                    FederationNode::bind_with_session_handler(
+                        Arc::clone(&identity),
+                        listener_config,
+                        Arc::clone(&registry),
+                        lab.bind_addr(),
+                        authorizer,
+                        lab.limits(),
+                        handler,
+                    )
+                }
                 (Some(handler), Some(authorizer)) => handler.bind(
                     Arc::clone(&identity),
                     listener_config,
@@ -842,13 +902,23 @@ async fn run(config: Config) -> Result<(), String> {
         }
     };
 
-    let peer_task = runtime_federation.as_ref().map(|node| {
+    let maintain_peers = |node: &Arc<FederationNode>| {
         godmesh_server::peer_maintenance::spawn(
             pool.clone(),
             Arc::clone(node),
             peers_refresh,
             shutdown_rx.clone(),
         )
+    };
+    #[cfg(not(all(test, feature = "relay-harness")))]
+    let peer_task = runtime_federation.as_ref().map(maintain_peers);
+    #[cfg(all(test, feature = "relay-harness"))]
+    let peer_task = runtime_federation.as_ref().and_then(|node| {
+        if let Some(lab) = &relay_runtime {
+            lab.attach(node);
+            return lab.dial_relay(Arc::clone(node), shutdown_rx.clone());
+        }
+        Some(maintain_peers(node))
     });
 
     // Só inicia tarefas de controle após a montagem dos listeners.
